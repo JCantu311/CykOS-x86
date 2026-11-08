@@ -63,4 +63,3 @@ truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"
 echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."
-

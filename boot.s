@@ -4,37 +4,37 @@ extern kernel_main
 
 section .boot
 _start:
-    ; 1. Set up standard 16-bit segment environment
+    ; 1. Clear interrupts and set up absolute clean segment environments
     cli
     xor ax, ax
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00          ; Initialize stack pointer below MBR
+    mov sp, 0x7C00          ; Initialize stack pointer below MBR code base
 
-    ; Save the physical boot drive ID passed to us by BIOS in DL register
+    ; Save the physical boot drive ID passed by BIOS
     mov [BOOT_DRIVE], dl
 
-    ; 2. Reset the disk controller to clear any cached states
+    ; 2. Reset the disk controller
     xor ax, ax
     mov dl, [BOOT_DRIVE]
     int 0x13
 
     ; 3. LOAD KERNEL FROM DISK (Read 16 sectors into memory address 0x9000)
     mov ax, 0x0000
-    mov es, ax              ; ES = 0x0000
-    mov bx, 0x9000          ; BX = 0x9000 (Target buffer = ES:BX = 0x0000:0x9000)
+    mov es, ax              
+    mov bx, 0x9000          ; Target buffer = 0x0000:0x9000
 
-    mov ah, 0x02            ; BIOS Read Sectors function code
-    mov al, 16              ; Load 16 sectors (8 KB space for kernel)
+    mov ah, 0x02            ; BIOS Read Sectors function
+    mov al, 16              ; Load 16 sectors
     mov ch, 0               ; Cylinder 0
     mov dh, 0               ; Head 0
-    mov cl, 2               ; Start reading at Sector 2 (Sector 1 is this MBR)
-    mov dl, [BOOT_DRIVE]    ; Use saved drive ID
-    int 0x13                ; Call BIOS Disk Interrupt
-    jc disk_error           ; If carry flag is set, hardware error occurred!
+    mov cl, 2               ; Start reading at Sector 2
+    mov dl, [BOOT_DRIVE]    
+    int 0x13                
+    jc disk_error           ; If carry flag set, handle hardware error
 
-    ; 4. Enable A20 Line
+    ; 4. Enable A20 Line via System Control Port A
     in al, 0x92
     or al, 2
     out 0x92, al
@@ -47,19 +47,47 @@ _start:
     or eax, 1
     mov cr0, eax
 
-    ; 7. Far jump to load the 32-bit Code Segment
+    ; 7. Far jump to clear prefetch queue and load 32-bit Code Segment
     jmp CODE_SEG:init_32bit
 
 disk_error:
     mov ax, 0xB800
     mov es, ax
-    mov word [es:0x0000], 0x0C45
+    mov word [es:0x0000], 0x0C45 ; Bright red 'E' on top left
 .error_loop:
     cli
     hlt
     jmp .error_loop
 
+
+[bits 32]
+section .kernel_entry
+init_32bit:
+    ; Load 32-bit Data tracking state registers
+    mov ax, DATA_SEG
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    ; Relocate stack to a completely empty, safe zone (0x70000) away from VGA memory
+    mov esp, 0x70000        
+
+    ; ASSEMBLY DIAGNOSTIC: Force write a green 'A' to the second character slot
+    ; If you see a green 'A' but nothing else, your assembly works and the C kernel is breaking!
+    mov word [0xB8002], 0x0A41
+
+    ; Jump directly to your C kernel!
+    call kernel_main        
+
+.halt:
+    cli
+    hlt
+    jmp .halt
+
 ; --- Global Descriptor Table Layout ---
+align 4
 gdt_start:
 gdt_null:
     dd 0x0, 0x0
@@ -78,28 +106,7 @@ gdt_descriptor:
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
 
-BOOT_DRIVE: db 0            ; Memory location to save drive index
+BOOT_DRIVE: db 0            
 
 section .mbr_signature
     dw 0xAA55
-
-; NEW: This section will be caught by the linker script and placed explicitly at 0x9000
-section .kernel_entry
-[bits 32]
-init_32bit:
-    ; Load 32-bit Data tracking state registers
-    mov ax, DATA_SEG
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-
-    mov esp, 0x90000        ; Large stable stack region
-
-    call kernel_main        ; Safe to jump directly to C kernel now!
-
-.halt:
-    cli
-    hlt
-    jmp .halt
