@@ -101,3 +101,25 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     }
     return 0;
 }
+
+unsigned char inb(unsigned short port) {
+    unsigned char result;
+    __asm__ volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+void outb(unsigned short port, unsigned char data) {
+    __asm__ volatile("outb %0, %1" :: "a"(data), "Nd"(port));
+}
+
+// Read a 16-bit word from an I/O port (vital for ATA PIO data transfers)
+unsigned short inw(unsigned short port) {
+    unsigned short result;
+    __asm__ volatile("inw %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+// Write a 16-bit word to an I/O port
+void outw(unsigned short port, unsigned short data) {
+    __asm__ volatile("outw %0, %1" :: "a"(data), "Nd"(port));
+}
