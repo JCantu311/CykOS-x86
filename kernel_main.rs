@@ -59,6 +59,7 @@ pub extern "C" fn kernel_main() -> ! {
     const BLANK_SPACE: u16 = 0x0F20; // Space character, white on black
 
     unsafe {
+        memtest_dword(vga_buffer as *mut u32, SCREEN_SIZE / 2);
         // 1. Clear the screen using strict volatile writes
         for i in 0..SCREEN_SIZE {
             write_volatile(vga_buffer.add(i), BLANK_SPACE);
