@@ -11,23 +11,22 @@ if [ ! -d "$RUST_SRC/core" ]; then
     rustup +nightly component add rust-src
 fi
 
-# 0b. Build the compiler_builtins stub without looking for a pre-existing core crate
-echo '#![no_std] #![feature(compiler_builtins)] pub mod mem { pub use core::intrinsics::{memcpy, memset, memcmp, memmove}; }' > builtins_stub.rs
+# 0b. Build the compiler_builtins stub using #![no_core] and -Zunstable-options
+echo '#![no_core] #![feature(no_core, compiler_builtins)] pub mod mem {}' > builtins_stub.rs
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
-  -Zno-core \
+  -Zforce-unstable-if-unmarked \
   --crate-type rlib \
   --crate-name compiler_builtins \
   builtins_stub.rs \
   -O --out-dir .
 
-# 0c. Compile libcore from source using -Zno-core, passing the newly minted builtins rlib
+# 0c. Compile libcore from source, passing the newly minted builtins rlib
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
   -Zforce-unstable-if-unmarked \
-  -Zno-core \
   --extern compiler_builtins=libcompiler_builtins.rlib \
   --crate-type rlib \
   --crate-name core \
