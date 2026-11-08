@@ -33,7 +33,8 @@ void kernel_main(void) {
         print_color_string(msg_fail, VGA_RED);
     }
 
-    char* cykaos_version = "CykOS v0.0.1\n\0";
+    char cykaos_version[] = "CykOS v0.0.1\n\0";
+
     print_string(cykaos_version);
     
     while (1) {
