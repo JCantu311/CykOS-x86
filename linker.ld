@@ -6,13 +6,13 @@ SECTIONS
     /* Sector 1: The Master Boot Record (MBR) */
     . = 0x7C00;
     .boot_sector : {
-        bin/boot.o(.boot)
+        *(.boot)          /* Clean match: search all files for the .boot section */
     }
 
     /* Force the MBR signature exactly at byte 510 of the file */
     . = 0x7C00 + 510;
     .mbr_sig : {
-        bin/boot.o(.mbr_signature)
+        *(.mbr_signature) /* Clean match: search all files for the signature */
     }
 
     /* Sector 2+: The Actual Kernel Code */
