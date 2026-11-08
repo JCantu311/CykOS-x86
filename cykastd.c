@@ -3,7 +3,6 @@
 // Tracking variables scoped internally to this module
 static int cursor_x = 0;
 static int cursor_y = 0;
-static const unsigned char DEFAULT_COLOR = 0x0F; // White text on black background
 
 void clear_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
