@@ -17,21 +17,13 @@ SECTIONS
     }
 
     /* Sector 2+: The Kernel Arena */
-    /* VMA Execution mapping Base = 0x9000, LMA Physical File Offset = 512 */
     . = 0x9000;
 
     .text : AT(0x7C00 + 512) {
-        bin/boot.o(.text*)       /* 32-bit entry code must map FIRST */
-        *(.text*)                /* All executive code text routines */
-    }
-
-    /* FIX: Move read-only strings here so they accurately align with 0x9000 offsets */
-    .rodata : {
-        *(.rodata*)
-    }
-
-    .data : {
-        *(.data*)
+        bin/boot.o(.text*)       /* 32-bit assembly entry landing code goes FIRST */
+        *(.text*)                /* All executive code routines */
+        *(.rodata*)              /* Merge read-only data straight into text */
+        *(.data*)                /* Merge initialized global data variables */
     }
 
     .bss : {
