@@ -13,6 +13,11 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     return 1; 
 }
 
+int disk_test(void) {
+    // TODO: Disk test implementation
+    return 1;
+}
+
 void kernel_main(void) {
     clear_screen();
     
@@ -38,6 +43,14 @@ void kernel_main(void) {
     print_string(cykaos_version);
 
     char welcome_message[] = "Welcome to CykOS...\n";
+
+    char disk_test[] = "Running Disk Test...\n";
+
+    if(disk_test == 1) {
+        print_color_string(msg_fail, VGA_RED);
+    } else if(disk_test == 0) {
+        print_color_string(msg_pass, VGA_GREEN);
+    }
 
     print_color_string(welcome_message, VGA_GREEN);
     
