@@ -13,9 +13,9 @@ pub extern "C" fn kernel_main() -> ! {
 
     unsafe {
         for i in 0..SCREEN_SIZE {
-            *vga_buffer.add(i) = BLANK_SPACE;
+            *vga_buffer.offset(i as isize) = BLANK_SPACE;
         }
-        
+
         *vga_buffer.offset(0) = 0x0F4F; // Bright White 'O'
         *vga_buffer.offset(1) = 0x0F4B; // Bright White 'K'
     }
