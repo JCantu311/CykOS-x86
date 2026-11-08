@@ -4,6 +4,11 @@
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 #define VGA_ADDRESS 0xB8000
+#define VGA_RED 0x4
+#define VGA_GREEN 0x2
+#define VGA_BLUE 0x1
+#define VGA_WHITE 0x7
+#define DEFAULT_COLOR VGA_WHITE
 typedef unsigned int size_t;
 
 // Public function declarations

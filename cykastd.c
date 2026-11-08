@@ -75,3 +75,23 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     }
     return 0;
 }
+
+void print_color_string(const char* str, unsigned char color) {
+    unsigned int full_char = 0x0000;
+    full_char = color * 0x100;
+    for(int i = 0; str[i] != '\0'; i++) {
+        unsigned short* vga = (unsigned short*)VGA_ADDRESS;
+        int index = (cursor_y * VGA_WIDTH) + cursor_x;
+        vga[index] = full_char | str[i];
+        cursor_x++;
+
+        if (cursor_x >= VGA_WIDTH) {
+            cursor_x = 0;
+            cursor_y++;
+        }
+
+        if (cursor_y >= VGA_HEIGHT) {
+            scroll_screen();
+        }
+    }
+}

@@ -17,13 +17,15 @@ SECTIONS
     }
 
     /* Sector 2+: The Kernel Arena */
-    /* This section starts exactly at file offset 512 bytes, but */
-    /* targets execution mapping inside memory address 0x9000 */
     . = 0x9000;
+    
+    /* Code section sits perfectly at the front of the load zone */
     .text : AT(0x7C00 + 512) {
         *(.text*)
-        *(.rodata*)
-        *(.data*)
-        *(.bss*)
     }
+
+    /* Read-only data, globals, and bss follow sequentially */
+    .rodata : { *(.rodata*) }
+    .data   : { *(.data*) }
+    .bss    : { *(.bss*) }
 }
