@@ -36,6 +36,7 @@ void kernel_main(void) {
     char cykaos_version[] = "CykOS v0.0.1\n\0";
 
     print_string(cykaos_version);
+    print_string("Welcome to CykOS...\n");
     
     while (1) {
         asm("hlt");
