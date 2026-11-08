@@ -51,37 +51,13 @@ _start:
     jmp CODE_SEG:init_32bit
 
 disk_error:
-    ; Fix: Set up ES segment register to point to the VGA window base (0xB800)
     mov ax, 0xB800
     mov es, ax
-    
-    ; Now write a bright red 'E' to the top-left slot (ES:0x0000 = 0xB8000)
     mov word [es:0x0000], 0x0C45
-
 .error_loop:
     cli
     hlt
     jmp .error_loop
-
-
-[bits 32]
-init_32bit:
-    ; Load 32-bit Data tracking state registers
-    mov ax, DATA_SEG
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-
-    mov esp, 0x90000        ; Large stable stack region
-
-    call kernel_main        ; Jump directly to your C kernel!
-
-.halt:
-    cli
-    hlt
-    jmp .halt
 
 ; --- Global Descriptor Table Layout ---
 gdt_start:
@@ -106,3 +82,24 @@ BOOT_DRIVE: db 0            ; Memory location to save drive index
 
 section .mbr_signature
     dw 0xAA55
+
+; NEW: This section will be caught by the linker script and placed explicitly at 0x9000
+section .kernel_entry
+[bits 32]
+init_32bit:
+    ; Load 32-bit Data tracking state registers
+    mov ax, DATA_SEG
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    mov esp, 0x90000        ; Large stable stack region
+
+    call kernel_main        ; Safe to jump directly to C kernel now!
+
+.halt:
+    cli
+    hlt
+    jmp .halt

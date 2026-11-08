@@ -19,8 +19,9 @@ SECTIONS
     /* Sector 2+: The Kernel Arena */
     . = 0x9000;
     
-    /* Code section sits perfectly at the front of the load zone */
+    /* Enforce that the assembly entry point sits perfectly at 0x9000 */
     .text : AT(0x7C00 + 512) {
+        *(.kernel_entry)
         *(.text*)
     }
 
