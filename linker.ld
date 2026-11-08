@@ -3,23 +3,17 @@ OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Sector 1: MBR Code Space */
+    /* Sector 1: Boot Sector begins at address 0x7C00 */
     . = 0x7C00;
-    
-    .boot_sector : {
-        bin/boot.o(.boot)
+    .boot : {
+        bin/boot.o(.text*)
     }
 
-    . = 0x7C00 + 510;
-    .mbr_sig : {
-        bin/boot.o(.mbr_signature)
-    }
-
-    /* Sector 2+: Placed immediately at byte 512, executes at 0x9000 */
+    /* Sector 2+: Placed immediately at byte 512, compiled to execute at 0x9000 */
     .text 0x9000 : AT(0x7C00 + 512) {
-        bin/kstart.o(.kstart) /* 1. Force the isolated 32-bit entry code first */
-        bin/kernel.o(.text*)  /* 2. Place kernel_main second */
-        *(.text*)             /* 3. Place remaining helper functions third */
+        bin/kstart.o(.kstart)
+        bin/kernel.o(.text*)
+        *(.text*)
     }
 
     .rodata : { *(.rodata*) }
