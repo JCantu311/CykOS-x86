@@ -30,7 +30,7 @@ _start:
     mov bx, 0x9000          
     
     mov ah, 0x02            
-    mov al, 16              
+    mov al, 32
     mov ch, 0               
     mov dh, 0               
     mov cl, 2               

@@ -49,7 +49,7 @@ $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-
 $LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
 # 6. Pad binary out cleanly to exactly 17 sectors
-truncate -s 8704 bin/os_image.bin
+truncate -s 16896 bin/os_image.bin
 
 echo "----------------------------------------"
-echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."
+echo "Build successful! Standardized bin/os_image.bin to 16896 bytes."
