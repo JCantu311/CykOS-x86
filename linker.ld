@@ -19,10 +19,11 @@ SECTIONS
     /* Sector 2+: The Kernel Arena */
     . = 0x9000;
 
+    /* CRITICAL FIX: All references within this block inherit the 0x9000 runtime base */
     .text : AT(0x7C00 + 512) {
         bin/boot.o(.text*)       /* 32-bit assembly entry landing code goes FIRST */
         *(.text*)                /* All executive code routines */
-        *(.rodata*)              /* Merge read-only data straight into text */
+        *(.rodata*)              /* Global string literals and constants now resolve correctly! */
         *(.data*)                /* Merge initialized global data variables */
     }
 

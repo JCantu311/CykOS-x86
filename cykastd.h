@@ -19,7 +19,12 @@ void print_string(const char* str);
 int strncmp(const char* str1, const char* str2, size_t n);
 void print_color_string(const char* str, unsigned char color);
 
-// NEW: Runtime address layout resolution tool
-const char* fix_ptr(const char* str);
+// NEW: Hardware Port Communication Wrappers
+unsigned char inb(unsigned short port);
+void outb(unsigned short port, unsigned char data);
+
+// NEW: Keyboard Engine
+char get_scancode(void);
+char scancode_to_ascii(unsigned char scancode);
 
 #endif // CYKASTD_H

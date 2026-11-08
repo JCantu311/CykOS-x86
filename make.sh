@@ -46,7 +46,7 @@ $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fn
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wextra
 
 # 5. Link unified elements passing explicit non-PIE layout flags to the linker
-$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie --image-base=0x0 bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
 # 6. Pad binary out cleanly to exactly 17 sectors
 truncate -s 8704 bin/os_image.bin
