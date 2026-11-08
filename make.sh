@@ -15,7 +15,6 @@ elif command -v i686-elf-gcc &> /dev/null; then
 elif command -v gcc &> /dev/null; then
     if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "armv7l" ]]; then
         echo "Error: Native 'gcc' on this machine outputs ARM code!" >&2
-        echo "You are running on an ARM host ($HOST_ARCH) and need an x86 cross-compiler." >&2
         exit 1
     else
         CC="gcc"
@@ -39,23 +38,19 @@ else
     exit 1
 fi
 
-echo "Host Architecture: $HOST_ARCH"
-echo "Using Compiler:    $CC"
-echo "Using Linker:      $LD"
-echo "----------------------------------------"
-
-# 3. Assemble boot.s into object code format
+# 3. Assemble both separate files into explicit 32-bit ELF modules
 nasm -f elf32 boot.s -o bin/boot.o
+nasm -f elf32 kstart.s -o bin/kstart.o
 
-# 4. Compile the modules with strict absolute flat-addressing rules
+# 4. Compile remaining C components
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 
-# 5. Link everything into the precise raw disk structure layout
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+# 5. Link everything via the explicit object sequence
+$LD -m elf_i386 -T linker.ld bin/boot.o bin/kstart.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-# 6. Pad output out to exactly 17 disk sectors (512 * 17 = 8704 bytes)
+# 6. Pad to exactly 17 sectors
 truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"
-echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."
+echo "Build successful! Unified bin/os_image.bin to 8704 bytes."

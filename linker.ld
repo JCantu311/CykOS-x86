@@ -3,23 +3,23 @@ OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Sector 1: Explicit MBR boundary */
+    /* Sector 1: MBR Code Space */
     . = 0x7C00;
     
     .boot_sector : {
-        *(.boot)
+        bin/boot.o(.boot)
     }
 
     . = 0x7C00 + 510;
     .mbr_sig : {
-        *(.mbr_signature)
+        bin/boot.o(.mbr_signature)
     }
 
-    /* Sector 2+: The Kernel Arena */
+    /* Sector 2+: Placed immediately at byte 512, executes at 0x9000 */
     .text 0x9000 : AT(0x7C00 + 512) {
-        *(.kernel_entry)    /* 1. Assembly entry wrapper code first */
-        bin/kernel.o(.text*) /* 2. Force kernel.o code directly second */
-        *(.text*)           /* 3. All remaining helper code modules (cykastd.o) */
+        bin/kstart.o(.kstart) /* 1. Force the isolated 32-bit entry code first */
+        bin/kernel.o(.text*)  /* 2. Place kernel_main second */
+        *(.text*)             /* 3. Place remaining helper functions third */
     }
 
     .rodata : { *(.rodata*) }
