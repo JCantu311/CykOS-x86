@@ -32,7 +32,7 @@ rustc +nightly --target i686-unknown-none.json \
   -C panic=abort \
   -O \
   --emit=obj \
-  main.rs -o main.o
+  kernel_main.rs -o main.o
 
 # 3. Link using LLVM's lld (explicitly stating x86 emulation)
 ld.lld -m elf_i386 -T linker.ld boot.o main.o -o os_image.elf
