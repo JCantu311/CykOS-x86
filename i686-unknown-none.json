@@ -12,5 +12,5 @@
   "panic-strategy": "abort",
   "disable-redzone": true,
   "features": "+soft-float,-x87,+sse,+sse2",
-  "rustc-abi": "x86-softfloat"
+  "rustc-abi": "softfloat"
 }
