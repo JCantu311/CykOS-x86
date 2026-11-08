@@ -4,52 +4,63 @@ extern kernel_main
 
 section .boot
 _start:
-    ; 1. Clear interrupts and setup standard 16-bit segment space
+    ; 1. Set up standard 16-bit segment environment
     cli
     xor ax, ax
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00          ; Keep boot stack below MBR address
+    mov sp, 0x7C00          ; Initialize stack pointer below MBR
 
-    ; Save the boot drive identifier number passed to us by the BIOS in DL register
+    ; Save the physical boot drive ID passed to us by BIOS in DL register
     mov [BOOT_DRIVE], dl
 
-    ; 2. LOAD KERNEL FROM DISK BEFORE WE SWITCH MODES
-    mov bx, 0x9000          ; Target destination memory buffer (ES:BX = 0x0000:0x9000)
-    mov ah, 0x02            ; BIOS Read Sectors function
-    mov al, 16              ; Number of sectors to read (16 sectors * 512 bytes = 8KB)
+    ; 2. Reset the disk controller to clear any cached states
+    xor ax, ax
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+
+    ; 3. LOAD KERNEL FROM DISK (Read 16 sectors into memory address 0x9000)
+    mov ax, 0x0000
+    mov es, ax              ; ES = 0x0000
+    mov bx, 0x9000          ; BX = 0x9000 (Target buffer = ES:BX = 0x0000:0x9000)
+
+    mov ah, 0x02            ; BIOS Read Sectors function code
+    mov al, 16              ; Load 16 sectors (8 KB space for kernel)
     mov ch, 0               ; Cylinder 0
     mov dh, 0               ; Head 0
-    mov cl, 2               ; Start reading at Sector 2 (Sector 1 is this MBR!)
-    mov dl, [BOOT_DRIVE]    ; Use the saved boot drive index
-    int 0x13                ; Call BIOS interrupt to execute disk read
-    jc disk_error           ; If carry flag is set, the read failed! Jump to trap.
+    mov cl, 2               ; Start reading at Sector 2 (Sector 1 is this MBR)
+    mov dl, [BOOT_DRIVE]    ; Use saved drive ID
+    int 0x13                ; Call BIOS Disk Interrupt
+    jc disk_error           ; If carry flag is set, hardware error occurred!
 
-    ; 3. Enable A20 Line
+    ; 4. Enable A20 Line
     in al, 0x92
     or al, 2
     out 0x92, al
 
-    ; 4. Load Global Descriptor Table
+    ; 5. Load Global Descriptor Table
     lgdt [gdt_descriptor]
 
-    ; 5. Switch to 32-bit Protected Mode
+    ; 6. Switch to 32-bit Protected Mode
     mov eax, cr0
     or eax, 1
     mov cr0, eax
 
-    ; 6. Far jump to clear prefetch queue and execute 32-bit segment code
+    ; 7. Far jump to load the 32-bit Code Segment
     jmp CODE_SEG:init_32bit
 
 disk_error:
-    ; Trap the CPU if we failed to read the drive sectors
+    ; Hardware indicator: Write a bright red 'E' to top left of screen on failure
+    mov word [0xb8000], 0x0C45
+.error_loop:
+    cli
     hlt
-    jmp disk_error
+    jmp .error_loop
 
 [bits 32]
 init_32bit:
-    ; Set up 32-bit Data segment tracking states
+    ; Load 32-bit Data tracking state registers
     mov ax, DATA_SEG
     mov ds, ax
     mov es, ax
@@ -57,9 +68,9 @@ init_32bit:
     mov gs, ax
     mov ss, ax
 
-    mov esp, 0x90000        ; Establish a large 32-bit stack
+    mov esp, 0x90000        ; Large stable stack region
 
-    call kernel_main        ; Execute your C environment!
+    call kernel_main        ; Jump directly to your C kernel!
 
 .halt:
     cli
@@ -85,8 +96,7 @@ gdt_descriptor:
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
 
-BOOT_DRIVE: db 0            ; Variable to store the physical drive ID
+BOOT_DRIVE: db 0            ; Memory location to save drive index
 
-; Place the MBR boot signature at the exact end of Sector 1
 section .mbr_signature
     dw 0xAA55
