@@ -11,12 +11,12 @@ if [ ! -d "$RUST_SRC/core" ]; then
     rustup +nightly component add rust-src
 fi
 
-# 0b. Compile libcore standalone using -Zno-compile-builtins
+# 0b. Compile libcore and its compiler_builtins stubs simultaneously into an rlib
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
   -Zforce-unstable-if-unmarked \
-  -Zno-compile-builtins \
+  --cfg=bootstrap \
   --crate-type rlib \
   --crate-name core \
   "$RUST_SRC/core/src/lib.rs" \
