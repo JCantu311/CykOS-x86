@@ -48,12 +48,7 @@ rustc +nightly --target i686-unknown-none.json \
   --emit=obj \
   kernel_main.rs -o main.o
 
-# 3. Link using LLVM's lld
-ld.lld -m elf_i386 -T linker.ld boot.o main.o -o os_image.elf
-
-# 4. Extract flat binary using the sysroot LLVM toolset path
-LLVM_TOOLS_PATH=$(rustc +nightly --print sysroot)/lib/rustlib/aarch64-unknown-linux-gnu/bin
-$LLVM_TOOLS_PATH/llvm-objcopy -O binary os_image.elf os_image.bin
-
+# 3. Link using LLVM's lld (outputs a flat binary directly due to OUTPUT_FORMAT("binary"))
+ld.lld -m elf_i386 -T linker.ld boot.o main.o -o os_image.bin
 
 echo "Build successful! Created os_image.bin"
