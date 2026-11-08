@@ -3,9 +3,8 @@
 
 use core::panic::PanicInfo;
 
-#[no_mangle]
+#[unsafe(no_mangle)] // Updated syntax for Rust Edition 2024
 pub extern "C" fn kernel_main() -> ! {
-    // Write "OK" straight into the 32-bit VGA text buffer memory address
     let vga_buffer = 0xb8000 as *mut u16;
     unsafe {
         *vga_buffer.offset(0) = 0x0F4F; // Bright White 'O'
