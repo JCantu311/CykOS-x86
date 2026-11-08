@@ -7,39 +7,51 @@ use core::ptr::write_volatile;
 
 pub unsafe fn memtest_dword(ptr: *mut u32, count: usize) -> bool {
     let mut success: u32;
+    
+    // Create local tracking copies so the compiler can allocate registers safely
+    let mut fill_counter = count;
+    let mut verify_counter = count;
+
     unsafe {
         asm!(
+            // --- Phase 1: Fill Memory ---
             "2:",
-            "mov [edi + ecx * 4 - 4], eax",
-            "loop 2b",
+            "mov [{base_ptr} + {fill_idx} * 4 - 4], {pattern}", // Write pattern
+            "dec {fill_idx}",                                  // Decrement counter
+            "jnz 2b",                                          // Loop until 0
 
-            "mov ecx, {count}",
-
+            // --- Phase 2: Verify Memory ---
             "3:",
-            "mov edx, [edi + ecx * 4 - 4]",
-            "cmp edx, eax",
-            "jne 4f",
-            "loop 3b",
+            "mov {temp_reg}, [{base_ptr} + {verify_idx} * 4 - 4]", // Read value back
+            "cmp {temp_reg}, {pattern}",                           // Verify it
+            "jne 4f",                                              // Mismatch!
+            "dec {verify_idx}",                                    // Decrement counter
+            "jnz 3b",                                              // Loop until 0
 
-            "mov {success}, 1",
+            // --- Success Path ---
+            "mov {success:e}, 1",
             "jmp 5f",
 
+            // --- Error Path ---
             "4:",
-            "mov {success}, 0",
+            "mov {success:e}, 0",
 
+            // --- Cleanup ---
             "5:",
         
-            count = in(reg) count,
-            in("eax") 0xAA55AA55_u32,
-            in("edi") ptr,
-            out("ecx") _,
-            out("edx") _,
+            // Let the compiler dynamically pick safe, isolated registers
+            fill_idx = inout(reg) fill_counter => _,
+            verify_idx = inout(reg) verify_counter => _,
+            base_ptr = in(reg) ptr,
+            pattern = in(reg) 0xAA55AA55_u32,
             success = out(reg) success,
+            temp_reg = out(reg) _,
             options(nostack),
         );
     }
     success != 0
 }
+
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
