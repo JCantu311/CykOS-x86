@@ -5,13 +5,11 @@ use core::panic::PanicInfo;
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // You are now running 32-bit execution context inside Rust!
-    // You can interact with 32-bit memory-mapped I/O here.
-    
+    // Print "OK" directly to the top-left of the VGA Text Mode screen
     let vga_buffer = 0xb8000 as *mut u16;
     unsafe {
-        // Write a bright white 'H' on a black background to the screen
-        *vga_buffer = 0x0F48; 
+        *vga_buffer.offset(0) = 0x0F4F; // Bright White 'O'
+        *vga_buffer.offset(1) = 0x0F4B; // Bright White 'K'
     }
 
     loop {}
