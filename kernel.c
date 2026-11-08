@@ -17,8 +17,8 @@ void kernel_main(void) {
     clear_screen();
     
     // Force the compiler to embed characters directly on the stack as numbers
-    char msg_init[] = {'C','y','k','a','O','S',' ','K','e','r','n','e','l',' ','I','n','i','t','\n','\0'};
-    char msg_diag[] = {'R','u','n','n','i','n','g',' ','M','e','m','t','e','s','t','.','.','.',';','\n','\0'};
+    char msg_init[] = {'C','y','k','O','S',' ','K','e','r','n','e','l',' ','I','n','i','t','\n','\0'};
+    char msg_diag[] = {'R','u','n','n','i','n','g',' ','M','e','m','t','e','s','t','.','.','.','\n','\0'};
     char msg_pass[] = {'P','A','S','S','\n','\0'};
     char msg_fail[] = {'F','A','I','L','\n','\0'};
 
@@ -32,6 +32,9 @@ void kernel_main(void) {
     } else {
         print_color_string(msg_fail, VGA_RED);
     }
+
+    char* cykaos_version = "CykOS v0.0.1\n";
+    print_string(cykaos_version);
     
     while (1) {
         asm("hlt");
