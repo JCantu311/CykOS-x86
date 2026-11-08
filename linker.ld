@@ -20,9 +20,9 @@ SECTIONS
     /* VMA = 0x9000, LMA = 0x7C00 + 512 */
     . = 0x9000;
     .text : AT(0x7C00 + 512) {
-        bin/entry32.o(.text32)   /* Execute 32-bit entry wrapper first */
+        bin/boot.o(.text*)       /* Fix: Place the 32-bit entry assembly from boot.o FIRST */
         
-        /* Bundle code, strings, and data sequentially for every object */
+        /* Bundle code, strings, and data sequentially for your C objects */
         bin/kernel.o(.text* .rodata* .data*)
         bin/cykastd.o(.text* .rodata* .data*)
         

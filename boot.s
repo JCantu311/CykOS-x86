@@ -80,11 +80,10 @@ DATA_SEG equ gdt_data - gdt_start
 
 BOOT_DRIVE: db 0            
 
-
 ; =========================================================================
 ; SECTOR 2+: This code goes into the standard text section
 ; =========================================================================
-section .text       ; NEW SECTION: Moves the 32-bit target to Sector 2
+section .text       ; This must match what is called on line 18 of linker.ld
 [bits 32]
 init_32bit_protected:
     mov ax, DATA_SEG
