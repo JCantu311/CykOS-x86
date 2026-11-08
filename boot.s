@@ -51,12 +51,18 @@ _start:
     jmp CODE_SEG:init_32bit
 
 disk_error:
-    ; Hardware indicator: Write a bright red 'E' to top left of screen on failure
-    mov word [0xb8000], 0x0C45
+    ; Fix: Set up ES segment register to point to the VGA window base (0xB800)
+    mov ax, 0xB800
+    mov es, ax
+    
+    ; Now write a bright red 'E' to the top-left slot (ES:0x0000 = 0xB8000)
+    mov word [es:0x0000], 0x0C45
+
 .error_loop:
     cli
     hlt
     jmp .error_loop
+
 
 [bits 32]
 init_32bit:
