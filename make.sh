@@ -31,7 +31,7 @@ elif command -v x86_64-linux-gnu-ld &> /dev/null; then
     LD="x86_64-linux-gnu-ld"
 elif command -v x86_64-elf-ld &> /dev/null; then
     LD="x86_64-elf-ld"
-elif command -v ld &> /dev/null; then
+elif command -v ld && ! [[ "$OSTYPE" == "darwin"* ]] &> /dev/null; then
     LD="ld"
 else
     echo "Error: No linker found!" >&2
@@ -41,12 +41,18 @@ fi
 # 3. Assemble unified module
 nasm -f elf32 boot.s -o bin/boot.o
 
-# 4. Compile remaining C components with explicit unwind removal flags
-$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wextra
-$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wextra
+# 4. Compile remaining C components forcing absolute data segmentation address pointers
+# Added: -fno-plt, -mno-sse, -mno-mmx, -static
+$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib \
+    -fno-pic -fno-pie -fno-plt -fno-asynchronous-unwind-tables \
+    -fno-builtin -mno-sse -mno-mmx -static -Wall -Wextra
 
-# 5. Link unified file elements sequentially
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib \
+    -fno-pic -fno-pie -fno-plt -fno-asynchronous-unwind-tables \
+    -fno-builtin -mno-sse -mno-mmx -static -Wall -Wextra
+
+# 5. Link with static flags to discard dynamic layout relocations
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
 # 6. Pad binary out cleanly to exactly 17 sectors
 truncate -s 8704 bin/os_image.bin

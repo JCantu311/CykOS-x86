@@ -17,13 +17,14 @@ SECTIONS
     }
 
     /* Sector 2+: The Kernel Arena */
+    /* VMA = 0x9000, LMA = 0x7C00 + 512 */
     . = 0x9000;
 
     .text : AT(0x7C00 + 512) {
-        bin/boot.o(.text*)       /* 32-bit assembly entry landing code goes FIRST */
-        *(.text*)                /* All executive code routines */
-        *(.rodata*)              /* Merge read-only data straight into text */
-        *(.data*)                /* Merge initialized global data variables */
+        bin/boot.o(.text*)       /* 32-bit entry code maps FIRST */
+        *(.text*)                /* All code text routines */
+        *(.rodata*)              /* All read-only string literals stay here */
+        *(.data*)                /* Initialized global data segments */
     }
 
     .bss : {
@@ -34,5 +35,6 @@ SECTIONS
     /DISCARD/ : {
         *(.eh_frame)
         *(.note*)
+        *(.comment)
     }
 }
