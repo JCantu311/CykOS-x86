@@ -58,23 +58,25 @@ void print_char(char c) {
 }
 
 void print_string(const char* str) {
-    // Force a local copy of the pointer address to ensure lookups remain stable
-    const char* p = str;
-    while (*p != '\0') {
-        print_char(*p);
-        p++;
+    for (int i = 0; str[i] != '\0'; i++) {
+        print_char(str[i]);
     }
 }
 
 void print_color_string(const char* str, unsigned char txt_color) {
+    unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short full_char = (unsigned short)txt_color << 8;
-    volatile unsigned short* vga = (volatile unsigned short*)VGA_ADDRESS;
     const char* p = str;
 
     while (*p != '\0') {
-        int index = (cursor_y * VGA_WIDTH) + cursor_x;
-        vga[index] = full_char | (unsigned char)*p;
-        cursor_x++;
+        if (*p == '\n') {
+            cursor_x = 0;
+            cursor_y++;
+        } else {
+            int index = (cursor_y * VGA_WIDTH) + cursor_x;
+            vga[index] = full_char | (unsigned char)*p;
+            cursor_x++;
+        }
 
         if (cursor_x >= VGA_WIDTH) {
             cursor_x = 0;
@@ -83,12 +85,10 @@ void print_color_string(const char* str, unsigned char txt_color) {
 
         if (cursor_y >= VGA_HEIGHT) {
             scroll_screen();
-            vga = (volatile unsigned short*)VGA_ADDRESS; 
         }
         p++;
     }
 }
-
 
 int strncmp(const char* str1, const char* str2, size_t n) {
     for (size_t i = 0; i < n; i++) {

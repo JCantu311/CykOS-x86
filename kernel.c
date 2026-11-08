@@ -1,4 +1,3 @@
-// kernel.c
 #include "cykastd.h"
 
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
