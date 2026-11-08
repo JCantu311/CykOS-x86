@@ -3,7 +3,7 @@ OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Sector 1: Physically starts at file offset 0, executes at 0x7C00 */
+    /* Sector 1: Explicit MBR boundary */
     . = 0x7C00;
     
     .boot_sector : {
@@ -15,14 +15,11 @@ SECTIONS
         *(.mbr_signature)
     }
 
-    /* 
-     * Sector 2+: Placed contiguously at file offset 512,
-     * but compiled to execute at memory address 0x9000.
-     */
+    /* Sector 2+: The Kernel Arena */
     .text 0x9000 : AT(0x7C00 + 512) {
         *(.kernel_entry)    /* 1. Assembly entry wrapper code first */
-        *(.kernel_start)    /* 2. Your kernel_main function second */
-        *(.text*)           /* 3. All other helper functions and code modules */
+        bin/kernel.o(.text*) /* 2. Force kernel.o code directly second */
+        *(.text*)           /* 3. All remaining helper code modules (cykastd.o) */
     }
 
     .rodata : { *(.rodata*) }

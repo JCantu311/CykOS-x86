@@ -11,19 +11,14 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     // Verify Phase
     for (unsigned int i = 0; i < count; i++) {
         if (ptr[i] != pattern) {
-            return 0; // Failure detected
+            return 0; 
         }
     }
     
-    return 1; // All addresses validated
+    return 1; 
 }
 
-/* 
- * Standard function definition with the attribute trailing the declaration line.
- * This format explicitly tells the compiler about the section mapping right as the body opens,
- * eliminating standard syntax misinterpretations.
- */
-void kernel_main(void) __attribute__((section(".kernel_start"))) {
+void kernel_main(void) {
     clear_screen();
     
     print_string("CykaOS Kernel Stage 2 Init... DONE\n");
