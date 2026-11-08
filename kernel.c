@@ -1,4 +1,3 @@
-// kernel.c
 #include "cykastd.h"
 
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
@@ -17,21 +16,22 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
 void kernel_main(void) {
     clear_screen();
     
-    // Standard string literals are fully operational via runtime offset tracking!
-    print_string(fix_ptr("CykaOS Kernel Stage 2 Init... DONE\n"));
-    print_string(fix_ptr("Running memory diagnostic verification checks...\n\n"));
+    // Force the compiler to embed characters directly on the stack as numbers
+    char msg_init[] = {'C','y','k','a','O','S',' ','K','e','r','n','e','l',' ','I','n','i','t','\n','\0'};
+    char msg_diag[] = {'R','u','n','n','i','n','g',' ','M','e','m','t','e','s','t','.','.','.',';','\n','\0'};
+    char msg_pass[] = {'P','A','S','S','\n','\0'};
+    char msg_fail[] = {'F','A','I','L','\n','\0'};
+
+    print_string(msg_init);
+    print_string(msg_diag);
     
     unsigned int* test_address = (unsigned int*)0x10000;
     
-    print_string(fix_ptr("Diagnostic Test Status: "));
     if (memtest_dword(test_address, 1024)) {
-        print_color_string(fix_ptr("PASS\n"), VGA_GREEN);
+        print_color_string(msg_pass, VGA_GREEN);
     } else {
-        print_color_string(fix_ptr("FAIL\n"), VGA_RED);
+        print_color_string(msg_fail, VGA_RED);
     }
-
-    print_string(fix_ptr("----------------------------------------\n"));
-    print_string(fix_ptr("Ready for input.\n"));
     
     while (1) {
         asm("hlt");
