@@ -13,6 +13,7 @@ fi
 
 # 0b. Compile a freestanding libcore for your custom 32-bit target
 rustc +nightly --target i686-unknown-none.json \
+  -Zunstable-options \
   -Zforce-unstable-if-unmarked \
   --crate-type rlib \
   --crate-name core \
@@ -24,6 +25,7 @@ nasm -f elf32 boot.s -o boot.o
 
 # 2. Compile Rust source targeting 32-bit bare-metal x86
 rustc +nightly --target i686-unknown-none.json \
+  -Zunstable-options \
   --extern core=libcore.rlib \
   -C panic=abort \
   -O \
