@@ -17,23 +17,31 @@ SECTIONS
     }
 
     /* Sector 2+: The Kernel Arena */
-    /* VMA Execution Base = 0x9000, LMA File Offset = 512 */
+    /* VMA = 0x9000, LMA = 0x7C00 + 512 */
     . = 0x9000;
 
     .text : AT(0x7C00 + 512) {
-        bin/boot.o(.text*)       /* 32-bit assembly entry landing code goes FIRST */
-        
-        /* Force each C object to layout its text and string constants together */
-        bin/kernel.o(.text* .rodata* .data*)
-        bin/cykastd.o(.text* .rodata* .data*)
-        
-        *(.text*)
+        bin/boot.o(.text*)       /* 32-bit entry code must execute first */
+        *(.text*)                /* All executive code routines */
+    }
+
+    /* Move all read-only string constants here so they stay grouped flat */
+    .rodata : {
         *(.rodata*)
+    }
+
+    .data : {
         *(.data*)
     }
 
     .bss : {
         *(.bss*)
         *(COMMON)
+    }
+
+    /* CRITICAL: Discard compiler-injected unwind metadata tables */
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.note*)
     }
 }
