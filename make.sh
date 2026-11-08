@@ -58,8 +58,9 @@ $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-
 # Link everything into bin/os_image.bin
 $LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-truncate -s 39424 bin/os_image.bin
-
+# Cleanly pad the file out to exactly 17 hardware disk sectors (512 * 17)
+truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"
-echo "Build successful! Standardized bin/os_image.bin to 39424 bytes."
+echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."
+
