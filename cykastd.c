@@ -106,7 +106,7 @@ const char* fix_ptr(const char* str) {
     unsigned int runtime_address;
     
     // Get the actual, live memory address of this execution block
-    volatile(asm("call 1f; 1: pop %0" : "=r"(runtime_address)));
+    asm volatile("call 1f; 1: pop %0" : "=r"(runtime_address));
     
     // Calculate the difference between where the compiler thought we were 
     // vs where we are actually running (0x9000 base adjustment)
