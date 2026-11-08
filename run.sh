@@ -1,2 +1,2 @@
 #!/bin/bash
-qemu-system-x86_64 -drive format=raw,file=os_image.bin
+qemu-system-i386 -drive format=raw,file=bin/os_image.bin
