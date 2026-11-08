@@ -3,16 +3,32 @@ OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Everything starts assembling directly at 0x7C00 memory location layout */
+    /* Sector 1: Explicit MBR Boundary */
     . = 0x7C00;
 
-    .text : {
-        bin/boot.o(.text*)   /* Sector 1 MBR & Sector 2 32-bit landing gear combined */
-        bin/kernel.o(.text*) /* C kernel entry and routine methods */
-        *(.text*)
+    .boot_sector : {
+        bin/boot.o(.text*)
     }
 
-    .rodata : { *(.rodata*) }
-    .data   : { *(.data*) }
-    .bss    : { *(.bss*) }
+    /* Force the magic signature exactly at the 510-511 byte block */
+    . = 0x7C00 + 510;
+    .mbr_sig : {
+        SHORT(0xAA55)
+    }
+
+    /* Sector 2+: The Kernel Arena */
+    /* Tell the compiler execution code runs at 0x9000, but sits at file offset 512 */
+    . = 0x9000;
+    .text : AT(0x7C00 + 512) {
+        bin/kernel.o(.text*)
+        bin/cykastd.o(.text*)
+        *(.text*)
+        *(.rodata*)
+        *(.data*)
+    }
+
+    .bss : {
+        *(.bss*)
+        *(COMMON)
+    }
 }
