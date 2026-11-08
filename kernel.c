@@ -44,7 +44,9 @@ void kernel_main(void) {
 
     char welcome_message[] = "Welcome to CykOS...\n";
 
-    char disk_test[] = "Running Disk Test...\n";
+    char disk_test_msg[] = "Running Disk Test...\n";
+
+    print_string(disk_test_msg);
 
     if(disk_test == 1) {
         print_color_string(msg_fail, VGA_RED);
