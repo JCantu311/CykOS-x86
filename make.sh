@@ -5,7 +5,7 @@ mkdir -p bin
 
 HOST_ARCH=$(uname -m)
 
-# 1. Detect Cross-Compiler with ARM host protection
+# 1. Detect Cross-Compiler with ARM host protection (Maintained)
 if command -v x86_64-linux-gnu-gcc &> /dev/null; then
     CC="x86_64-linux-gnu-gcc"
 elif command -v x86_64-elf-gcc &> /dev/null; then
@@ -25,7 +25,7 @@ else
     exit 1
 fi
 
-# 2. Detect Linker
+# 2. Detect Linker (Maintained)
 if command -v ld.lld &> /dev/null; then
     LD="ld.lld"
 elif command -v x86_64-linux-gnu-ld &> /dev/null; then
@@ -48,15 +48,18 @@ echo "----------------------------------------"
 nasm -f elf32 boot.s -o bin/boot.o
 
 # 4. Compile the definitions module into bin/
-$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -nostdlib -Wall -Wextra
+# ADDED FIX: -fno-pic -fno-pie flags explicitly injected to preserve global string addresses
+$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 
 # 5. Compile kernel.c into bin/
-$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -nostdlib -Wall -Wextra
+# ADDED FIX: -fno-pic -fno-pie flags explicitly injected to preserve global string addresses
+$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 
 # Link everything into bin/os_image.bin
+# CRITICAL FIX: Ensure boot.o is structural baseline first element in sequence
 $LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-# NEW: Pad the file out cleanly to exactly 17 hardware sectors (512 * 17 = 8704 bytes)
+# Pad the file out cleanly to exactly 17 hardware sectors (512 * 17 = 8704 bytes) (Maintained)
 truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"
