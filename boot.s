@@ -14,9 +14,16 @@ _start:
     mov ss, ax
     mov sp, 0x7C00          ; Initialize stack pointer safely below MBR code base
 
-    ; Save the physical boot drive ID passed by the BIOS in the DL register
+    ; Save the physical boot drive ID passed by the BIOS
     mov [BOOT_DRIVE], dl
 
+    ; FALLBACK CHECK: If BIOS passed 0 (Floppy A:), force it to 0x80 (Hard Disk 1)
+    ; This fixes environments where QEMU misinterprets small raw images.
+    cmp dl, 0
+    jne .drive_ok
+    mov byte [BOOT_DRIVE], 0x80
+
+.drive_ok:
     ; 2. Reset the disk controller to clear any cached layout states
     xor ax, ax
     mov dl, [BOOT_DRIVE]
@@ -32,7 +39,7 @@ _start:
     mov ch, 0               ; Cylinder 0
     mov dh, 0               ; Head 0
     mov cl, 2               ; Start at Sector 2 (Sector 1 is this MBR)
-    mov dl, [BOOT_DRIVE]    ; Use saved drive index
+    mov dl, [BOOT_DRIVE]    ; Use verified drive index
     int 0x13                
     jc disk_error           ; If carry flag triggers, jump to hardware check
 
