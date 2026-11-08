@@ -4,21 +4,43 @@ set -e
 # Create the bin directory if it doesn't exist
 mkdir -p bin
 
-# 1. Detect Cross-Compiler
+# Detect Host Architecture
+HOST_ARCH=$(uname -m)
+
+# 1. Detect Cross-Compiler with ARM host protection
 if command -v x86_64-linux-gnu-gcc &> /dev/null; then
     CC="x86_64-linux-gnu-gcc"
 elif command -v x86_64-elf-gcc &> /dev/null; then
     CC="x86_64-elf-gcc"
+elif command -v i686-elf-gcc &> /dev/null; then
+    CC="i686-elf-gcc"
 elif command -v gcc &> /dev/null; then
-    CC="gcc"
+    # If we are on ARM, standard 'gcc' will emit ARM code and fail. Protect against this.
+    if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "armv7l" ]]; then
+        echo "Error: Native 'gcc' on this machine outputs ARM code!" >&2
+        echo "You are running on an ARM host ($HOST_ARCH) and need an x86 cross-compiler." >&2
+        echo "" >&2
+        echo "Please install one using your package manager:" >&2
+        echo "  Fedora:  sudo dnf install gcc-x86_64-linux-gnu" >&2
+        echo "  Debian:  sudo apt install gcc-x86_64-linux-gnu" >&2
+        echo "  Arch:    sudo pacman -S x86_64-elf-gcc" >&2
+        echo "  macOS:   brew install x86_64-elf-gcc" >&2
+        exit 1
+    else
+        CC="gcc"
+    fi
 else
-    echo "Error: No suitable C compiler (gcc) found!" >&2
+    echo "Error: No suitable C compiler found!" >&2
     exit 1
 fi
 
 # 2. Detect Linker
 if command -v ld.lld &> /dev/null; then
     LD="ld.lld"
+elif command -v x86_64-linux-gnu-ld &> /dev/null; then
+    LD="x86_64-linux-gnu-ld"
+elif command -v x86_64-elf-ld &> /dev/null; then
+    LD="x86_64-elf-ld"
 elif command -v ld &> /dev/null; then
     LD="ld"
 else
@@ -26,8 +48,10 @@ else
     exit 1
 fi
 
-echo "Using Compiler: $CC"
-echo "Using Linker:   $LD"
+echo "Host Architecture: $HOST_ARCH"
+echo "Using Compiler:    $CC"
+echo "Using Linker:      $LD"
+echo "----------------------------------------"
 
 # 3. Assemble boot.s into bin/
 nasm -f elf32 boot.s -o bin/boot.o
