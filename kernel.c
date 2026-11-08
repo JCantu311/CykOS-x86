@@ -17,10 +17,10 @@ void kernel_main(void) {
     clear_screen();
     
     // Force the compiler to embed characters directly on the stack as numbers
-    char msg_init[] = {'C','y','k','O','S',' ','K','e','r','n','e','l',' ','I','n','i','t','\n','\0'};
-    char msg_diag[] = {'R','u','n','n','i','n','g',' ','M','e','m','t','e','s','t','.','.','.','\n','\0'};
-    char msg_pass[] = {'P','A','S','S','\n','\0'};
-    char msg_fail[] = {'F','A','I','L','\n','\0'};
+    char msg_init[] = "CykOS Kernel Init\n";
+    char msg_diag[] = "Running Memtest...\n";
+    char msg_pass[] = "PASS\n";
+    char msg_fail[] = "FAIL\n";
 
     print_string(msg_init);
     print_string(msg_diag);
@@ -38,7 +38,7 @@ void kernel_main(void) {
     print_string(cykaos_version);
 
     char welcome_message[] = "Welcome to CykOS...\n";
-    
+
     print_color_string(welcome_message, VGA_GREEN);
     
     while (1) {
