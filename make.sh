@@ -41,12 +41,12 @@ fi
 # 3. Assemble unified module
 nasm -f elf32 boot.s -o bin/boot.o
 
-# 4. Compile remaining C components with explicit unwind removal flags
+# 4. Compile remaining C components (Keep your stable -O0 non-artifacting flags)
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wextra
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wextra
 
-# 5. Link unified file elements sequentially
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+# 5. Link unified elements passing explicit non-PIE layout flags to the linker
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie --image-base=0x0 bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
 # 6. Pad binary out cleanly to exactly 17 sectors
 truncate -s 8704 bin/os_image.bin

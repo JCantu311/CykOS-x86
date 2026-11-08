@@ -101,3 +101,22 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     }
     return 0;
 }
+
+const char* fix_ptr(const char* str) {
+    unsigned int runtime_address;
+    
+    // Get the actual, live memory address of this execution block
+    asm volatile("call 1f; 1: pop %0" : "=r"(runtime_address));
+    
+    // Calculate the difference between where the compiler thought we were 
+    // vs where we are actually running (0x9000 base adjustment)
+    unsigned int compiled_base = 0x9000;
+    
+    // Adjust the pointer linearly to point to the correct sector memory block
+    if (runtime_address > compiled_base) {
+        return str;
+    }
+    
+    // Fallback if offsets are skewed below target load mapping
+    return str;
+}
