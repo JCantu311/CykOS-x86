@@ -94,8 +94,8 @@ DATA_SEG equ gdt_data - gdt_start
 BOOT_DRIVE: db 0            
 
 ; Force the physical 512-byte MBR boundary constraints natively inside the file
-; times 510 - ($ - $$) db 0
-; dw 0xAA55
+times 510 - ($ - $$) db 0
+dw 0xAA55
 
 ; =========================================================================
 ; SECTOR 2 LANDING GEAR: This block physically follows byte 512 in the binary
