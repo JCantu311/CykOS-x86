@@ -42,9 +42,9 @@ fi
 nasm -f elf32 boot.s -o bin/boot.o
 nasm -f elf32 kstart.s -o bin/kstart.o
 
-# 4. Compile remaining C components
-$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
-$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
+# 4. Compile remaining C components with -O0 and -fno-builtin flags
+$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-builtin -Wall -Wextra
+$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-builtin -Wall -Wextra
 
 # 5. Link everything via the explicit object sequence
 $LD -m elf_i386 -T linker.ld bin/boot.o bin/kstart.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
