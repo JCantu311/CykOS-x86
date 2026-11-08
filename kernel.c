@@ -37,7 +37,8 @@ void kernel_main(void) {
 
     print_string(cykaos_version);
 
-    char* welcome_message = "Welcome to CykOS...\n";
+    char welcome_message[] = "Welcome to CykOS...\n";
+    
     print_color_string(welcome_message, VGA_GREEN);
     
     while (1) {
