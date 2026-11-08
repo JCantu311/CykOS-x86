@@ -44,17 +44,15 @@ echo "Using Compiler:    $CC"
 echo "Using Linker:      $LD"
 echo "----------------------------------------"
 
-# 3. Assemble boot.s into bin/
-nasm -f elf32 boot.s -o bin/boot.o
+# Compile C files with absolute addressing guards and freestanding targets
+gcc -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -c kernel.c -o kernel.o
+gcc -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -c cykastd.c -o cykastd.o
 
-# 4. Compile the definitions module into bin/
-$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -Wall -Wextra
+# Assemble the boot sector
+nasm -f elf32 boot.asm -o boot.o
 
-# 5. Compile kernel.c into bin/
-$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -Wall -Wextra
-
-# Link everything into bin/os_image.bin
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+# Link everything together into the final flat binary matching your script
+ld -m elf_i386 -T linker.ld boot.o kernel.o cykastd.o -o os_image.bin
 
 # NEW: Pad the file out cleanly to exactly 17 hardware sectors (512 * 17 = 8704 bytes)
 truncate -s 8704 bin/os_image.bin

@@ -57,12 +57,6 @@ void print_char(char c) {
     }
 }
 
-void print_string(const char* str) {
-    for (int i = 0; str[i] != '\0'; i++) {
-        print_char(str[i]);
-    }
-}
-
 int strncmp(const char* str1, const char* str2, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (str1[i] != str2[i]) {
@@ -75,13 +69,21 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     return 0;
 }
 
+void print_string(const char* str) {
+    // Explicit pointer dereference prevents relative table mapping issues
+    while (*str != '\0') {
+        print_char(*str);
+        str++; // Step through physical memory sequentially
+    }
+}
+
 void print_color_string(const char* str, unsigned char color) {
-    unsigned int full_char = 0x0000;
-    full_char = color * 0x100;
-    for(int i = 0; str[i] != '\0'; i++) {
-        unsigned short* vga = (unsigned short*)VGA_ADDRESS;
+    unsigned short full_char = (unsigned short)color << 8;
+    unsigned short* vga = (unsigned short*)VGA_ADDRESS;
+
+    while (*str != '\0') {
         int index = (cursor_y * VGA_WIDTH) + cursor_x;
-        vga[index] = full_char | str[i];
+        vga[index] = full_char | (unsigned char)*str;
         cursor_x++;
 
         if (cursor_x >= VGA_WIDTH) {
@@ -91,6 +93,8 @@ void print_color_string(const char* str, unsigned char color) {
 
         if (cursor_y >= VGA_HEIGHT) {
             scroll_screen();
+            vga = (unsigned short*)VGA_ADDRESS; // Re-verify baseline window pointer
         }
+        str++;
     }
 }
