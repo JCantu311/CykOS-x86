@@ -1,3 +1,4 @@
+// kernel.c
 #include "cykastd.h"
 
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
@@ -16,23 +17,23 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
 void kernel_main(void) {
     clear_screen();
     
-    // Completely native string literals work perfectly now!
-    print_string("CykaOS Kernel Stage 2 Init... DONE\n");
-    print_string("Running memory diagnostic verification checks...\n\n");
+    // Standard string literals are fully operational via runtime offset tracking!
+    print_string(fix_ptr("CykaOS Kernel Stage 2 Init... DONE\n"));
+    print_string(fix_ptr("Running memory diagnostic verification checks...\n\n"));
     
     unsigned int* test_address = (unsigned int*)0x10000;
     
-    print_string("Diagnostic Test Status: ");
+    print_string(fix_ptr("Diagnostic Test Status: "));
     if (memtest_dword(test_address, 1024)) {
-        print_color_string("PASS\n", VGA_GREEN);
+        print_color_string(fix_ptr("PASS\n"), VGA_GREEN);
     } else {
-        print_color_string("FAIL\n", VGA_RED);
+        print_color_string(fix_ptr("FAIL\n"), VGA_RED);
     }
 
-    print_string("----------------------------------------\n");
-    print_string("Ready for input.\n");
+    print_string(fix_ptr("----------------------------------------\n"));
+    print_string(fix_ptr("Ready for input.\n"));
     
     while (1) {
-        asm("hlt"); // Standard inline asm that VS Code understands perfectly
+        asm("hlt");
     }
 }
