@@ -17,7 +17,6 @@ SECTIONS
     }
 
     /* Sector 2+: The Kernel Arena */
-    /* Tell the compiler execution code runs at 0x9000, but sits at file offset 512 */
     . = 0x9000;
     .text : AT(0x7C00 + 512) {
         bin/kernel.o(.text*)
