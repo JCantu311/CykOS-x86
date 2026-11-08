@@ -7,20 +7,18 @@ SECTIONS
     . = 0x7C00;
 
     .boot_sector : {
-        bin/boot.o(.text*)
+        *(.boot)
     }
 
-    /* Force the magic signature exactly at the 510-511 byte block */
+    /* Force the magic signature exactly at byte index 510 */
     . = 0x7C00 + 510;
     .mbr_sig : {
         SHORT(0xAA55)
     }
 
-    /* Sector 2+: The Kernel Arena */
+    /* Sector 2+: The Kernel Arena (Execution map at 0x9000, file offset 512) */
     . = 0x9000;
     .text : AT(0x7C00 + 512) {
-        bin/kernel.o(.text*)
-        bin/cykastd.o(.text*)
         *(.text*)
         *(.rodata*)
         *(.data*)
