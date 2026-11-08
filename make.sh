@@ -38,19 +38,18 @@ else
     exit 1
 fi
 
-# 3. Assemble both separate files into explicit 32-bit ELF modules
+# 3. Assemble unified module
 nasm -f elf32 boot.s -o bin/boot.o
-nasm -f elf32 kstart.s -o bin/kstart.o
 
-# 4. Compile remaining C components with -O0 and -fno-builtin flags
+# 4. Compile remaining C components
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-builtin -Wall -Wextra
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-builtin -Wall -Wextra
 
-# 5. Link everything via the explicit object sequence
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/kstart.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
+# 5. Link unified file elements sequentially
+$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-# 6. Pad to exactly 17 sectors
+# 6. Pad binary out cleanly to exactly 17 sectors
 truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"
-echo "Build successful! Unified bin/os_image.bin to 8704 bytes."
+echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."
