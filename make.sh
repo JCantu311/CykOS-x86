@@ -11,8 +11,9 @@ if [ ! -d "$RUST_SRC/core" ]; then
     rustup +nightly component add rust-src
 fi
 
-# 0b. Compile a freestanding libcore for your custom 32-bit target
+# 0b. Compile a freestanding libcore for your custom modern 32-bit target (added --edition 2024)
 rustc +nightly --target i686-unknown-none.json \
+  --edition 2024 \
   -Zunstable-options \
   -Zforce-unstable-if-unmarked \
   --crate-type rlib \
@@ -21,16 +22,17 @@ rustc +nightly --target i686-unknown-none.json \
   -O --out-dir .
 
 # 1. Assemble the boot code to a 32-bit x86 ELF object
-nasm -f elf32 boot.s -o boot.o
+nasm -f elf32 boot.asm -o boot.o
 
-# 2. Compile Rust source targeting 32-bit bare-metal x86
+# 2. Compile Rust source targeting your custom 32-bit spec (added --edition 2024)
 rustc +nightly --target i686-unknown-none.json \
+  --edition 2024 \
   -Zunstable-options \
   --extern core=libcore.rlib \
   -C panic=abort \
   -O \
   --emit=obj \
-  kernel_main.rs -o main.o
+  main.rs -o main.o
 
 # 3. Link using LLVM's lld (explicitly stating x86 emulation)
 ld.lld -m elf_i386 -T linker.ld boot.o main.o -o os_image.elf
