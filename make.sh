@@ -22,7 +22,7 @@ rustc +nightly --target i686-unknown-none.json \
   -O --out-dir .
 
 # 1. Assemble the boot code to a 32-bit x86 ELF object
-nasm -f elf32 boot.asm -o boot.o
+nasm -f elf32 boot.s -o boot.o
 
 # 2. Compile Rust source targeting your custom 32-bit spec (added --edition 2024)
 rustc +nightly --target i686-unknown-none.json \
