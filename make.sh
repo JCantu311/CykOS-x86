@@ -12,7 +12,7 @@ if [ ! -d "$RUST_SRC/core" ]; then
 fi
 
 # 0b. Build the compiler_builtins stub with proper internal tracking attributes
-echo '#![no_core] #![compiler_builtins] #![feature(no_core)] #![allow(internal_features)] pub mod mem {}' > builtins_stub.rs
+echo '#![no_core] #![compiler_builtins] #![feature(no_core, compiler_builtins)] #![allow(internal_features)] pub mod mem {}' > builtins_stub.rs
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
