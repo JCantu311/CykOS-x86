@@ -33,10 +33,12 @@ void kernel_main(void) {
         print_color_string(msg_fail, VGA_RED);
     }
 
-    char cykaos_version[] = "CykOS v0.0.1\n\0";
+    char cykaos_version[] = "CykOS v0.0.1\n";
 
     print_string(cykaos_version);
-    print_string("Welcome to CykOS...\n");
+
+    char* welcome_message = "Welcome to CykOS...\n";
+    print_color_string(welcome_message, VGA_GREEN);
     
     while (1) {
         asm("hlt");
