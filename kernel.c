@@ -1,7 +1,5 @@
-// kernel.c
 #include "cykastd.h"
 
-// Re-implement your 32-bit memory test function in clean C
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     unsigned int pattern = 0xAA55AA55;
     
@@ -13,21 +11,24 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     // Verify Phase
     for (unsigned int i = 0; i < count; i++) {
         if (ptr[i] != pattern) {
-            return 0; // Fail
+            return 0; // Failure detected
         }
     }
     
-    return 1; // Pass
+    return 1; // All addresses validated
 }
 
-void kernel_main(void) {
-    // 1. Initialize screen and clear BIOS junk text using cykastd
+/* 
+ * Standard function definition with the attribute trailing the declaration line.
+ * This format explicitly tells the compiler about the section mapping right as the body opens,
+ * eliminating standard syntax misinterpretations.
+ */
+void kernel_main(void) __attribute__((section(".kernel_start"))) {
     clear_screen();
     
     print_string("CykaOS Kernel Stage 2 Init... DONE\n");
     print_string("Running memory diagnostic verification checks...\n\n");
     
-    // 2. Run memory test at safe location (0x10000)
     unsigned int* test_address = (unsigned int*)0x10000;
     
     print_string("Diagnostic Test Status: ");

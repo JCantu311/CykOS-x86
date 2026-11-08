@@ -5,7 +5,7 @@ mkdir -p bin
 
 HOST_ARCH=$(uname -m)
 
-# 1. Detect Cross-Compiler with ARM host protection (Maintained)
+# 1. Detect Cross-Compiler with ARM host protection
 if command -v x86_64-linux-gnu-gcc &> /dev/null; then
     CC="x86_64-linux-gnu-gcc"
 elif command -v x86_64-elf-gcc &> /dev/null; then
@@ -25,7 +25,7 @@ else
     exit 1
 fi
 
-# 2. Detect Linker (Maintained)
+# 2. Detect Linker
 if command -v ld.lld &> /dev/null; then
     LD="ld.lld"
 elif command -v x86_64-linux-gnu-ld &> /dev/null; then
@@ -44,21 +44,17 @@ echo "Using Compiler:    $CC"
 echo "Using Linker:      $LD"
 echo "----------------------------------------"
 
-# 3. Assemble boot.s into bin/
+# 3. Assemble boot.s into object code format
 nasm -f elf32 boot.s -o bin/boot.o
 
-# 4. Compile the definitions module into bin/
-# ADDED FIX: -fno-pic -fno-pie flags explicitly injected to preserve global string addresses
+# 4. Compile the modules with strict absolute flat-addressing rules
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
-
-# 5. Compile kernel.c into bin/
-# ADDED FIX: -fno-pic -fno-pie flags explicitly injected to preserve global string addresses
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 
-# Link everything into bin/os_image.bin
+# 5. Link everything into the precise raw disk structure layout
 $LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-# Cleanly pad the file out to exactly 17 hardware disk sectors (512 * 17)
+# 6. Pad output out to exactly 17 disk sectors (512 * 17 = 8704 bytes)
 truncate -s 8704 bin/os_image.bin
 
 echo "----------------------------------------"

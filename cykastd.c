@@ -1,12 +1,12 @@
 #include "cykastd.h"
 
-// Tracking variables scoped internally to this module
 static int cursor_x = 0;
 static int cursor_y = 0;
+static const unsigned char CONSOLE_COLOR = 0x0F; // White text on black background
 
 void clear_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
-    unsigned short blank = (DEFAULT_COLOR << 8) | ' ';
+    unsigned short blank = (CONSOLE_COLOR << 8) | ' ';
     
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
         vga[i] = blank;
@@ -18,7 +18,7 @@ void clear_screen(void) {
 
 static void scroll_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
-    unsigned short blank = (DEFAULT_COLOR << 8) | ' ';
+    unsigned short blank = (CONSOLE_COLOR << 8) | ' ';
 
     // Move rows 1-24 up to rows 0-23
     for (int y = 1; y < VGA_HEIGHT; y++) {
@@ -27,7 +27,7 @@ static void scroll_screen(void) {
         }
     }
 
-    // Clear the very bottom row (row 24)
+    // Clear the bottom boundary row
     for (int x = 0; x < VGA_WIDTH; x++) {
         vga[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = blank;
     }
@@ -43,7 +43,7 @@ void print_char(char c) {
         cursor_y++;
     } else {
         int index = (cursor_y * VGA_WIDTH) + cursor_x;
-        vga[index] = (DEFAULT_COLOR << 8) | c;
+        vga[index] = (CONSOLE_COLOR << 8) | (unsigned char)c;
         cursor_x++;
     }
 
@@ -57,23 +57,10 @@ void print_char(char c) {
     }
 }
 
-int strncmp(const char* str1, const char* str2, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        if (str1[i] != str2[i]) {
-            return (unsigned char)str1[i] - (unsigned char)str2[i];
-        }
-        if (str1[i] == '\0') {
-            return 0;
-        }
-    }
-    return 0;
-}
-
 void print_string(const char* str) {
-    // Explicit pointer dereference prevents relative table mapping issues
     while (*str != '\0') {
         print_char(*str);
-        str++; // Step through physical memory sequentially
+        str++;
     }
 }
 
@@ -93,8 +80,20 @@ void print_color_string(const char* str, unsigned char color) {
 
         if (cursor_y >= VGA_HEIGHT) {
             scroll_screen();
-            vga = (unsigned short*)VGA_ADDRESS; // Re-verify baseline window pointer
+            vga = (unsigned short*)VGA_ADDRESS; // Reload baseline tracking window
         }
         str++;
     }
+}
+
+int strncmp(const char* str1, const char* str2, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (str1[i] != str2[i]) {
+            return (unsigned char)str1[i] - (unsigned char)str2[i];
+        }
+        if (str1[i] == '\0') {
+            return 0;
+        }
+    }
+    return 0;
 }
