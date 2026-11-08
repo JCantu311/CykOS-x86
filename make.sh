@@ -11,32 +11,23 @@ if [ ! -d "$RUST_SRC/core" ]; then
     rustup +nightly component add rust-src
 fi
 
-# 0b. First, compile compiler_builtins as a standalone stub library
-rustc +nightly --target i686-unknown-none.json \
-  --edition 2024 \
-  -Zunstable-options \
-  -Zforce-unstable-if-unmarked \
-  --cfg=bootstrap \
-  --crate-type rlib \
-  --crate-name compiler_builtins \
-  "$RUST_SRC/alloc/src/lib.rs" --cfg core_filters \
-  -O --out-dir . || true
-
-# If alloc source lacks the direct entry point hook, we build it directly out of the library tree dummy macro:
+# 0b. Build the compiler_builtins stub without looking for a pre-existing core crate
 echo '#![no_std] #![feature(compiler_builtins)] pub mod mem { pub use core::intrinsics::{memcpy, memset, memcmp, memmove}; }' > builtins_stub.rs
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
+  -Zno-core \
   --crate-type rlib \
   --crate-name compiler_builtins \
   builtins_stub.rs \
   -O --out-dir .
 
-# 0c. Compile libcore, passing our newly created builtins stub crate reference
+# 0c. Compile libcore from source using -Zno-core, passing the newly minted builtins rlib
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
   -Zforce-unstable-if-unmarked \
+  -Zno-core \
   --extern compiler_builtins=libcompiler_builtins.rlib \
   --crate-type rlib \
   --crate-name core \
@@ -46,11 +37,12 @@ rustc +nightly --target i686-unknown-none.json \
 # 1. Assemble the boot code from boot.s
 nasm -f elf32 boot.s -o boot.o
 
-# 2. Compile Rust source from kernel_main.rs
+# 2. Compile your kernel_main.rs passing BOTH core and compiler_builtins explicitly
 rustc +nightly --target i686-unknown-none.json \
   --edition 2024 \
   -Zunstable-options \
   --extern core=libcore.rlib \
+  --extern compiler_builtins=libcompiler_builtins.rlib \
   -C panic=abort \
   -O \
   --emit=obj \
