@@ -64,15 +64,6 @@ void print_string(const char* str) {
     }
 }
 
-int memtest_dword(unsigned int* ptr, unsigned int count) {
-    unsigned int pattern = 0xAA55AA55;
-    for (unsigned int i = 0; i < count; i++) ptr[i] = pattern;
-    for (unsigned int i = 0; i < count; i++) {
-        if (ptr[i] != pattern) return 0;
-    }
-    return 1;
-}
-
 int strncmp(const char* str1, const char* str2, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (str1[i] != str2[i]) {

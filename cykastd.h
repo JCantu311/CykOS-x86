@@ -10,7 +10,6 @@ typedef unsigned int size_t;
 void clear_screen(void);
 void print_char(char c);
 void print_string(const char* str);
-int memtest_dword(unsigned int* ptr, unsigned int count);
 int strncmp(const char* str1, const char* str2, size_t n);
 void print_color_string(const char* str, unsigned char color);
 
