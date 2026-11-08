@@ -1,10 +1,8 @@
 #!/bin/bash
 set -e
 
-# Create the bin directory if it doesn't exist
 mkdir -p bin
 
-# Detect Host Architecture
 HOST_ARCH=$(uname -m)
 
 # 1. Detect Cross-Compiler with ARM host protection
@@ -15,16 +13,9 @@ elif command -v x86_64-elf-gcc &> /dev/null; then
 elif command -v i686-elf-gcc &> /dev/null; then
     CC="i686-elf-gcc"
 elif command -v gcc &> /dev/null; then
-    # If we are on ARM, standard 'gcc' will emit ARM code and fail. Protect against this.
     if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "armv7l" ]]; then
         echo "Error: Native 'gcc' on this machine outputs ARM code!" >&2
         echo "You are running on an ARM host ($HOST_ARCH) and need an x86 cross-compiler." >&2
-        echo "" >&2
-        echo "Please install one using your package manager:" >&2
-        echo "  Fedora:  sudo dnf install gcc-x86_64-linux-gnu" >&2
-        echo "  Debian:  sudo apt install gcc-x86_64-linux-gnu" >&2
-        echo "  Arch:    sudo pacman -S x86_64-elf-gcc" >&2
-        echo "  macOS:   brew install x86_64-elf-gcc" >&2
         exit 1
     else
         CC="gcc"
@@ -56,11 +47,14 @@ echo "----------------------------------------"
 # 3. Assemble boot.s into bin/
 nasm -f elf32 boot.s -o bin/boot.o
 
-# 4. Compile kernel.c into bin/
+# 4. Compile the definitions module into bin/
+$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -Wall -Wextra
+
+# 5. Compile kernel.c into bin/
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -Wall -Wextra
 
-# 5. Link everything into bin/os_image.bin
-$LD -m elf_i386 -T linker.ld bin/boot.o bin/kernel.o -o bin/os_image.bin
+# 6. Link everything into bin/os_image.bin
+$LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
 echo "----------------------------------------"
 echo "Build successful! Created bin/os_image.bin"

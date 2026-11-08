@@ -1,8 +1,10 @@
 // kernel.c
+#include "cykastd.h"
 
 // Re-implement your 32-bit memory test function in clean C
-int memtest_dword(unsigned int* ptr, unsigned int count) {
+int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     unsigned int pattern = 0xAA55AA55;
+
     
     // Fill Phase
     for (unsigned int i = 0; i < count; i++) {
@@ -43,6 +45,8 @@ void kernel_main(void) {
         vga_buffer[2] = 0x0C49; // 'I'
         vga_buffer[3] = 0x0C4C; // 'L'
     }
+
+    
     
     while (1) {
         asm("hlt");
