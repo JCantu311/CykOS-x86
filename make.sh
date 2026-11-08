@@ -56,11 +56,10 @@ $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O2 -nostdlib -fno-pic -fn
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -Wall -Wextra
 
 # Link everything into bin/os_image.bin
-# CRITICAL FIX: Ensure boot.o is structural baseline first element in sequence
 $LD -m elf_i386 -T linker.ld bin/boot.o bin/cykastd.o bin/kernel.o -o bin/os_image.bin
 
-# Pad the file out cleanly to exactly 17 hardware sectors (512 * 17 = 8704 bytes) (Maintained)
-truncate -s 8704 bin/os_image.bin
+truncate -s 39424 bin/os_image.bin
+
 
 echo "----------------------------------------"
 echo "Build successful! Standardized bin/os_image.bin to 8704 bytes."

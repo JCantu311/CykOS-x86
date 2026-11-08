@@ -16,11 +16,15 @@ SECTIONS
         *(.mbr_signature)
     }
 
-    /* Sector 2+: The Kernel Arena */
+    /* 
+     * CRITICAL FIX: Advance the location counter to 0x9000. 
+     * In a flat binary output, the linker will automatically pad 
+     * the gap with zeroes, perfectly aligning Sector 2 in the file 
+     * with address 0x9000 in memory.
+     */
     . = 0x9000;
     
-    /* Enforce that the assembly entry point sits perfectly at 0x9000 */
-    .text : AT(0x7C00 + 512) {
+    .text : {
         *(.kernel_entry)
         *(.text*)
     }
