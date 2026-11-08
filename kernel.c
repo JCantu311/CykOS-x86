@@ -1,20 +1,12 @@
+// kernel.c
 #include "cykastd.h"
 
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     unsigned int pattern = 0xAA55AA55;
-    
-    // Fill Phase
+    for (unsigned int i = 0; i < count; i++) ptr[i] = pattern;
     for (unsigned int i = 0; i < count; i++) {
-        ptr[i] = pattern;
+        if (ptr[i] != pattern) return 0; 
     }
-    
-    // Verify Phase
-    for (unsigned int i = 0; i < count; i++) {
-        if (ptr[i] != pattern) {
-            return 0; 
-        }
-    }
-    
     return 1; 
 }
 
