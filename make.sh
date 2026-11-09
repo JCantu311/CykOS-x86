@@ -142,7 +142,8 @@ if command -v rustc &> /dev/null; then
     link_user_app() {
         local input="$1"
         local output="$2"
-        # Try linking - show errors, do NOT suppress them
+        # Try linking with --gc-sections to keep binary lean, fallback without
+        $LD -m elf_i386 -T user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output" 2>/dev/null || \
         $LD -m elf_i386 -T user.ld -u main bin/kernel_syms.ld "$input" -o "$output"
     }
 
@@ -179,7 +180,7 @@ if command -v rustc &> /dev/null; then
 
         # Report binary size
         if [ -f bin/EDIT.BIN ]; then
-            local sz=$(wc -c < bin/EDIT.BIN)
+            sz=$(wc -c < bin/EDIT.BIN)
             echo "  -> EDIT.BIN size: $sz bytes"
             if [ "$sz" -gt 196608 ]; then
                 echo "  -> WARNING: EDIT.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
@@ -226,7 +227,7 @@ if command -v rustc &> /dev/null; then
 
             # Report binary size
             if [ -f "bin/${app_upper}.BIN" ]; then
-                local sz=$(wc -c < "bin/${app_upper}.BIN")
+                sz=$(wc -c < "bin/${app_upper}.BIN")
                 echo "  -> ${app_upper}.BIN size: $sz bytes"
                 if [ "$sz" -gt 196608 ]; then
                     echo "  -> WARNING: ${app_upper}.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
