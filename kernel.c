@@ -52,7 +52,7 @@ void kernel_main(void) {
         print_color_string(msg_fail, VGA_RED);
     }
 
-    char cykaos_version[] = "CykOS v0.0.1\n";
+    char cykaos_version[] = "CykOS v0.1.0\n";
     print_string(cykaos_version);
 
     char welcome_message[] = "Welcome to CykOS...\n";
