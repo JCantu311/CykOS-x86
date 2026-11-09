@@ -173,9 +173,11 @@ void kernel_main(void) {
 
     print_string(disk_test_msg);
 
-    if(disk_test() == 1) {
+    int disk_result = disk_test();
+
+    if(disk_result == 1) {
         print_color_string(msg_fail, VGA_RED);
-    } else if(disk_test() == 0) {
+    } else if(disk_result == 0) {
         print_color_string(msg_pass, VGA_GREEN);
     }
 
