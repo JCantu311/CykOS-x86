@@ -135,29 +135,55 @@ fi
 if command -v rustc &> /dev/null; then
     echo "Compiling Level 4 Userland Applications..."
 
+    RUST_FLAGS="--target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort -C target-feature=-sse,-sse2"
+
+    # Helper: link a Rust userland app from either .o or .a into a flat binary
+    # Usage: link_user_app <obj_or_archive> <output.BIN>
+    link_user_app() {
+        local input="$1"
+        local output="$2"
+        # Try linking - show errors, do NOT suppress them
+        $LD -m elf_i386 -T user.ld -u main bin/kernel_syms.ld "$input" -o "$output"
+    }
+
     # Compile default editor (edit.rs)
     if [ -f edit.rs ]; then
         echo "  Compiling Level 4 Editor (edit.rs)..."
         rm -f bin/EDIT.BIN bin/libedit.a bin/edit.o
-        if rustc --target i686-unknown-linux-gnu -O \
-            -C overflow-checks=no \
-            -C relocation-model=static \
-            -C panic=abort \
-            -C target-feature=-sse,-sse2 \
-            --crate-type=staticlib edit.rs -o bin/libedit.a; then
-            if [ -f bin/kernel_syms.ld ]; then
-                $LD -m elf_i386 -T user.ld --gc-sections -u main \
-                    bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN 2>/dev/null || \
-                $LD -m elf_i386 -T user.ld -u main \
-                    bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN
-                if [ -s bin/EDIT.BIN ]; then
-                    echo "  -> Created Level 4 binary: bin/EDIT.BIN"
+
+        # Strategy 1: Try --emit=obj (produces small binary, no libcore bloat)
+        if rustc $RUST_FLAGS --emit=obj edit.rs -o bin/edit.o 2>/dev/null; then
+            if link_user_app bin/edit.o bin/EDIT.BIN 2>/dev/null; then
+                echo "  -> Created Level 4 binary: bin/EDIT.BIN (from .o)"
+                rm -f bin/edit.o
+            else
+                rm -f bin/edit.o bin/EDIT.BIN
+                echo "  -> obj linking had unresolved symbols, trying staticlib..."
+            fi
+        fi
+
+        # Strategy 2: Fall back to --crate-type=staticlib if .o approach failed
+        if [ ! -f bin/EDIT.BIN ]; then
+            if rustc $RUST_FLAGS --crate-type=staticlib edit.rs -o bin/libedit.a; then
+                if link_user_app bin/libedit.a bin/EDIT.BIN; then
+                    echo "  -> Created Level 4 binary: bin/EDIT.BIN (from staticlib)"
                 else
-                    echo "  -> Error: bin/EDIT.BIN linking failed or produced empty file!" >&2
+                    echo "  -> ERROR: Failed to link EDIT.BIN from staticlib!" >&2
                     rm -f bin/EDIT.BIN
                 fi
+                rm -f bin/libedit.a
+            else
+                echo "  -> ERROR: Failed to compile edit.rs!" >&2
             fi
-            rm -f bin/libedit.a
+        fi
+
+        # Report binary size
+        if [ -f bin/EDIT.BIN ]; then
+            local sz=$(wc -c < bin/EDIT.BIN)
+            echo "  -> EDIT.BIN size: $sz bytes"
+            if [ "$sz" -gt 196608 ]; then
+                echo "  -> WARNING: EDIT.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
+            fi
         fi
     fi
 
@@ -169,19 +195,42 @@ if command -v rustc &> /dev/null; then
             [ "$app_name" = "cykos" ] && continue
             app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]')
             echo "  Compiling Userland App: $app_src..."
-            if rustc --target i686-unknown-linux-gnu -O \
-                -C overflow-checks=no \
-                -C relocation-model=static \
-                -C panic=abort \
-                -C target-feature=-sse,-sse2 \
-                --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
-                if [ -f bin/kernel_syms.ld ]; then
-                    $LD -m elf_i386 -T user.ld --gc-sections -u main \
-                        bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || \
-                    $LD -m elf_i386 -T user.ld -u main \
-                        bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || true
+
+            # CRITICAL: Clean old binary before rebuilding
+            rm -f "bin/${app_upper}.BIN" "bin/lib${app_name}.a" "bin/${app_name}.o"
+
+            # Strategy 1: Try --emit=obj first
+            if rustc $RUST_FLAGS --emit=obj "$app_src" -o "bin/${app_name}.o" 2>/dev/null; then
+                if link_user_app "bin/${app_name}.o" "bin/${app_upper}.BIN" 2>/dev/null; then
+                    echo "  -> Created: bin/${app_upper}.BIN (from .o)"
+                    rm -f "bin/${app_name}.o"
+                else
+                    rm -f "bin/${app_name}.o" "bin/${app_upper}.BIN"
                 fi
-                rm -f "bin/lib${app_name}.a"
+            fi
+
+            # Strategy 2: Fall back to staticlib
+            if [ ! -f "bin/${app_upper}.BIN" ]; then
+                if rustc $RUST_FLAGS --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
+                    if link_user_app "bin/lib${app_name}.a" "bin/${app_upper}.BIN" 2>/dev/null; then
+                        echo "  -> Created: bin/${app_upper}.BIN (from staticlib)"
+                    else
+                        echo "  -> ERROR: Failed to link ${app_upper}.BIN!" >&2
+                        rm -f "bin/${app_upper}.BIN"
+                    fi
+                    rm -f "bin/lib${app_name}.a"
+                else
+                    echo "  -> ERROR: Failed to compile $app_src!" >&2
+                fi
+            fi
+
+            # Report binary size
+            if [ -f "bin/${app_upper}.BIN" ]; then
+                local sz=$(wc -c < "bin/${app_upper}.BIN")
+                echo "  -> ${app_upper}.BIN size: $sz bytes"
+                if [ "$sz" -gt 196608 ]; then
+                    echo "  -> WARNING: ${app_upper}.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
+                fi
             fi
         done
     fi

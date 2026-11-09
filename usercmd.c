@@ -7,6 +7,23 @@
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
 
+// Diagnostic: print a byte as two hex characters
+static void print_hex_byte(unsigned char b) {
+    const char hex[] = "0123456789ABCDEF";
+    char buf[3];
+    buf[0] = hex[b >> 4];
+    buf[1] = hex[b & 0x0F];
+    buf[2] = '\0';
+    print_string(buf);
+}
+
+static void print_hex32(unsigned int v) {
+    print_hex_byte((v >> 24) & 0xFF);
+    print_hex_byte((v >> 16) & 0xFF);
+    print_hex_byte((v >> 8) & 0xFF);
+    print_hex_byte(v & 0xFF);
+}
+
 // Internal helper to convert character to uppercase
 static char uc(char c) {
     if (c >= 'a' && c <= 'z') return c - ('a' - 'A');
@@ -153,12 +170,41 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Load binary into application memory
     void* dest = (void*)USER_APP_BASE;
+
+    // Zero out the app memory region first (clean BSS, prevent stale data)
+    memset(dest, 0, USER_APP_MAX_SIZE);
+
     int bytes_read = fat16_read_file(&app_entry, dest, USER_APP_MAX_SIZE);
     if (bytes_read <= 0) {
         print_color_string("CykShell: failed to load: ", VGA_RED);
         print_string(target_file);
         print_string("\n");
         return 1;
+    }
+
+    // === DIAGNOSTIC OUTPUT ===
+    print_string("[exec] Loaded ");
+    print_hex32((unsigned int)bytes_read);
+    print_string(" bytes (file size: ");
+    print_hex32(app_entry.file_size);
+    print_string(")\n[exec] First 16 bytes at 0x50000: ");
+    unsigned char* dbg = (unsigned char*)dest;
+    for (int d = 0; d < 16; d++) {
+        print_hex_byte(dbg[d]);
+        print_char(' ');
+    }
+    print_string("\n");
+
+    // Check for ELF header (common mistake: binary is ELF not flat)
+    if (dbg[0] == 0x7F && dbg[1] == 'E' && dbg[2] == 'L' && dbg[3] == 'F') {
+        print_color_string("[exec] ERROR: Binary is ELF format, not flat binary!\n", VGA_RED);
+        print_string("       The linker did not produce OUTPUT_FORMAT(\"binary\").\n");
+        return 1;
+    }
+
+    // Check for all zeros (file wasn't actually loaded)
+    if (dbg[0] == 0 && dbg[1] == 0 && dbg[2] == 0 && dbg[3] == 0) {
+        print_color_string("[exec] WARNING: First 4 bytes are 0x00 - binary may be empty or corrupt\n", VGA_RED);
     }
 
     // Tokenize arguments into standard (int argc, char** argv)
@@ -210,8 +256,29 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
+
+    // === SANITY TEST: write "xor eax,eax; ret" to 0x60000 and call it ===
+    // If this crashes, the problem is environmental (GDT, stack, memory),
+    // not in the Rust binary itself.
+    {
+        unsigned char* sanity_area = (unsigned char*)0x60000;
+        sanity_area[0] = 0x31;  // xor eax, eax
+        sanity_area[1] = 0xC0;
+        sanity_area[2] = 0xC3;  // ret
+        app_main_fn sanity_fn = (app_main_fn)0x60000;
+        int sr = sanity_fn(0, (void*)0);
+        (void)sr;
+        print_string("[exec] Sanity test (call 0x60000) PASSED\n");
+    }
+
+    print_string("[exec] Calling entry at 0x50000...\n");
     app_main_fn entry = (app_main_fn)dest;
-    entry(argc, s_argv);
+    int result = entry(argc, s_argv);
+
+    // If we reach here, the app returned successfully
+    print_string("[exec] App returned: ");
+    print_hex32((unsigned int)result);
+    print_string("\n");
 
     return 1;
 }
