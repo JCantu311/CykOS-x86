@@ -178,6 +178,19 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
 }
 
 
+static void diag_hex_byte(unsigned char b) {
+    char hex[] = "0123456789ABCDEF";
+    print_char(hex[(b >> 4) & 0x0F]);
+    print_char(hex[b & 0x0F]);
+}
+
+static void diag_hex_dword(unsigned int val) {
+    diag_hex_byte((val >> 24) & 0xFF);
+    diag_hex_byte((val >> 16) & 0xFF);
+    diag_hex_byte((val >> 8) & 0xFF);
+    diag_hex_byte(val & 0xFF);
+}
+
 void kernel_main(void) {
     clear_screen();
     
@@ -218,8 +231,30 @@ void kernel_main(void) {
 
     print_color_string(welcome_message, VGA_GREEN);
 
-    // char shell_msg[] = ;
-    print_string("Loading CykShell...\n");
+    char lbl_addr[] = "Literal Addr: 0x";
+    char lbl_byte[] = " | First Byte: 0x";
+    char lbl_found[] = "\nString Found at: 0x";
+    char nl[] = "\n";
+    const char* test_literal = "Loading CykShell...\n";
+
+    print_string(lbl_addr);
+    diag_hex_dword((unsigned int)test_literal);
+    print_string(lbl_byte);
+    diag_hex_byte((unsigned char)test_literal[0]);
+
+    unsigned int found_addr = 0;
+    for (unsigned int addr = 0x7000; addr < 0x20000; addr++) {
+        const char* p = (const char*)addr;
+        if (p[0] == 'L' && p[1] == 'o' && p[2] == 'a' && p[3] == 'd' && p[4] == 'i' && p[5] == 'n' && p[6] == 'g') {
+            found_addr = addr;
+            break;
+        }
+    }
+    print_string(lbl_found);
+    diag_hex_dword(found_addr);
+    print_string(nl);
+
+    print_string(test_literal);
     
     while (1) {
         asm("hlt");
