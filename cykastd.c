@@ -43,6 +43,12 @@ void print_char(char c) {
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
+    } else if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+            int index = (cursor_y * VGA_WIDTH) + cursor_x;
+            vga[index] = (CONSOLE_COLOR << 8) | ' ';
+        }
     } else {
         int index = (cursor_y * VGA_WIDTH) + cursor_x;
         vga[index] = (CONSOLE_COLOR << 8) | (unsigned char)c;

@@ -3,6 +3,9 @@
 #include "fat16.h"
 #include "modload.h"
 
+// Level 3 CykShell Entry Point (implemented in shell.rs)
+extern void shell_main(void);
+
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     unsigned int pattern = 0xAA55AA55;
     for (unsigned int i = 0; i < count; i++) {
@@ -85,13 +88,8 @@ void kernel_main(void) {
 
     print_string("Loading CykShell...\n");
 
-    // Quick verification test for Level 2 CykKeyboard driver
-    if (modload_get_keyboard_driver() != (void*)0) {
-        print_color_string("Keyboard active! Type any character: ", VGA_WHITE);
-        char key = get_char();
-        print_char(key);
-        print_string("\nKey captured! Ready for Level 3 CykShell.\n");
-    }
+    // Launch Level 3 CykShell directly without waiting for user input
+    shell_main();
     
     while (1) {
         asm("hlt");

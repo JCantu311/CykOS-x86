@@ -29,6 +29,8 @@ SECTIONS
         *(.data*)                /* Initialized global variables */
         *(.data.rel.ro*)         /* Initialized pointers to read-only strings (e.g. char* p = "...") */
         *(.data.rel.ro.local*)
+        *(.got*)
+        *(.got.plt*)
     }
 
     .bss (NOLOAD) : {

@@ -48,14 +48,31 @@ $CC -m32 -c fat16.c -o bin/fat16.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pi
 $CC -m32 -c modload.c -o bin/modload.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 
-# 5. Compile Level 2 Standalone Driver Modules
+# 5. Compile Level 3 CykShell (Rust)
+if command -v rustc &> /dev/null; then
+    echo "Compiling Level 3 CykShell (Rust)..."
+    if rustc --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully with i686-unknown-none target spec."
+    elif rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully with i686-unknown-linux-gnu target."
+    elif rustc --target i686-unknown-none -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully with i686-unknown-none target."
+    else
+        rustc --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o
+    fi
+else
+    echo "Error: rustc not found! Please install Rust to build CykShell." >&2
+    exit 1
+fi
+
+# 6. Compile Level 2 Standalone Driver Modules
 $CC -m32 -c keyboard.c -o bin/keyboard.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $LD -m elf_i386 -T module.ld --no-dynamic-linker -no-pie bin/keyboard.o -o bin/cykeybrd.drv
 
-# 6. Link Level 1 Kernel
-$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/kernel.o -o bin/os_image.bin
+# 7. Link Level 1 Kernel and Level 3 CykShell
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/kernel.o bin/shell.o -o bin/os_image.bin
 
-# 7. Format FAT16 partition and package Level 2 drivers & configuration
+# 8. Format FAT16 partition and package Level 2 drivers & configuration
 if command -v python3 &> /dev/null; then
     python3 mkfat16.py bin/os_image.bin
 elif command -v python &> /dev/null; then
@@ -65,4 +82,4 @@ else
 fi
 
 echo "----------------------------------------"
-echo "Build successful! Created bin/os_image.bin with Level 1 Kernel & Level 2 Drivers."
+echo "Build successful! Created bin/os_image.bin with Kernel, Level 2 Drivers, and Level 3 CykShell."
