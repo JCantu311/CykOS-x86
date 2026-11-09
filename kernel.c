@@ -22,15 +22,17 @@
 unsigned short inw(unsigned short port);
 void outw(unsigned short port, unsigned short data);
 
-// Helper to wait for the disk controller to be ready
 static void ata_wait_ready(void) {
+    // Read an unused port to generate a tiny hardware micro-delay
+    inb(0x80); 
     while (inb(ATA_STATUS_PORT) & ATA_STATUS_BSY);
 }
 
-// Helper to wait for the disk controller to request/accept data
 static void ata_wait_drq(void) {
+    inb(0x80);
     while (!(inb(ATA_STATUS_PORT) & ATA_STATUS_DRQ));
 }
+
 
 /**
  * Reads sequential sectors using LBA28 PIO Mode
@@ -48,8 +50,8 @@ void ata_read_sectors(unsigned int lba, unsigned char count, unsigned short* tar
     outb(ATA_LBA_HIGH_PORT, (unsigned char)(lba >> 16));
     
     // Select master drive and send top 4 bits of the LBA
-    outb(ATA_DRIVE_PORT, 0xE0 | ((lba >> 24) & 0x0F));
-    
+    outb(ATA_DRIVE_PORT, 0x40 | ((lba >> 24) & 0x0F));
+
     // Send Read Command
     outb(ATA_COMMAND_PORT, ATA_CMD_READ);
 
