@@ -255,6 +255,9 @@ void kernel_main(void) {
     print_string(nl);
 
     print_string(test_literal);
+    print_string("Direct Literal: Hello from CykOS!\n");
+    char* test_ptr = "Pointer Variable: CykShell Ready.\n";
+    print_string(test_ptr);
     
     while (1) {
         asm("hlt");

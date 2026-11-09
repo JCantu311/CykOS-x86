@@ -24,10 +24,10 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Read 32 sectors sequentially into memory address 0x9000
+    ; Read 32 sectors sequentially into memory address 0x7E00 (contiguous with MBR)
     mov ax, 0x0000
     mov es, ax              
-    mov bx, 0x9000          
+    mov bx, 0x7E00          
     
     mov ah, 0x02            
     mov al, 32
