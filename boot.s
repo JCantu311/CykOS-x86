@@ -24,19 +24,16 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Load kernel using INT 13h LBA Extensions (two 32KB chunks = 64KB total)
-    ; Chunk 1: 64 sectors (32KB) from LBA 1 to 0x07E0:0x0000 (physical 0x7E00)
-    mov si, dap
-    mov ah, 0x42
-    mov dl, [BOOT_DRIVE]
-    int 0x13
-    jc disk_error
-
-    ; Chunk 2: 64 sectors (32KB) from LBA 65 to 0x0FE0:0x0000 (physical 0xFE00)
-    mov word [dap_seg], 0x0FE0
-    mov word [dap_lba], 65
-    mov si, dap
-    mov ah, 0x42
+    ; Load kernel sectors into memory at 0x7E00 (contiguous with MBR)
+    ; QEMU/SeaBIOS handles multi-track AH=02h reads transparently via internal LBA
+    mov ax, 0x0000
+    mov es, ax
+    mov bx, 0x7E00
+    mov ah, 0x02
+    mov al, 127             ; Read 127 sectors = ~63.5 KB
+    mov ch, 0
+    mov dh, 0
+    mov cl, 2               ; Start at sector 2 (CHS) = LBA 1
     mov dl, [BOOT_DRIVE]
     int 0x13
     jc disk_error           
