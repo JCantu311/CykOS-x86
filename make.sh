@@ -146,8 +146,10 @@ if command -v rustc &> /dev/null; then
             -C target-feature=-sse,-sse2 \
             --crate-type=staticlib edit.rs -o bin/libedit.a; then
             if [ -f bin/kernel_syms.ld ]; then
-                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive bin/libedit.a --no-whole-archive -o bin/EDIT.BIN 2>/dev/null || \
-                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN
+                $LD -m elf_i386 -T user.ld --gc-sections -u main \
+                    bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN 2>/dev/null || \
+                $LD -m elf_i386 -T user.ld -u main \
+                    bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN
                 if [ -s bin/EDIT.BIN ]; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN"
                 else
@@ -174,8 +176,10 @@ if command -v rustc &> /dev/null; then
                 -C target-feature=-sse,-sse2 \
                 --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
                 if [ -f bin/kernel_syms.ld ]; then
-                    $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive "bin/lib${app_name}.a" --no-whole-archive -o "bin/${app_upper}.BIN" 2>/dev/null || \
-                    $LD -m elf_i386 -T user.ld bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || true
+                    $LD -m elf_i386 -T user.ld --gc-sections -u main \
+                        bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || \
+                    $LD -m elf_i386 -T user.ld -u main \
+                        bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || true
                 fi
                 rm -f "bin/lib${app_name}.a"
             fi
