@@ -10,6 +10,8 @@ const KEY_LEFT: u8     = 0x82;
 const KEY_RIGHT: u8    = 0x83;
 const KEY_HOME: u8     = 0x84;
 const KEY_END: u8      = 0x85;
+const KEY_PAGEUP: u8   = 0x86;
+const KEY_PAGEDOWN: u8 = 0x87;
 const KEY_DELETE: u8   = 0x89;
 
 // Level 1 Kernel & Driver C Function Declarations
@@ -641,10 +643,316 @@ fn cmd_pwd(_args: &[u8]) {
     }
 }
 
+// =========================================================================
+// Built-in Command: ls (Linux-style compact directory listing)
+// =========================================================================
+
+extern "C" fn ls_entry_callback(name_ptr: *const u8, _size: u32, is_dir: u8) {
+    if name_ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        if is_dir != 0 {
+            // Print directory name in green with trailing /
+            let mut len = 0;
+            while *name_ptr.add(len) != 0 && len < 13 {
+                let pair = [*name_ptr.add(len), 0];
+                print_color_string(pair.as_ptr(), 0x0A);
+                len += 1;
+            }
+            let slash = [b'/', 0];
+            print_color_string(slash.as_ptr(), 0x0A);
+        } else {
+            let mut len = 0;
+            while *name_ptr.add(len) != 0 && len < 13 {
+                print_char(*name_ptr.add(len));
+                len += 1;
+            }
+        }
+        print_char(b'\n');
+    }
+}
+
+fn cmd_ls(_args: &[u8]) {
+    unsafe {
+        fat16_list_directory(ls_entry_callback);
+    }
+}
+
+// =========================================================================
+// Built-in Command: less (Full-screen file pager)
+// =========================================================================
+
+// VGA direct-write helper for status bar rendering
+#[inline(always)]
+fn vga_write(col: usize, row: usize, ch: u8, attr: u8) {
+    if col < 80 && row < 25 {
+        let offset = (row * 80 + col) * 2;
+        unsafe {
+            let ptr = 0xB8000 as *mut u8;
+            *ptr.add(offset) = ch;
+            *ptr.add(offset + 1) = attr;
+        }
+    }
+}
+
+// Pre-parsed line start offsets for the pager (supports files up to ~1024 lines)
+static mut LESS_LINE_STARTS: [u32; 1024] = [0; 1024];
+static mut LESS_LINE_COUNT: usize = 0;
+
+fn cmd_less(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: less <filename>\n");
+        return;
+    }
+
+    let mut fname_buf = [0u8; 64];
+    let len = if filename.len() < 63 { filename.len() } else { 63 };
+    let mut i = 0;
+    while i < len {
+        fname_buf[i] = filename[i];
+        i += 1;
+    }
+    fname_buf[len] = 0;
+
+    let bytes_read = unsafe {
+        fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
+    };
+
+    if bytes_read < 0 {
+        puts(b"less: cannot open file: ");
+        puts(filename);
+        puts(b"\n");
+        return;
+    }
+
+    let total = bytes_read as usize;
+    if total == 0 {
+        puts(b"(empty file)\n");
+        return;
+    }
+
+    // Pre-scan line start offsets
+    unsafe {
+        LESS_LINE_STARTS[0] = 0;
+        LESS_LINE_COUNT = 1;
+
+        let mut idx = 0;
+        while idx < total {
+            if SHELL_FILE_BUF[idx] == b'\n' && idx + 1 < total && LESS_LINE_COUNT < 1024 {
+                LESS_LINE_STARTS[LESS_LINE_COUNT] = (idx + 1) as u32;
+                LESS_LINE_COUNT += 1;
+            }
+            idx += 1;
+        }
+    }
+
+    let page_lines: usize = 24; // 24 rows for content, row 24 for status bar
+    let mut scroll: usize = 0;
+
+    loop {
+        // --- Render page ---
+        unsafe { clear_screen(); }
+
+        unsafe {
+            let mut row: usize = 0;
+            while row < page_lines {
+                let line_idx = scroll + row;
+                if line_idx >= LESS_LINE_COUNT {
+                    // Past end of file: show ~ markers
+                    let tilde = [b'~', 0];
+                    print_color_string(tilde.as_ptr(), 0x09); // Light Blue
+                    print_char(b'\n');
+                } else {
+                    let start = LESS_LINE_STARTS[line_idx] as usize;
+                    let end = if line_idx + 1 < LESS_LINE_COUNT {
+                        LESS_LINE_STARTS[line_idx + 1] as usize
+                    } else {
+                        total
+                    };
+
+                    let mut col: usize = 0;
+                    let mut bi = start;
+                    while bi < end {
+                        let b = SHELL_FILE_BUF[bi];
+                        if b == b'\r' {
+                            bi += 1;
+                            continue;
+                        }
+                        if b == b'\n' {
+                            break;
+                        }
+                        if b == b'\t' {
+                            // Expand tab to spaces (next multiple of 8)
+                            let next_tab = (col + 8) & !7;
+                            while col < next_tab && col < 80 {
+                                print_char(b' ');
+                                col += 1;
+                            }
+                        } else if col < 80 {
+                            print_char(b);
+                            col += 1;
+                        }
+                        bi += 1;
+                    }
+                    print_char(b'\n');
+                }
+                row += 1;
+            }
+        }
+
+        // --- Render status bar on row 24 (black on grey, attribute 0x70) ---
+        let status_attr: u8 = 0x70;
+
+        // Clear entire status row
+        for col in 0..80 {
+            vga_write(col, 24, b' ', status_attr);
+        }
+
+        // Write filename
+        let mut pos: usize = 1;
+        let mut fi: usize = 0;
+        while fi < filename.len() && pos < 40 {
+            vga_write(pos, 24, filename[fi], status_attr);
+            pos += 1;
+            fi += 1;
+        }
+
+        // Write percentage or END indicator
+        pos += 1;
+        let at_end = unsafe { scroll + page_lines >= LESS_LINE_COUNT };
+        let at_start = scroll == 0;
+
+        let indicator: &[u8] = if at_start && at_end {
+            b"(ALL)"
+        } else if at_end {
+            b"(END)"
+        } else if at_start {
+            b"(TOP)"
+        } else {
+            // Show approximate percentage
+            let pct = unsafe {
+                if LESS_LINE_COUNT > 0 {
+                    ((scroll + page_lines) * 100) / LESS_LINE_COUNT
+                } else {
+                    100
+                }
+            };
+            // We'll format this inline below
+            b""
+        };
+
+        if !indicator.is_empty() {
+            let mut ii = 0;
+            while ii < indicator.len() && pos < 60 {
+                vga_write(pos, 24, indicator[ii], status_attr);
+                pos += 1;
+                ii += 1;
+            }
+        } else {
+            // Render numeric percentage
+            let pct = unsafe {
+                if LESS_LINE_COUNT > 0 {
+                    ((scroll + page_lines) * 100) / LESS_LINE_COUNT
+                } else {
+                    100
+                }
+            };
+            // Format pct as up to 3 digits
+            let d2 = (pct / 100) as u8;
+            let d1 = ((pct / 10) % 10) as u8;
+            let d0 = (pct % 10) as u8;
+            if d2 > 0 {
+                vga_write(pos, 24, b'0' + d2, status_attr);
+                pos += 1;
+            }
+            if d2 > 0 || d1 > 0 {
+                vga_write(pos, 24, b'0' + d1, status_attr);
+                pos += 1;
+            }
+            vga_write(pos, 24, b'0' + d0, status_attr);
+            pos += 1;
+            vga_write(pos, 24, b'%', status_attr);
+        }
+
+        // Help hint on right side
+        let hint = b"q:Quit j/k:Scroll Space:Page";
+        let hint_start = 80 - hint.len() - 1;
+        let mut hi = 0;
+        while hi < hint.len() {
+            vga_write(hint_start + hi, 24, hint[hi], status_attr);
+            hi += 1;
+        }
+
+        // Position cursor at end of status bar (hide it)
+        unsafe { set_cursor_pos(79, 24); }
+
+        // --- Handle input ---
+        let key = unsafe { get_char() };
+
+        if key == b'q' || key == b'Q' {
+            break;
+        }
+
+        let max_scroll = unsafe {
+            if LESS_LINE_COUNT > page_lines {
+                LESS_LINE_COUNT - page_lines
+            } else {
+                0
+            }
+        };
+
+        if key == b'j' || key == KEY_DOWN || key == b'\n' || key == b'\r' {
+            if scroll < max_scroll {
+                scroll += 1;
+            }
+        } else if key == b'k' || key == KEY_UP {
+            if scroll > 0 {
+                scroll -= 1;
+            }
+        } else if key == b' ' || key == KEY_PAGEDOWN || key == b'f' {
+            scroll += page_lines;
+            if scroll > max_scroll {
+                scroll = max_scroll;
+            }
+        } else if key == b'b' || key == KEY_PAGEUP {
+            if scroll >= page_lines {
+                scroll -= page_lines;
+            } else {
+                scroll = 0;
+            }
+        } else if key == b'g' || key == KEY_HOME {
+            scroll = 0;
+        } else if key == b'G' || key == KEY_END {
+            scroll = max_scroll;
+        } else if key == b'd' {
+            // Half-page down
+            scroll += page_lines / 2;
+            if scroll > max_scroll {
+                scroll = max_scroll;
+            }
+        } else if key == b'u' {
+            // Half-page up
+            if scroll >= page_lines / 2 {
+                scroll -= page_lines / 2;
+            } else {
+                scroll = 0;
+            }
+        }
+    }
+
+    unsafe { clear_screen(); }
+}
+
 // Built-in Command: help
 fn cmd_help(_args: &[u8]) {
     puts(b"\nAvailable CykShell Commands:\n");
     for cmd in COMMANDS {
+        if cmd.description.is_empty() {
+            continue; // Skip uppercase aliases
+        }
         puts(b"  ");
         puts(cmd.name);
         let mut pad = cmd.name.len();
@@ -826,6 +1134,26 @@ pub static COMMANDS: &[Command] = &[
         description: b"",
         handler: cmd_pwd,
     },
+    Command {
+        name: b"ls",
+        description: b"List files (compact Linux-style listing)",
+        handler: cmd_ls,
+    },
+    Command {
+        name: b"LS",
+        description: b"",
+        handler: cmd_ls,
+    },
+    Command {
+        name: b"less",
+        description: b"View a file with scrolling (e.g. less file.txt)",
+        handler: cmd_less,
+    },
+    Command {
+        name: b"LESS",
+        description: b"",
+        handler: cmd_less,
+    },
     // Future user applications or additional built-ins can be registered here!
 ];
 
@@ -930,6 +1258,8 @@ const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"rmdir",
     b"cd",
     b"pwd",
+    b"ls",
+    b"less",
 ];
 
 #[no_mangle]
