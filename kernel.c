@@ -104,7 +104,7 @@ void kernel_main(void) {
     }
 
     print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell...\n");
-    // secwait(2); 
+    secwait(2); 
 
     // Launch Level 3 CykShell directly without waiting for user input
     shell_main();
