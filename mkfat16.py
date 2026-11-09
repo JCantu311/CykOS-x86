@@ -175,13 +175,26 @@ if __name__ == "__main__":
     sample_files = {
         "README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
         "MODULES.CFG": "# CykOS Boot-Time Kernel Module List\nCYKEYBRD.DRV\n",
-        "USERCMDS.TXT": "# CykOS External User Commands\n# Format: <alias> <binary_filename>\n# Example: hello HELLO.COM\n"
     }
 
-    # Check if compiled Level 2 CykKeyboard driver exists
-    kbd_path = os.path.join("bin", "cykeybrd.drv")
-    if os.path.exists(kbd_path):
-        with open(kbd_path, "rb") as f:
-            sample_files["CYKEYBRD.DRV"] = f.read()
+    # Load USERCMDS.LST if present on host, otherwise use default
+    if os.path.exists("USERCMDS.LST"):
+        with open("USERCMDS.LST", "r") as f:
+            sample_files["USERCMDS.LST"] = f.read()
+    else:
+        sample_files["USERCMDS.LST"] = "# CykOS External User Commands\nedit EDIT.BIN\nvi EDIT.BIN\n"
+
+    # Automatically scan bin/ and apps/bin/ for all user binaries
+    search_dirs = ["bin", os.path.join("apps", "bin")]
+    for sdir in search_dirs:
+        if os.path.exists(sdir):
+            for fname in os.listdir(sdir):
+                fpath = os.path.join(sdir, fname)
+                if os.path.isfile(fpath):
+                    ext = os.path.splitext(fname)[1].upper()
+                    if ext in [".BIN", ".COM", ".DRV", ".TXT", ".LST"]:
+                        target_name = fname.upper()
+                        with open(fpath, "rb") as bf:
+                            sample_files[target_name] = bf.read()
 
     format_disk(target_img, sample_files)

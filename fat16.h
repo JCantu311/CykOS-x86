@@ -27,6 +27,8 @@ typedef void (*fat16_dir_callback_t)(const char* name, unsigned int size, unsign
 int fat16_init(void);
 int fat16_find_file(const char* filename, fat16_entry_t* out_entry);
 int fat16_read_file(const fat16_entry_t* entry, void* buffer, unsigned int max_bytes);
+int fat16_read_file_by_name(const char* filename, void* buffer, unsigned int max_bytes);
+int fat16_write_file(const char* filename, const void* data, unsigned int size);
 int fat16_list_directory(fat16_dir_callback_t callback);
 void fat16_print_volume_info(void);
 

@@ -270,12 +270,17 @@ fn dispatch_command(raw_line: &[u8]) {
         split_idx += 1;
     }
 
-    let cmd_name = &trimmed[..split_idx];
+    let mut cmd_name = &trimmed[..split_idx];
     let args = if split_idx < trimmed.len() {
         trim_slice(&trimmed[split_idx..])
     } else {
         b""
     };
+
+    // Strip leading "./" or ".\\" path prefix if user typed e.g. "./edit.bin"
+    if cmd_name.len() >= 2 && cmd_name[0] == b'.' && (cmd_name[1] == b'/' || cmd_name[1] == b'\\') {
+        cmd_name = &cmd_name[2..];
+    }
 
     // 1. Check built-in commands first
     for cmd in COMMANDS {

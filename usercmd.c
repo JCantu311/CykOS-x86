@@ -2,7 +2,8 @@
 #include "fat16.h"
 #include "cykastd.h"
 
-#define USERCMDS_FILE     "USERCMDS.TXT"
+#define USERCMDS_FILE     "USERCMDS.LST"    // List (LST) of userland commands
+#define USERCMDS_FALLBACK "USERCMDS.TXT"    // Fallback compatibility
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
 #define USER_APP_MAX_SIZE 0x10000   // 64 KB maximum application binary size
 
@@ -49,7 +50,9 @@ static const char* next_token(const char* p, char* out, int max) {
 static int find_alias(const char* cmd_name, char* out_bin, int out_max) {
     fat16_entry_t cfg;
     if (fat16_find_file(USERCMDS_FILE, &cfg) != 0) {
-        return 0; // File not present on disk
+        if (fat16_find_file(USERCMDS_FALLBACK, &cfg) != 0) {
+            return 0; // Config file not present on disk
+        }
     }
 
     char buf[1024];
@@ -87,7 +90,48 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Look up alias in USERCMDS.TXT
     if (!find_alias(cmd_name, target_file, sizeof(target_file))) {
-        return 0; // Not an external command
+        // Fallback: check if cmd_name is a direct file or has .BIN / .COM extension
+        fat16_entry_t probe;
+        if (fat16_find_file(cmd_name, &probe) == 0) {
+            int i = 0;
+            while (cmd_name[i] && i < (int)sizeof(target_file) - 1) {
+                target_file[i] = cmd_name[i];
+                i++;
+            }
+            target_file[i] = '\0';
+        } else {
+            char name_buf[16];
+            int i = 0;
+            while (cmd_name[i] && cmd_name[i] != '.' && i < 8) {
+                name_buf[i] = cmd_name[i];
+                i++;
+            }
+            name_buf[i] = '\0';
+
+            // Try <cmd>.BIN
+            char test_bin[16];
+            int j = 0;
+            while (name_buf[j]) { test_bin[j] = name_buf[j]; j++; }
+            test_bin[j++] = '.';
+            test_bin[j++] = 'B';
+            test_bin[j++] = 'I';
+            test_bin[j++] = 'N';
+            test_bin[j] = '\0';
+
+            if (fat16_find_file(test_bin, &probe) == 0) {
+                for (int k = 0; k <= j; k++) target_file[k] = test_bin[k];
+            } else {
+                // Try <cmd>.COM
+                test_bin[j - 3] = 'C';
+                test_bin[j - 2] = 'O';
+                test_bin[j - 1] = 'M';
+                if (fat16_find_file(test_bin, &probe) == 0) {
+                    for (int k = 0; k <= j; k++) target_file[k] = test_bin[k];
+                } else {
+                    return 0; // Not an external command
+                }
+            }
+        }
     }
 
     // Locate the binary on FAT16
@@ -109,18 +153,69 @@ int exec_user_command(const char* cmd_name, const char* args) {
         return 1;
     }
 
-    // Execute as a flat 32-bit function: int main(const char* args)
-    typedef int (*app_fn)(const char*);
-    app_fn entry = (app_fn)dest;
-    entry(args ? args : "");
+    // Tokenize arguments into standard (int argc, char** argv)
+    #define MAX_APP_ARGS 16
+    static char s_arg_buf[256];
+    static char* s_argv[MAX_APP_ARGS + 1];
+    int argc = 0;
+
+    // argv[0] is the command name as invoked
+    s_argv[argc++] = (char*)cmd_name;
+
+    if (args && args[0] != '\0') {
+        int i = 0;
+        while (args[i] != '\0' && i < (int)sizeof(s_arg_buf) - 1) {
+            s_arg_buf[i] = args[i];
+            i++;
+        }
+        s_arg_buf[i] = '\0';
+
+        char* p = s_arg_buf;
+        while (*p != '\0' && argc < MAX_APP_ARGS) {
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+                *p = '\0';
+                p++;
+            }
+            if (*p == '\0') break;
+
+            if (*p == '"' || *p == '\'') {
+                char quote = *p++;
+                s_argv[argc++] = p;
+                while (*p != '\0' && *p != quote) p++;
+                if (*p != '\0') {
+                    *p = '\0';
+                    p++;
+                }
+            } else {
+                s_argv[argc++] = p;
+                while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+                    p++;
+                }
+                if (*p != '\0') {
+                    *p = '\0';
+                    p++;
+                }
+            }
+        }
+    }
+    s_argv[argc] = (void*)0; // NULL termination
+
+    // Execute as standard 32-bit function: int main(int argc, char** argv)
+    typedef int (*app_main_fn)(int, char**);
+    app_main_fn entry = (app_main_fn)dest;
+    entry(argc, s_argv);
 
     return 1;
 }
 
 void list_user_commands(void) {
     fat16_entry_t cfg;
+    const char* filename = USERCMDS_FILE;
     if (fat16_find_file(USERCMDS_FILE, &cfg) != 0) {
-        return; // No USERCMDS.TXT present
+        if (fat16_find_file(USERCMDS_FALLBACK, &cfg) != 0) {
+            return; // No config present
+        }
+        filename = USERCMDS_FALLBACK;
     }
 
     char buf[1024];
@@ -128,7 +223,9 @@ void list_user_commands(void) {
     int bytes = fat16_read_file(&cfg, buf, sizeof(buf) - 1);
     if (bytes <= 0) return;
 
-    print_string("\nExternal Commands (USERCMDS.TXT):\n");
+    print_string("\nExternal Commands (");
+    print_string(filename);
+    print_string("):\n");
 
     const char* cursor = buf;
     char alias[16];

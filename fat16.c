@@ -370,3 +370,207 @@ void fat16_print_volume_info(void) {
     }
     print_string("\n");
 }
+
+static int fat16_set_cluster_entry(unsigned short cluster, unsigned short value) {
+    if (cluster < 2) return -1;
+    unsigned int fat_offset_bytes = cluster * 2;
+    unsigned int target_sector_lba = g_fat16.fat_lba + (fat_offset_bytes / g_fat16.bytes_per_sector);
+    unsigned int offset_in_sector = (fat_offset_bytes % g_fat16.bytes_per_sector) / 2;
+
+    if (ata_read_sectors(target_sector_lba, 1, g_sector_buf) != 0) {
+        return -1;
+    }
+    g_sector_buf[offset_in_sector] = value;
+
+    if (ata_write_sectors(target_sector_lba, 1, g_sector_buf) != 0) {
+        return -1;
+    }
+
+    if (g_fat16.fat_count > 1) {
+        unsigned int fat2_sector_lba = target_sector_lba + g_fat16.sectors_per_fat;
+        if (ata_write_sectors(fat2_sector_lba, 1, g_sector_buf) != 0) {
+            return -1;
+        }
+    }
+
+    g_cached_fat_lba = 0xFFFFFFFF;
+    return 0;
+}
+
+static unsigned short fat16_find_free_cluster(void) {
+    unsigned int total_entries = (unsigned int)g_fat16.sectors_per_fat * (g_fat16.bytes_per_sector / 2);
+    for (unsigned short c = 2; c < total_entries && c < 0xFFF0; c++) {
+        if (fat16_get_next_cluster(c) == 0x0000) {
+            return c;
+        }
+    }
+    return 0xFFFF;
+}
+
+static void fat16_free_cluster_chain(unsigned short start_cluster) {
+    unsigned short curr = start_cluster;
+    while (curr >= 2 && curr < 0xFFF8) {
+        unsigned short next = fat16_get_next_cluster(curr);
+        fat16_set_cluster_entry(curr, 0x0000);
+        if (next == 0x0000 || next >= 0xFFF8) {
+            break;
+        }
+        curr = next;
+    }
+}
+
+/**
+ * Writes or creates a file on the FAT16 volume.
+ * Supports both creating new files and overwriting existing files.
+ * Freestanding: zero libc dependencies.
+ */
+int fat16_write_file(const char* filename, const void* data, unsigned int size) {
+    if (!g_fat16.is_mounted || !filename) {
+        return -1;
+    }
+
+    char target_name[8];
+    char target_ext[3];
+    format_to_8_3(filename, target_name, target_ext);
+
+    int entry_found = 0;
+    unsigned int found_dir_sector = 0;
+    int found_dir_index = 0;
+    unsigned short old_first_cluster = 0;
+
+    int free_slot_found = 0;
+    unsigned int free_dir_sector = 0;
+    int free_dir_index = 0;
+
+    for (unsigned int sector = 0; sector < g_fat16.root_dir_sectors; sector++) {
+        unsigned int dir_lba = g_fat16.root_dir_lba + sector;
+        if (ata_read_sectors(dir_lba, 1, g_sector_buf) != 0) {
+            return -2;
+        }
+
+        fat16_raw_entry_t* entries = (fat16_raw_entry_t*)g_sector_buf;
+        for (int i = 0; i < 16; i++) {
+            unsigned char first_byte = (unsigned char)entries[i].name[0];
+
+            if (first_byte == 0x00 || first_byte == 0xE5) {
+                if (!free_slot_found) {
+                    free_slot_found = 1;
+                    free_dir_sector = dir_lba;
+                    free_dir_index = i;
+                }
+                if (first_byte == 0x00) {
+                    break;
+                }
+                continue;
+            }
+
+            if (entries[i].attributes == FAT_ATTR_LFN || (entries[i].attributes & FAT_ATTR_VOLUME_ID)) {
+                continue;
+            }
+
+            if (strncmp(entries[i].name, target_name, 8) == 0 &&
+                strncmp(entries[i].ext, target_ext, 3) == 0) {
+                entry_found = 1;
+                found_dir_sector = dir_lba;
+                found_dir_index = i;
+                old_first_cluster = entries[i].first_cluster_low;
+                break;
+            }
+        }
+
+        if (entry_found) break;
+    }
+
+    if (!entry_found && !free_slot_found) {
+        return -3; // Root directory full
+    }
+
+    // If overwriting, free old cluster chain
+    if (entry_found && old_first_cluster >= 2) {
+        fat16_free_cluster_chain(old_first_cluster);
+    }
+
+    // Allocate new clusters and write data
+    unsigned short first_cluster = 0;
+    unsigned short prev_cluster = 0;
+    unsigned int bytes_written = 0;
+    const unsigned char* src = (const unsigned char*)data;
+
+    if (size > 0 && src != (void*)0) {
+        while (bytes_written < size) {
+            unsigned short new_cluster = fat16_find_free_cluster();
+            if (new_cluster == 0xFFFF) {
+                if (first_cluster >= 2) {
+                    fat16_free_cluster_chain(first_cluster);
+                }
+                return -4; // Disk full
+            }
+
+            if (fat16_set_cluster_entry(new_cluster, 0xFFFF) != 0) {
+                return -5;
+            }
+
+            if (first_cluster == 0) {
+                first_cluster = new_cluster;
+            } else {
+                if (fat16_set_cluster_entry(prev_cluster, new_cluster) != 0) {
+                    return -5;
+                }
+            }
+            prev_cluster = new_cluster;
+
+            unsigned int cluster_lba = g_fat16.data_lba + (new_cluster - 2) * g_fat16.sectors_per_cluster;
+            for (unsigned char s = 0; s < g_fat16.sectors_per_cluster; s++) {
+                memset(g_sector_buf, 0, sizeof(g_sector_buf));
+                if (bytes_written < size) {
+                    unsigned int chunk = size - bytes_written;
+                    if (chunk > g_fat16.bytes_per_sector) {
+                        chunk = g_fat16.bytes_per_sector;
+                    }
+                    memcpy(g_sector_buf, src + bytes_written, chunk);
+                    bytes_written += chunk;
+                }
+                if (ata_write_sectors(cluster_lba + s, 1, g_sector_buf) != 0) {
+                    return -6;
+                }
+            }
+        }
+    }
+
+    // Update directory entry
+    unsigned int target_dir_sector = entry_found ? found_dir_sector : free_dir_sector;
+    int target_dir_index = entry_found ? found_dir_index : free_dir_index;
+
+    if (ata_read_sectors(target_dir_sector, 1, g_sector_buf) != 0) {
+        return -7;
+    }
+
+    fat16_raw_entry_t* dir_entries = (fat16_raw_entry_t*)g_sector_buf;
+    fat16_raw_entry_t* target_entry = &dir_entries[target_dir_index];
+
+    memcpy(target_entry->name, target_name, 8);
+    memcpy(target_entry->ext, target_ext, 3);
+    target_entry->attributes = FAT_ATTR_ARCHIVE;
+    target_entry->reserved = 0;
+    target_entry->first_cluster_high = 0;
+    target_entry->first_cluster_low = first_cluster;
+    target_entry->file_size = size;
+
+    if (ata_write_sectors(target_dir_sector, 1, g_sector_buf) != 0) {
+        return -8;
+    }
+
+    return 0;
+}
+
+/**
+ * Convenience helper to read a file by its filename directly.
+ */
+int fat16_read_file_by_name(const char* filename, void* buffer, unsigned int max_bytes) {
+    if (!filename || !buffer) return -1;
+    fat16_entry_t entry;
+    if (fat16_find_file(filename, &entry) != 0) {
+        return -1;
+    }
+    return fat16_read_file(&entry, buffer, max_bytes);
+}
