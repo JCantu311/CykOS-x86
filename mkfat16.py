@@ -171,8 +171,16 @@ def format_disk(image_path, files_to_add=None):
 
 if __name__ == "__main__":
     target_img = sys.argv[1] if len(sys.argv) > 1 else "bin/os_image.bin"
-    # Default file to inject for verification
+    
     sample_files = {
-        "README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n"
+        "README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
+        "MODULES.CFG": "# CykOS Boot-Time Kernel Module List\nCYKEYBRD.DRV\n"
     }
+
+    # Check if compiled Level 2 CykKeyboard driver exists
+    kbd_path = os.path.join("bin", "cykeybrd.drv")
+    if os.path.exists(kbd_path):
+        with open(kbd_path, "rb") as f:
+            sample_files["CYKEYBRD.DRV"] = f.read()
+
     format_disk(target_img, sample_files)

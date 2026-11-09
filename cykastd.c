@@ -1,4 +1,5 @@
 #include "cykastd.h"
+#include "modload.h"
 
 #define CONSOLE_COLOR VGA_WHITE
 
@@ -174,4 +175,46 @@ unsigned short inw(unsigned short port) {
 // Write a 16-bit word to an I/O port
 void outw(unsigned short port, unsigned short data) {
     asm volatile("outw %0, %1" :: "a"(data), "Nd"(port));
+}
+
+// Keyboard Hardware Interface Functions (Delegates to loaded Level 2 Keyboard Driver)
+int has_key(void) {
+    cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
+    if (kbd && kbd->has_key) {
+        return kbd->has_key();
+    }
+    return (inb(0x64) & 0x01) != 0;
+}
+
+char get_scancode(void) {
+    cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
+    if (kbd && kbd->get_scancode) {
+        return kbd->get_scancode();
+    }
+    while (!(inb(0x64) & 0x01)) {
+        asm volatile("pause");
+    }
+    return (char)inb(0x60);
+}
+
+char scancode_to_ascii(unsigned char scancode) {
+    cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
+    if (kbd && kbd->scancode_to_ascii) {
+        return kbd->scancode_to_ascii(scancode);
+    }
+    return 0;
+}
+
+char get_char(void) {
+    cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
+    if (kbd && kbd->get_char) {
+        return kbd->get_char();
+    }
+    while (1) {
+        char sc = get_scancode();
+        char ascii = scancode_to_ascii((unsigned char)sc);
+        if (ascii != 0) {
+            return ascii;
+        }
+    }
 }

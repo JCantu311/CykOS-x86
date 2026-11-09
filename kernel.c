@@ -1,6 +1,7 @@
 #include "cykastd.h"
 #include "ata.h"
 #include "fat16.h"
+#include "modload.h"
 
 int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
     unsigned int pattern = 0xAA55AA55;
@@ -71,9 +72,26 @@ void kernel_main(void) {
         print_color_string("FAT16: No filesystem detected on disk.\n", VGA_RED);
     }
 
+    // Load Level 2 driver modules from MODULES.CFG
+    print_string("Loading Level 2 Modules...\n");
+    int modules_loaded = modload_load_all();
+    if (modules_loaded > 0) {
+        print_color_string("Level 2 Modules Loaded Successfully.\n", VGA_GREEN);
+    } else {
+        print_color_string("Warning: No Level 2 modules loaded.\n", VGA_RED);
+    }
+
     secwait(1); 
 
     print_string("Loading CykShell...\n");
+
+    // Quick verification test for Level 2 CykKeyboard driver
+    if (modload_get_keyboard_driver() != (void*)0) {
+        print_color_string("Keyboard active! Type any character: ", VGA_WHITE);
+        char key = get_char();
+        print_char(key);
+        print_string("\nKey captured! Ready for Level 3 CykShell.\n");
+    }
     
     while (1) {
         asm("hlt");

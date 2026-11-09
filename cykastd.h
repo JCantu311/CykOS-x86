@@ -33,5 +33,7 @@ void secwait(unsigned int seconds);
 // NEW: Keyboard Engine
 char get_scancode(void);
 char scancode_to_ascii(unsigned char scancode);
+char get_char(void);
+int has_key(void);
 
 #endif // CYKASTD_H

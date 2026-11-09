@@ -41,16 +41,21 @@ fi
 # 3. Assemble unified module
 nasm -f elf32 boot.s -o bin/boot.o
 
-# 4. Compile remaining C components (Keep your stable -O0 non-artifacting flags)
+# 4. Compile Level 1 Kernel components
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c ata.c -o bin/ata.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c fat16.c -o bin/fat16.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
+$CC -m32 -c modload.c -o bin/modload.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 
-# 5. Link unified elements passing explicit non-PIE layout flags to the linker
-$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/kernel.o -o bin/os_image.bin
+# 5. Compile Level 2 Standalone Driver Modules
+$CC -m32 -c keyboard.c -o bin/keyboard.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
+$LD -m elf_i386 -T module.ld --no-dynamic-linker -no-pie bin/keyboard.o -o bin/cykeybrd.drv
 
-# 6. Format FAT16 partition and inject filesystem structure
+# 6. Link Level 1 Kernel
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/kernel.o -o bin/os_image.bin
+
+# 7. Format FAT16 partition and package Level 2 drivers & configuration
 if command -v python3 &> /dev/null; then
     python3 mkfat16.py bin/os_image.bin
 elif command -v python &> /dev/null; then
@@ -60,4 +65,4 @@ else
 fi
 
 echo "----------------------------------------"
-echo "Build successful! Standardized bin/os_image.bin with FAT16 filesystem."
+echo "Build successful! Created bin/os_image.bin with Level 1 Kernel & Level 2 Drivers."
