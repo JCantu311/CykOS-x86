@@ -91,8 +91,8 @@ void kernel_main(void) {
         print_color_string("[Level 2] Warning: No Level 2 modules loaded.\n", VGA_RED);
     }
 
-    print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell in 2 seconds...\n");
-    secwait(2); 
+    print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell...\n");
+    // secwait(2); 
 
     // Launch Level 3 CykShell directly without waiting for user input
     shell_main();
