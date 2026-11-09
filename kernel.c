@@ -87,7 +87,7 @@ void kernel_main(void) {
 
     secwait(1); 
 
-    print_string("Loading CykShell...\n");
+    // print_string("Loading CykShell...\n");
 
     // Launch Level 3 CykShell directly without waiting for user input
     shell_main();
