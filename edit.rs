@@ -1,5 +1,8 @@
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
 
 use core::panic::PanicInfo;
 

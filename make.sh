@@ -90,18 +90,44 @@ $LD -m elf_i386 -T linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/
 if [ -f bin/kernel.map ]; then
     python3 -c "
 import re
-with open('bin/kernel.map') as f, open('bin/kernel_syms.ld', 'w') as out:
+symbols = {}
+with open('bin/kernel.map') as f:
     for line in f:
-        m = re.match(r'^\s+(0x[0-9a-fA-F]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$', line)
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r'\b0x([0-9a-fA-F]{4,16})\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
         if m:
-            out.write(f'{m.group(2)} = {m.group(1)};\n')
+            symbols[m.group(2)] = '0x' + m.group(1)
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            if re.match(r'^[0-9a-fA-F]{4,16}$', parts[0]) and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', parts[-1]):
+                symbols[parts[-1]] = '0x' + parts[0]
+
+with open('bin/kernel_syms.ld', 'w') as out:
+    for sym, addr in symbols.items():
+        out.write(f'{sym} = {addr};\n')
 " 2>/dev/null || python -c "
 import re
-with open('bin/kernel.map') as f, open('bin/kernel_syms.ld', 'w') as out:
+symbols = {}
+with open('bin/kernel.map') as f:
     for line in f:
-        m = re.match(r'^\s+(0x[0-9a-fA-F]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$', line)
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r'\b0x([0-9a-fA-F]{4,16})\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
         if m:
-            out.write(f'{m.group(2)} = {m.group(1)};\n')
+            symbols[m.group(2)] = '0x' + m.group(1)
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            if re.match(r'^[0-9a-fA-F]{4,16}$', parts[0]) and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', parts[-1]):
+                symbols[parts[-1]] = '0x' + parts[0]
+
+with open('bin/kernel_syms.ld', 'w') as out:
+    for sym, addr in symbols.items():
+        out.write(f'{sym} = {addr};\n')
 " 2>/dev/null || true
 fi
 
@@ -117,14 +143,15 @@ if command -v rustc &> /dev/null; then
             -C relocation-model=static \
             -C panic=abort \
             -C target-feature=-sse,-sse2 \
-            --emit=obj edit.rs -o bin/edit.o; then
+            --crate-type=staticlib edit.rs -o bin/libedit.a; then
             if [ -f bin/kernel_syms.ld ]; then
-                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/edit.o -o bin/EDIT.BIN
+                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive bin/libedit.a --no-whole-archive -o bin/EDIT.BIN 2>/dev/null || \
+                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN
                 if [ -f bin/EDIT.BIN ]; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN"
                 fi
             fi
-            rm -f bin/edit.o
+            rm -f bin/libedit.a
         fi
     fi
 
@@ -141,11 +168,12 @@ if command -v rustc &> /dev/null; then
                 -C relocation-model=static \
                 -C panic=abort \
                 -C target-feature=-sse,-sse2 \
-                --emit=obj "$app_src" -o "bin/${app_name}.o" 2>/dev/null; then
+                --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
                 if [ -f bin/kernel_syms.ld ]; then
-                    $LD -m elf_i386 -T user.ld bin/kernel_syms.ld "bin/${app_name}.o" -o "bin/${app_upper}.BIN" 2>/dev/null || true
+                    $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive "bin/lib${app_name}.a" --no-whole-archive -o "bin/${app_upper}.BIN" 2>/dev/null || \
+                    $LD -m elf_i386 -T user.ld bin/kernel_syms.ld "bin/lib${app_name}.a" -o "bin/${app_upper}.BIN" 2>/dev/null || true
                 fi
-                rm -f "bin/${app_name}.o"
+                rm -f "bin/lib${app_name}.a"
             fi
         done
     fi
