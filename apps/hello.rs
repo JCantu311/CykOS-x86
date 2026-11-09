@@ -13,15 +13,6 @@ extern "C" {
 #[link_section = ".entry"]
 pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     unsafe {
-        // Direct VGA canary: write "HELLO" in Yellow (0x0E) at row 0, col 70
-        // If this appears, we KNOW execution successfully reached main() at 0x50000!
-        let vga = 0xB8000 as *mut u16;
-        *vga.add(70) = 0x0E48; // 'H'
-        *vga.add(71) = 0x0E45; // 'E'
-        *vga.add(72) = 0x0E4C; // 'L'
-        *vga.add(73) = 0x0E4C; // 'L'
-        *vga.add(74) = 0x0E4F; // 'O'
-
         print_string(b"========================================\n\0".as_ptr());
         print_string(b"  Hello from Rust Userland App!\n\0".as_ptr());
         print_string(b"========================================\n\0".as_ptr());
