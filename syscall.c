@@ -21,6 +21,7 @@ static void syscall_handler(registers_t* regs) {
     unsigned int arg2 = regs->ecx;
     unsigned int arg3 = regs->edx;
     unsigned int arg4 = regs->esi;
+    (void)arg4;
 
     switch (syscall_num) {
         case SYS_EXIT: {

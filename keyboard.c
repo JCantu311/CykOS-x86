@@ -90,7 +90,6 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
     }
 
     // Key presses (make codes)
-    int was_extended = g_extended;
     g_extended = 0;
 
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift press
