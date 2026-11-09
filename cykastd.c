@@ -189,8 +189,9 @@ void secwait(unsigned int seconds) {
         // Enable gate (bit 0) to start countdown, speaker remains off
         outb(0x61, (inb(0x61) & 0xFC) | 0x01);
 
-        // Poll until Channel 2 output (bit 5 of port 0x61) goes HIGH
-        while (!(inb(0x61) & 0x20));
+        // Poll until Channel 2 output (bit 5 of port 0x61) goes HIGH (with timeout protection)
+        unsigned int timeout = 2000000;
+        while (!(inb(0x61) & 0x20) && --timeout);
     }
 }
 
@@ -236,10 +237,28 @@ char get_scancode(void) {
     return (char)inb(0x60);
 }
 
+// US QWERTY Set 1 fallback scancode table
+static const char fallback_scancode_normal[128] = {
+    0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0,   'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
+    0,   '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
+    '*', 0,   ' ', 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
+};
+
 char scancode_to_ascii(unsigned char scancode) {
     cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
     if (kbd && kbd->scancode_to_ascii) {
         return kbd->scancode_to_ascii(scancode);
+    }
+    if (scancode & 0x80) {
+        return 0; // Key release
+    }
+    if (scancode < 128) {
+        return fallback_scancode_normal[scancode];
     }
     return 0;
 }

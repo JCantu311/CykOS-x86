@@ -1,8 +1,10 @@
 [bits 16]
 global _start
 extern kernel_main
+extern __bss_start
+extern __bss_end
 
-section .boot       ; NEW SECTION: Explicitly dedicated to Sector 1 ONLY
+section .boot       ; Dedicated to Sector 1 ONLY (MBR)
 _start:
     cli
     xor ax, ax
@@ -24,33 +26,36 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Load full kernel (90 KB = 180 sectors) into memory starting at 0x7E00
-    ; Chunk 1: 100 sectors (50 KB) from LBA 1 into 0x07E0:0x0000 (physical 0x7E00)
+    ; Load kernel from disk using INT 13h AH=42h (Extended LBA Read)
+    ; Read in 4 chunks of 64 sectors (32 KB per chunk) = 256 sectors (128 KB total)
+    ; Each chunk has offset 0x0000, advancing segment by 0x0800 (32 KB physical)
+    ; This avoids real-mode 64KB segment overflow entirely.
+    mov bp, 4               ; 4 chunks * 64 sectors = 256 sectors (128 KB)
+
+.load_chunk:
     mov si, dap
     mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
     jc disk_error
 
-    ; Chunk 2: 80 sectors (40 KB) from LBA 101 into 0x1460:0x0000 (physical 0x14600)
-    mov word [dap_count], 80
-    mov word [dap_seg], 0x1460
-    mov word [dap_lba], 101
-    mov word [dap_lba + 2], 0
-    mov si, dap
-    mov ah, 0x42
-    mov dl, [BOOT_DRIVE]
-    int 0x13
-    jc disk_error
+    ; Advance LBA by 64 sectors
+    add dword [dap_lba], 64
+    ; Advance Segment by 0x0800 (32 KB)
+    add word [dap_seg], 0x0800
+    dec bp
+    jnz .load_chunk
 
 .read_ok:           
-
+    ; Enable A20 line via Fast A20 gate
     in al, 0x92
     or al, 2
     out 0x92, al
 
+    ; Load Global Descriptor Table
     lgdt [gdt_descriptor]
 
+    ; Switch to 32-bit Protected Mode
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -60,7 +65,7 @@ _start:
 disk_error:
     mov ax, 0xB800
     mov es, ax
-    mov word [es:0x0000], 0x0C45
+    mov word [es:0x0000], 0x0C45 ; Red 'E'
 .error_loop:
     cli
     hlt
@@ -92,18 +97,19 @@ dap:
     db 0x10                 ; Packet size = 16 bytes
     db 0x00                 ; Reserved (0)
 dap_count:
-    dw 100                  ; 100 sectors (50 KB)
+    dw 64                   ; 64 sectors per chunk (32 KB)
+dap_offset:
     dw 0x0000               ; Offset (always 0)
 dap_seg:
-    dw 0x07E0               ; Segment (0x07E0:0x0000 = physical 0x7E00)
+    dw 0x07E0               ; Initial segment (0x07E0:0x0000 = physical 0x7E00)
 dap_lba:
-    dd 1                    ; LBA low 32 bits (Sector 1)
+    dd 1                    ; LBA low 32 bits (starts at Sector 1)
     dd 0                    ; LBA high 32 bits
 
 ; =========================================================================
-; SECTOR 2+: This code goes into the standard text section
+; SECTOR 2+: 32-bit Protected Mode Entry Landing Code
 ; =========================================================================
-section .text       ; This must match what is called on line 18 of linker.ld
+section .text
 [bits 32]
 init_32bit_protected:
     mov ax, DATA_SEG
@@ -113,7 +119,15 @@ init_32bit_protected:
     mov gs, ax
     mov ss, ax
 
-    mov esp, 0x90000        
+    mov esp, 0x90000        ; 32-bit Kernel Stack
+
+    ; Zero out the .bss section in RAM (vital for clean global state)
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    xor eax, eax
+    cld
+    rep stosb
 
     ; Enable SSE in CR0 and CR4
     mov eax, cr0
