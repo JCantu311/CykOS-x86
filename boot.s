@@ -24,19 +24,23 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Read 32 sectors sequentially into memory address 0x7E00 (contiguous with MBR)
-    mov ax, 0x0000
-    mov es, ax              
-    mov bx, 0x7E00          
-    
-    mov ah, 0x02            
-    mov al, 32
-    mov ch, 0               
-    mov dh, 0               
-    mov cl, 2               
-    mov dl, [BOOT_DRIVE]    
-    int 0x13                
-    jc disk_error           
+    ; Read 192 sectors (96 KB) sequentially into memory starting at 0x7E00
+    ; Read in 6 chunks of 32 sectors to avoid crossing any 64KB physical segment boundaries
+    mov cx, 6               ; 6 chunks * 32 sectors = 192 sectors
+    mov bx, 0x07E0          ; Starting segment (0x07E0:0x0000 = physical 0x7E00)
+    mov dword [dap_lba], 1  ; Start at LBA 1 (immediately after Sector 0 MBR)
+
+.read_loop:
+    mov [dap_seg], bx
+    mov si, dap
+    mov ah, 0x42
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc disk_error
+
+    add dword [dap_lba], 32 ; Advance 32 sectors
+    add bx, 0x0400          ; 32 sectors * 512 bytes = 16,384 bytes = 0x400 paragraphs
+    loop .read_loop           
 
     in al, 0x92
     or al, 2
@@ -79,6 +83,18 @@ CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
 
 BOOT_DRIVE: db 0            
+
+align 4
+dap:
+    db 0x10                 ; Packet size = 16 bytes
+    db 0x00                 ; Reserved (0)
+    dw 32                   ; 32 sectors per chunk
+    dw 0x0000               ; Offset (always 0)
+dap_seg:
+    dw 0x07E0               ; Segment
+dap_lba:
+    dd 1                    ; LBA low
+    dd 0                    ; LBA high            
 
 ; =========================================================================
 ; SECTOR 2+: This code goes into the standard text section

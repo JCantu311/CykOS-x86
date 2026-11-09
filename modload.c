@@ -4,7 +4,7 @@
 
 #define MAX_MODULES         4
 #define MODULE_SLOT_SIZE    0x4000    // 16KB per module
-#define MODULE_BASE_ADDR    0x20000   // Level 2 memory base
+#define MODULE_BASE_ADDR    0x40000   // Level 2 memory base
 
 static cyk_module_header_t* g_loaded_modules[MAX_MODULES];
 static int g_loaded_count = 0;

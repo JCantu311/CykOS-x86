@@ -30,7 +30,8 @@ void kernel_main(void) {
     print_string(msg_init);
     print_string(msg_diag);
     
-    unsigned int* test_address = (unsigned int*)0x10000;
+    // Memtest a safe conventional RAM location (0x80000) that does not collide with the kernel
+    unsigned int* test_address = (unsigned int*)0x80000;
     
     if (memtest_dword(test_address, 1024)) {
         print_color_string(msg_pass, VGA_GREEN);
