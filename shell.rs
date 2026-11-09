@@ -15,6 +15,10 @@ extern "C" {
     fn outb(port: u16, data: u8);
     fn outw(port: u16, data: u16);
     fn fat16_list_directory(callback: extern "C" fn(*const u8, u32, u8)) -> i32;
+
+    // External user command support (usercmd.c)
+    fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
+    fn list_user_commands();
 }
 
 // Panic Handler for freestanding environment
@@ -215,6 +219,10 @@ fn cmd_help(_args: &[u8]) {
         puts(cmd.description);
         puts(b"\n");
     }
+
+    // Also list external user commands from USERCMDS.TXT
+    unsafe { list_user_commands(); }
+
     puts(b"\n");
 }
 
@@ -269,9 +277,38 @@ fn dispatch_command(raw_line: &[u8]) {
         b""
     };
 
+    // 1. Check built-in commands first
     for cmd in COMMANDS {
         if bytes_eq(cmd.name, cmd_name) {
             (cmd.handler)(args);
+            return;
+        }
+    }
+
+    // 2. Check external user commands from USERCMDS.TXT
+    //    We need null-terminated strings for the C function.
+    unsafe {
+        // Build null-terminated command name on the stack
+        let mut cmd_buf = [0u8; 128];
+        let cmd_len = if cmd_name.len() < 127 { cmd_name.len() } else { 127 };
+        let mut i = 0;
+        while i < cmd_len {
+            cmd_buf[i] = cmd_name[i];
+            i += 1;
+        }
+        cmd_buf[cmd_len] = 0;
+
+        // Build null-terminated args string on the stack
+        let mut args_buf = [0u8; 128];
+        let args_len = if args.len() < 127 { args.len() } else { 127 };
+        i = 0;
+        while i < args_len {
+            args_buf[i] = args[i];
+            i += 1;
+        }
+        args_buf[args_len] = 0;
+
+        if exec_user_command(cmd_buf.as_ptr(), args_buf.as_ptr()) != 0 {
             return;
         }
     }

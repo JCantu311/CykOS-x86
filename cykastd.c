@@ -6,6 +6,26 @@
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+void update_hardware_cursor(void) {
+    unsigned short pos = (cursor_y * VGA_WIDTH) + cursor_x;
+
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (unsigned char)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (unsigned char)((pos >> 8) & 0xFF));
+}
+
+void enable_hardware_cursor(void) {
+    // Enable standard underline cursor (scanlines 14 to 15 in 16-line font)
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, (inb(0x3D5) & 0xC0) | 14);
+
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, (inb(0x3D5) & 0xE0) | 15);
+
+    update_hardware_cursor();
+}
+
 void clear_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short blank = (CONSOLE_COLOR << 8) | ' ';
@@ -16,6 +36,7 @@ void clear_screen(void) {
     
     cursor_x = 0;
     cursor_y = 0;
+    update_hardware_cursor();
 }
 
 static void scroll_screen(void) {
@@ -35,6 +56,7 @@ static void scroll_screen(void) {
     }
 
     cursor_y = VGA_HEIGHT - 1;
+    update_hardware_cursor();
 }
 
 void print_char(char c) {
@@ -63,6 +85,8 @@ void print_char(char c) {
     if (cursor_y >= VGA_HEIGHT) {
         scroll_screen();
     }
+
+    update_hardware_cursor();
 }
 
 void print_string(const char* str) {
@@ -98,6 +122,8 @@ void print_color_string(const char* str, unsigned char txt_color) {
         }
         p++;
     }
+
+    update_hardware_cursor();
 }
 
 int strncmp(const char* str1, const char* str2, size_t n) {

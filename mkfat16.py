@@ -174,7 +174,8 @@ if __name__ == "__main__":
     
     sample_files = {
         "README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
-        "MODULES.CFG": "# CykOS Boot-Time Kernel Module List\nCYKEYBRD.DRV\n"
+        "MODULES.CFG": "# CykOS Boot-Time Kernel Module List\nCYKEYBRD.DRV\n",
+        "USERCMDS.TXT": "# CykOS External User Commands\n# Format: <alias> <binary_filename>\n# Example: hello HELLO.COM\n"
     }
 
     # Check if compiled Level 2 CykKeyboard driver exists

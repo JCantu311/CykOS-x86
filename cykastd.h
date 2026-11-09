@@ -25,6 +25,8 @@ int memcmp(const void* s1, const void* s2, size_t n);
 int bcmp(const void* s1, const void* s2, size_t n);
 void rust_eh_personality(void);
 void print_color_string(const char* str, unsigned char color);
+void update_hardware_cursor(void);
+void enable_hardware_cursor(void);
 
 // NEW: Hardware Port Communication Wrappers
 unsigned char inb(unsigned short port);

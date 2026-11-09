@@ -21,6 +21,7 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
 
 void kernel_main(void) {
     clear_screen();
+    enable_hardware_cursor();
     
     char msg_init[] = "CykOS Kernel Init\n";
     char msg_diag[] = "Running Memtest...\n";
