@@ -7,6 +7,7 @@ SECTIONS
 
     .text : {
         /* Entry point MUST be at byte 0 of the binary */
+        KEEP(*(.entry))
         *(.text.main)
         *(.text.user_edit)
         *(.text._start)

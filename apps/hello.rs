@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #[no_mangle]
+#[link_section = ".entry"]
 pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     unsafe {
         print_string(b"========================================\n\0".as_ptr());

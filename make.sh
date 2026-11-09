@@ -144,7 +144,6 @@ if command -v rustc &> /dev/null; then
             -C relocation-model=static \
             -C panic=abort \
             -C target-feature=-sse,-sse2 \
-            -C function-sections=yes \
             --crate-type=staticlib edit.rs -o bin/libedit.a; then
             if [ -f bin/kernel_syms.ld ]; then
                 $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive bin/libedit.a --no-whole-archive -o bin/EDIT.BIN 2>/dev/null || \
@@ -173,7 +172,6 @@ if command -v rustc &> /dev/null; then
                 -C relocation-model=static \
                 -C panic=abort \
                 -C target-feature=-sse,-sse2 \
-                -C function-sections=yes \
                 --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
                 if [ -f bin/kernel_syms.ld ]; then
                     $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive "bin/lib${app_name}.a" --no-whole-archive -o "bin/${app_upper}.BIN" 2>/dev/null || \
