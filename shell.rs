@@ -17,10 +17,10 @@ extern "C" {
     fn fat16_list_directory(callback: extern "C" fn(*const u8, u32, u8)) -> i32;
 }
 
-// Panic Handler for no_std freestanding environment
+// Panic Handler for freestanding environment
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    puts("\n[KERNEL PANIC] Level 3 CykShell crashed.\n");
+    puts(b"\n[KERNEL PANIC] CykShell crashed.\n");
     loop {
         unsafe {
             core::arch::asm!("hlt");
@@ -28,19 +28,18 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
-// Standard I/O Helpers
-fn puts(s: &str) {
-    for b in s.bytes() {
+// Low-Level I/O Helpers
+fn puts(s: &[u8]) {
+    for &b in s {
         unsafe {
             print_char(b);
         }
     }
 }
 
-fn puts_color(s: &str, color: u8) {
-    for b in s.bytes() {
+fn puts_color(s: &[u8], color: u8) {
+    for &b in s {
         unsafe {
-            // VGA color text output
             let null_term = [b, 0];
             print_color_string(null_term.as_ptr(), color);
         }
@@ -65,31 +64,37 @@ fn print_u32(mut n: u32) {
     }
 }
 
-fn str_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
+fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
         return false;
     }
-    for i in 0..a_bytes.len() {
-        if a_bytes[i] != b_bytes[i] {
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
             return false;
         }
+        i += 1;
     }
     true
 }
 
-fn trim_ascii(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    let mut start = 0;
-    while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t' || bytes[start] == b'\r' || bytes[start] == b'\n') {
-        start += 1;
+// Bounds-safe trimming of ASCII whitespace without slice arithmetic
+fn trim_slice<'a>(mut s: &'a [u8]) -> &'a [u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first == b' ' || first == b'\t' || first == b'\r' || first == b'\n' {
+            s = rest;
+        } else {
+            break;
+        }
     }
-    let mut end = bytes.len();
-    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t' || bytes[end - 1] == b'\r' || bytes[end - 1] == b'\n') {
-        end -= 1;
+    while let Some((&last, rest)) = s.split_last() {
+        if last == b' ' || last == b'\t' || last == b'\r' || last == b'\n' {
+            s = rest;
+        } else {
+            break;
+        }
     }
-    unsafe { core::str::from_utf8_unchecked(&bytes[start..end]) }
+    s
 }
 
 // =========================================================================
@@ -97,13 +102,13 @@ fn trim_ascii(s: &str) -> &str {
 // =========================================================================
 
 pub struct Command {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub handler: fn(&str),
+    pub name: &'static [u8],
+    pub description: &'static [u8],
+    pub handler: fn(&[u8]),
 }
 
 // Built-in Command: clear (Linux compatible screen clear)
-fn cmd_clear(_args: &str) {
+fn cmd_clear(_args: &[u8]) {
     unsafe {
         clear_screen();
     }
@@ -113,48 +118,49 @@ fn cmd_clear(_args: &str) {
 static mut DIR_FILE_COUNT: u32 = 0;
 
 extern "C" fn dir_entry_callback(name_ptr: *const u8, size: u32, is_dir: u8) {
+    if name_ptr.is_null() {
+        return;
+    }
+
     unsafe {
         DIR_FILE_COUNT += 1;
-    }
-
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 13 {
-        unsafe { print_char(*name_ptr.add(len)); }
-        len += 1;
-    }
-
-    // Pad out filename column to 16 characters
-    while len < 16 {
-        unsafe { print_char(b' '); }
-        len += 1;
+        let mut len = 0;
+        while *name_ptr.add(len) != 0 && len < 13 {
+            print_char(*name_ptr.add(len));
+            len += 1;
+        }
+        while len < 16 {
+            print_char(b' ');
+            len += 1;
+        }
     }
 
     if is_dir != 0 {
-        puts("<DIR>\n");
+        puts(b"<DIR>\n");
     } else {
         print_u32(size);
-        puts(" bytes\n");
+        puts(b" bytes\n");
     }
 }
 
 // Built-in Command: dir (MS-DOS compatible directory listing)
-fn cmd_dir(_args: &str) {
-    puts("\n Volume in drive C is CYKOS_DISK\n");
-    puts(" Directory of C:\\\n\n");
+fn cmd_dir(_args: &[u8]) {
+    puts(b"\n Volume in drive C is CYKOS_DISK\n");
+    puts(b" Directory of C:\\\n\n");
 
     unsafe {
         DIR_FILE_COUNT = 0;
         fat16_list_directory(dir_entry_callback);
     }
 
-    puts("\n               ");
+    puts(b"\n               ");
     unsafe { print_u32(DIR_FILE_COUNT); }
-    puts(" File(s)\n\n");
+    puts(b" File(s)\n\n");
 }
 
 // Built-in Command: reboot (Linux compatible system reboot)
-fn cmd_reboot(_args: &str) {
-    puts("\nRebooting CykOS...\n");
+fn cmd_reboot(_args: &[u8]) {
+    puts(b"\nRebooting CykOS...\n");
     unsafe {
         secwait(1);
 
@@ -172,8 +178,8 @@ fn cmd_reboot(_args: &str) {
 }
 
 // Built-in Command: shutdown (Linux compatible system poweroff)
-fn cmd_shutdown(_args: &str) {
-    puts("\nShutting down CykOS...\n");
+fn cmd_shutdown(_args: &[u8]) {
+    puts(b"\nShutting down CykOS...\n");
     unsafe {
         secwait(1);
 
@@ -187,7 +193,7 @@ fn cmd_shutdown(_args: &str) {
         outw(0x4004, 0x3400);
 
         // 4. Hardware fallback
-        puts("It is now safe to turn off your computer.\n");
+        puts(b"It is now safe to turn off your computer.\n");
         loop {
             core::arch::asm!("cli", "hlt");
         }
@@ -195,85 +201,84 @@ fn cmd_shutdown(_args: &str) {
 }
 
 // Built-in Command: help
-fn cmd_help(_args: &str) {
-    puts("\nAvailable CykShell Commands:\n");
+fn cmd_help(_args: &[u8]) {
+    puts(b"\nAvailable CykShell Commands:\n");
     for cmd in COMMANDS {
-        puts("  ");
+        puts(b"  ");
         puts(cmd.name);
         let mut pad = cmd.name.len();
         while pad < 12 {
             unsafe { print_char(b' '); }
             pad += 1;
         }
-        puts("- ");
+        puts(b"- ");
         puts(cmd.description);
-        puts("\n");
+        puts(b"\n");
     }
-    puts("\n");
+    puts(b"\n");
 }
 
 // Configurable Command Registry Table
 // Space is reserved below for future built-ins and user applications!
 pub static COMMANDS: &[Command] = &[
     Command {
-        name: "help",
-        description: "Display this list of recognized commands",
+        name: b"help",
+        description: b"Display this list of recognized commands",
         handler: cmd_help,
     },
     Command {
-        name: "clear",
-        description: "Clear the terminal display",
+        name: b"clear",
+        description: b"Clear the terminal display",
         handler: cmd_clear,
     },
     Command {
-        name: "dir",
-        description: "List files and directories in current volume",
+        name: b"dir",
+        description: b"List files and directories in current volume",
         handler: cmd_dir,
     },
     Command {
-        name: "reboot",
-        description: "Reboot the operating system",
+        name: b"reboot",
+        description: b"Reboot the operating system",
         handler: cmd_reboot,
     },
     Command {
-        name: "shutdown",
-        description: "Power off the virtual machine",
+        name: b"shutdown",
+        description: b"Power off the virtual machine",
         handler: cmd_shutdown,
     },
     // Future user applications or additional built-ins can be registered here!
 ];
 
 // Command Dispatcher
-fn dispatch_command(raw_line: &str) {
-    let trimmed = trim_ascii(raw_line);
+fn dispatch_command(raw_line: &[u8]) {
+    let trimmed = trim_slice(raw_line);
     if trimmed.is_empty() {
         return;
     }
 
-    // Split into command name and argument tail
-    let bytes = trimmed.as_bytes();
+    // Split at first space into (command, args)
     let mut split_idx = 0;
-    while split_idx < bytes.len() && bytes[split_idx] != b' ' {
+    while split_idx < trimmed.len() && trimmed[split_idx] != b' ' {
         split_idx += 1;
     }
 
-    let cmd_name = unsafe { core::str::from_utf8_unchecked(&bytes[..split_idx]) };
-    let args = if split_idx < bytes.len() {
-        trim_ascii(unsafe { core::str::from_utf8_unchecked(&bytes[split_idx..]) })
+    let cmd_name = &trimmed[..split_idx];
+    let args = if split_idx < trimmed.len() {
+        trim_slice(&trimmed[split_idx..])
     } else {
-        ""
+        b""
     };
 
     for cmd in COMMANDS {
-        if str_eq(cmd.name, cmd_name) {
+        if bytes_eq(cmd.name, cmd_name) {
             (cmd.handler)(args);
             return;
         }
     }
 
-    puts("CykShell: command not found: ");
+    puts(b"CykShell: command not found: ");
     puts(cmd_name);
-    puts("\nType 'help' to view available commands.\n");
+    puts(b"\nType 'help' to view available commands.\n");
 }
 
 // =========================================================================
@@ -282,16 +287,16 @@ fn dispatch_command(raw_line: &str) {
 
 #[no_mangle]
 pub extern "C" fn shell_main() -> ! {
-    puts("\n========================================\n");
-    puts_color(" CykOS Interactive Shell (CykShell v0.1)\n", 0x0A); // VGA Green
-    puts(" Type 'help' for available commands.\n");
-    puts("========================================\n\n");
+    puts(b"\n========================================\n");
+    puts_color(b" CykOS Interactive Shell (CykShell v0.1)\n", 0x0A); // VGA Green
+    puts(b" Type 'help' for available commands.\n");
+    puts(b"========================================\n\n");
 
     let mut line_buf = [0u8; 128];
     let mut line_len: usize = 0;
 
     loop {
-        puts("CykOS> ");
+        puts(b"CykOS> ");
         line_len = 0;
 
         loop {
@@ -314,8 +319,6 @@ pub extern "C" fn shell_main() -> ! {
             }
         }
 
-        if let Ok(line_str) = core::str::from_utf8(&line_buf[..line_len]) {
-            dispatch_command(line_str);
-        }
+        dispatch_command(&line_buf[..line_len]);
     }
 }

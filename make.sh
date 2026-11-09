@@ -61,16 +61,17 @@ if command -v rustc &> /dev/null; then
         rustup target add i686-unknown-linux-gnu 2>/dev/null || true
     fi
 
-    # Compile with standard 32-bit ELF target or custom target with bootstrap unlock
-    if rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with target i686-unknown-linux-gnu."
-    elif RUSTC_BOOTSTRAP=1 rustc -Z unstable-options --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with i686-unknown-none.json."
-    elif rustc --target i686-unknown-none -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with target i686-unknown-none."
+    # Compile with optimizations, disabled overflow panics, and staticlib bundling
+    if rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a 2>/dev/null; then
+        echo "CykShell compiled successfully into bin/libshell.a."
+        SHELL_LIB="bin/libshell.a"
+    elif rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully into bin/shell.o."
+        SHELL_LIB="bin/shell.o"
     else
-        echo "Attempting compilation with i686-unknown-linux-gnu..."
-        rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o
+        echo "Attempting compilation with verbose output..."
+        rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a
+        SHELL_LIB="bin/libshell.a"
     fi
 else
     echo "Error: rustc not found! Please install Rust to build CykShell." >&2
@@ -82,7 +83,7 @@ $CC -m32 -c keyboard.c -o bin/keyboard.o -ffreestanding -O0 -nostdlib -fno-pic -
 $LD -m elf_i386 -T module.ld --no-dynamic-linker -no-pie bin/keyboard.o -o bin/cykeybrd.drv
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/kernel.o bin/shell.o -o bin/os_image.bin
+$LD -m elf_i386 -T linker.ld --no-dynamic-linker -no-pie bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
 
 # 8. Format FAT16 partition and package Level 2 drivers & configuration
 if command -v python3 &> /dev/null; then
