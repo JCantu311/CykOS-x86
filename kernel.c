@@ -2,6 +2,9 @@
 #include "ata.h"
 #include "fat16.h"
 #include "modload.h"
+#include "idt.h"
+#include "syscall.h"
+#include "heap.h"
 
 // Level 3 CykShell Entry Point (implemented in shell.rs)
 extern void shell_main(void);
@@ -22,8 +25,17 @@ int memtest_dword(volatile unsigned int* ptr, unsigned int count) {
 void kernel_main(void) {
     clear_screen();
     enable_hardware_cursor();
-    
-    char msg_init[] = "CykOS Kernel Init\n";
+
+    // 1. Initialize CPU Interrupt Descriptor Table (Catches exceptions, prevents Triple Faults)
+    idt_init();
+
+    // 2. Initialize Dynamic Memory Heap (1MB to 8MB)
+    heap_init();
+
+    // 3. Initialize Syscall Subsystem (int 0x80)
+    syscall_init();
+
+    char msg_init[] = "CykOS Kernel Init (IDT + Heap + Syscalls [OK])\n";
     char msg_diag[] = "Running Memtest...\n";
     char msg_pass[] = "PASS\n";
     char msg_fail[] = "FAIL\n";

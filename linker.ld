@@ -22,15 +22,24 @@ SECTIONS
 
     .text : {
         KEEP(*boot.o(.text*))    /* 32-bit assembly entry landing code goes FIRST */
+        KEEP(*idt.o(.text*))     /* Exception handlers and ISRs */
+        KEEP(*syscall.o(.text*)) /* Syscall dispatcher */
+        KEEP(*heap.o(.text*))    /* Dynamic memory allocator */
         KEEP(*cykastd.o(.text*)) /* Retain all standard library & I/O functions for apps */
         KEEP(*fat16.o(.text*))   /* Retain all FAT16 read/write routines for apps */
         *(.text*)                /* All executive code routines */
         . = ALIGN(4);
+        KEEP(*idt.o(.rodata*))
+        KEEP(*syscall.o(.rodata*))
+        KEEP(*heap.o(.rodata*))
         KEEP(*cykastd.o(.rodata*))
         KEEP(*fat16.o(.rodata*))
         *(.rodata*)              /* Global string literals and constants */
         *(.rdata*)               /* Read-only data for MinGW/PE-COFF toolchains */
         . = ALIGN(4);
+        KEEP(*idt.o(.data*))
+        KEEP(*syscall.o(.data*))
+        KEEP(*heap.o(.data*))
         KEEP(*cykastd.o(.data*))
         KEEP(*fat16.o(.data*))
         *(.data*)                /* Initialized global variables */

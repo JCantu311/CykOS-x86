@@ -42,4 +42,10 @@ char scancode_to_ascii(unsigned char scancode);
 char get_char(void);
 int has_key(void);
 
+// Dynamic Memory Heap Allocator
+void* malloc(size_t size);
+void  free(void* ptr);
+void* realloc(void* ptr, size_t size);
+void* calloc(size_t num, size_t size);
+
 #endif // CYKASTD_H
