@@ -117,9 +117,9 @@ if command -v rustc &> /dev/null; then
             -C relocation-model=static \
             -C panic=abort \
             -C target-feature=-sse,-sse2 \
-            --emit=obj edit.rs -o bin/edit.o 2>/dev/null; then
+            --emit=obj edit.rs -o bin/edit.o; then
             if [ -f bin/kernel_syms.ld ]; then
-                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/edit.o -o bin/EDIT.BIN 2>/dev/null || true
+                $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/edit.o -o bin/EDIT.BIN
                 if [ -f bin/EDIT.BIN ]; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN"
                 fi

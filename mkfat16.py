@@ -191,10 +191,14 @@ if __name__ == "__main__":
             for fname in os.listdir(sdir):
                 fpath = os.path.join(sdir, fname)
                 if os.path.isfile(fpath):
+                    target_name = fname.upper()
+                    # Skip disk image and build artifacts
+                    if target_name in ["OS_IMAGE.BIN", "KERNEL.MAP", "KERNEL_SYMS.LD", "KERNEL.ELF"]:
+                        continue
                     ext = os.path.splitext(fname)[1].upper()
-                    if ext in [".BIN", ".COM", ".DRV", ".TXT", ".LST"]:
-                        target_name = fname.upper()
+                    if ext in [".BIN", ".COM", ".DRV"]:
                         with open(fpath, "rb") as bf:
                             sample_files[target_name] = bf.read()
+                            print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(sample_files[target_name])} bytes)")
 
     format_disk(target_img, sample_files)
