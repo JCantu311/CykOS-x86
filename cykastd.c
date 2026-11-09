@@ -105,6 +105,30 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     return 0;
 }
 
+void secwait(unsigned int seconds) {
+    // PIT Channel 2 polling-based delay (no interrupts needed)
+    // PIT oscillator: 1,193,182 Hz
+    // Count = 59659 ticks per round ≈ 50ms, so 20 rounds ≈ 1 second
+    unsigned int total_rounds = seconds * 20;
+
+    for (unsigned int i = 0; i < total_rounds; i++) {
+        // Disable Channel 2 gate to reset timer, keep speaker off
+        outb(0x61, inb(0x61) & 0xFC);
+
+        // Program PIT Channel 2: mode 0, access lobyte/hibyte, binary count
+        outb(0x43, 0xB0);
+        // Load count value 59659 (0xE90B) for ~50ms intervals
+        outb(0x42, 0x0B);  // Low byte
+        outb(0x42, 0xE9);  // High byte
+
+        // Enable gate (bit 0) to start countdown, speaker remains off
+        outb(0x61, (inb(0x61) & 0xFC) | 0x01);
+
+        // Poll until Channel 2 output (bit 5 of port 0x61) goes HIGH
+        while (!(inb(0x61) & 0x20));
+    }
+}
+
 unsigned char inb(unsigned short port) {
     unsigned char result;
     asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));

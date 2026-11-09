@@ -25,6 +25,8 @@ void outb(unsigned short port, unsigned char data);
 unsigned short inw(unsigned short port);
 void outw(unsigned short port, unsigned short data);
 
+void secwait(unsigned int seconds);
+
 // NEW: Keyboard Engine
 char get_scancode(void);
 char scancode_to_ascii(unsigned char scancode);

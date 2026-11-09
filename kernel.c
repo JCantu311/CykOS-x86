@@ -218,6 +218,8 @@ void kernel_main(void) {
 
     print_color_string(welcome_message, VGA_GREEN);
 
+    secwait(2); 
+
     print_string("Loading CykShell...\n");
     
     while (1) {
