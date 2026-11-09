@@ -7,7 +7,7 @@ SECTIONS
     . = 0x7C00;
 
     .boot_sector : {
-        bin/boot.o(.boot)
+        *boot.o(.boot)
     }
 
     /* Force the magic signature exactly at byte index 510 */
@@ -19,15 +19,21 @@ SECTIONS
     /* Sector 2+: The Kernel Arena */
     . = 0x9000;
 
-    /* CRITICAL FIX: All references within this block inherit the 0x9000 runtime base */
+    /* All kernel references inherit 0x9000 VMA runtime base, mapped at LMA byte 512 */
     .text : AT(0x7C00 + 512) {
-        bin/boot.o(.text*)       /* 32-bit assembly entry landing code goes FIRST */
+        *boot.o(.text*)          /* 32-bit assembly entry landing code goes FIRST */
         *(.text*)                /* All executive code routines */
-        *(.rodata*)              /* Global string literals and constants now resolve correctly! */
-        *(.data*)                /* Merge initialized global data variables */
+        . = ALIGN(4);
+        *(.rodata*)              /* Global string literals and constants */
+        *(.rdata*)               /* Read-only data for MinGW/PE-COFF toolchains */
+        . = ALIGN(4);
+        *(.data*)                /* Initialized global variables */
+        *(.data.rel.ro*)         /* Initialized pointers to read-only strings (e.g. char* p = "...") */
+        *(.data.rel.ro.local*)
     }
 
-    .bss : {
+    .bss (NOLOAD) : {
+        . = ALIGN(4);
         *(.bss*)
         *(COMMON)
     }
@@ -35,5 +41,6 @@ SECTIONS
     /DISCARD/ : {
         *(.eh_frame)
         *(.note*)
+        *(.comment)
     }
 }

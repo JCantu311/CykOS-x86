@@ -1,8 +1,9 @@
 #include "cykastd.h"
 
+#define CONSOLE_COLOR VGA_WHITE
+
 static int cursor_x = 0;
 static int cursor_y = 0;
-static const unsigned char CONSOLE_COLOR = 0x0F; // White text on black background
 
 void clear_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
@@ -58,12 +59,14 @@ void print_char(char c) {
 }
 
 void print_string(const char* str) {
+    if (!str) return;
     for (int i = 0; str[i] != '\0'; i++) {
         print_char(str[i]);
     }
 }
 
 void print_color_string(const char* str, unsigned char txt_color) {
+    if (!str) return;
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short full_char = (unsigned short)txt_color << 8;
     const char* p = str;
