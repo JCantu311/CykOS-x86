@@ -3,18 +3,20 @@ set -e
 
 mkdir -p bin
 
+HOST_OS=$(uname -s)
 HOST_ARCH=$(uname -m)
 
-# 1. Detect Cross-Compiler with ARM host protection
-if command -v x86_64-linux-gnu-gcc &> /dev/null; then
+# 1. Detect Cross-Compiler with ARM host protection (Linux and macOS compatible)
+if command -v i686-elf-gcc &> /dev/null; then
+    CC="i686-elf-gcc"
+elif command -v x86_64-linux-gnu-gcc &> /dev/null; then
     CC="x86_64-linux-gnu-gcc"
 elif command -v x86_64-elf-gcc &> /dev/null; then
     CC="x86_64-elf-gcc"
-elif command -v i686-elf-gcc &> /dev/null; then
-    CC="i686-elf-gcc"
 elif command -v gcc &> /dev/null; then
     if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "armv7l" ]]; then
         echo "Error: Native 'gcc' on this machine outputs ARM code!" >&2
+        echo "Please install an x86 cross-compiler (e.g. i686-elf-gcc or gcc-x86-64-linux-gnu)." >&2
         exit 1
     else
         CC="gcc"
@@ -25,7 +27,9 @@ else
 fi
 
 # 2. Detect Linker
-if command -v ld.lld &> /dev/null; then
+if command -v i686-elf-ld &> /dev/null; then
+    LD="i686-elf-ld"
+elif command -v ld.lld &> /dev/null; then
     LD="ld.lld"
 elif command -v x86_64-linux-gnu-ld &> /dev/null; then
     LD="x86_64-linux-gnu-ld"
@@ -51,14 +55,22 @@ $CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-
 # 5. Compile Level 3 CykShell (Rust)
 if command -v rustc &> /dev/null; then
     echo "Compiling Level 3 CykShell (Rust)..."
-    if rustc --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with i686-unknown-none target spec."
-    elif rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with i686-unknown-linux-gnu target."
+    
+    # Auto-add i686 target if rustup is present
+    if command -v rustup &> /dev/null; then
+        rustup target add i686-unknown-linux-gnu 2>/dev/null || true
+    fi
+
+    # Compile with standard 32-bit ELF target or custom target with bootstrap unlock
+    if rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully with target i686-unknown-linux-gnu."
+    elif RUSTC_BOOTSTRAP=1 rustc -Z unstable-options --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+        echo "CykShell compiled successfully with i686-unknown-none.json."
     elif rustc --target i686-unknown-none -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
-        echo "CykShell compiled successfully with i686-unknown-none target."
+        echo "CykShell compiled successfully with target i686-unknown-none."
     else
-        rustc --target i686-unknown-none.json -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o
+        echo "Attempting compilation with i686-unknown-linux-gnu..."
+        rustc --target i686-unknown-linux-gnu -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o
     fi
 else
     echo "Error: rustc not found! Please install Rust to build CykShell." >&2
@@ -78,7 +90,7 @@ if command -v python3 &> /dev/null; then
 elif command -v python &> /dev/null; then
     python mkfat16.py bin/os_image.bin
 else
-    truncate -s 16777216 bin/os_image.bin
+    truncate -s 16777216 bin/os_image.bin 2>/dev/null || truncate -s 16m bin/os_image.bin
 fi
 
 echo "----------------------------------------"

@@ -295,7 +295,6 @@ int fat16_read_file(const fat16_entry_t* entry, void* buffer, unsigned int max_b
     }
 
     unsigned int total_read = 0;
-    unsigned int bytes_per_cluster = g_fat16.sectors_per_cluster * g_fat16.bytes_per_sector;
 
     while (cluster >= 2 && cluster < 0xFFF8 && bytes_remaining > 0) {
         unsigned int cluster_lba = g_fat16.data_lba + (cluster - 2) * g_fat16.sectors_per_cluster;
