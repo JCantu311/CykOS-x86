@@ -27,6 +27,8 @@ extern "C" {
     fn set_cursor_pos(x: i32, y: i32);
     fn fat16_list_directory(callback: extern "C" fn(*const u8, u32, u8)) -> i32;
     fn fat16_delete_file(filename: *const u8) -> i32;
+    fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
+    fn fat16_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
 
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
@@ -78,6 +80,24 @@ fn print_u32(mut n: u32) {
         idx -= 1;
         unsafe { print_char(buf[idx]); }
     }
+}
+
+const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
+
+fn print_hex_byte(b: u8) {
+    let hi = ((b >> 4) & 0x0F) as usize;
+    let lo = (b & 0x0F) as usize;
+    unsafe {
+        print_char(HEX_CHARS[hi]);
+        print_char(HEX_CHARS[lo]);
+    }
+}
+
+fn print_hex_u32(val: u32) {
+    print_hex_byte(((val >> 24) & 0xFF) as u8);
+    print_hex_byte(((val >> 16) & 0xFF) as u8);
+    print_hex_byte(((val >> 8) & 0xFF) as u8);
+    print_hex_byte((val & 0xFF) as u8);
 }
 
 fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
@@ -251,6 +271,243 @@ fn cmd_rm(args: &[u8]) {
     }
 }
 
+// Static file buffer in .bss for shell file operations (32 KB)
+static mut SHELL_FILE_BUF: [u8; 32768] = [0; 32768];
+
+// Built-in Command: touch (Create or touch an empty file)
+fn cmd_touch(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: touch <filename>\n");
+        return;
+    }
+
+    let mut fname_buf = [0u8; 16];
+    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut i = 0;
+    while i < len {
+        fname_buf[i] = filename[i];
+        i += 1;
+    }
+    fname_buf[len] = 0;
+
+    unsafe {
+        let mut check_buf = [0u8; 1];
+        let exists = fat16_read_file_by_name(fname_buf.as_ptr(), check_buf.as_mut_ptr(), 1);
+        if exists < 0 {
+            let dummy = 0u8;
+            let res = fat16_write_file(fname_buf.as_ptr(), &dummy, 0);
+            if res == 0 {
+                puts(b"Created: ");
+                puts(filename);
+                puts(b"\n");
+            } else {
+                puts(b"touch: failed to create file.\n");
+            }
+        } else {
+            puts(b"touch: file already exists: ");
+            puts(filename);
+            puts(b"\n");
+        }
+    }
+}
+
+// Built-in Command: cp (Copy file)
+fn cmd_cp(args: &[u8]) {
+    let trimmed = trim_slice(args);
+    if trimmed.is_empty() {
+        puts(b"Usage: cp <source> <destination>\n");
+        return;
+    }
+
+    let mut split_idx = 0;
+    while split_idx < trimmed.len() && trimmed[split_idx] != b' ' {
+        split_idx += 1;
+    }
+
+    if split_idx >= trimmed.len() {
+        puts(b"Usage: cp <source> <destination>\n");
+        return;
+    }
+
+    let src = &trimmed[..split_idx];
+    let dst = trim_slice(&trimmed[split_idx..]);
+
+    if dst.is_empty() {
+        puts(b"Usage: cp <source> <destination>\n");
+        return;
+    }
+
+    let mut src_buf = [0u8; 16];
+    let src_len = if src.len() < 15 { src.len() } else { 15 };
+    let mut i = 0;
+    while i < src_len {
+        src_buf[i] = src[i];
+        i += 1;
+    }
+    src_buf[src_len] = 0;
+
+    let mut dst_buf = [0u8; 16];
+    let dst_len = if dst.len() < 15 { dst.len() } else { 15 };
+    i = 0;
+    while i < dst_len {
+        dst_buf[i] = dst[i];
+        i += 1;
+    }
+    dst_buf[dst_len] = 0;
+
+    unsafe {
+        let bytes_read = fat16_read_file_by_name(src_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
+        if bytes_read < 0 {
+            puts(b"cp: cannot open source file: ");
+            puts(src);
+            puts(b"\n");
+            return;
+        }
+
+        let res = fat16_write_file(dst_buf.as_ptr(), SHELL_FILE_BUF.as_ptr(), bytes_read as u32);
+        if res == 0 {
+            puts(b"Copied ");
+            puts(src);
+            puts(b" -> ");
+            puts(dst);
+            puts(b" (");
+            print_u32(bytes_read as u32);
+            puts(b" bytes)\n");
+        } else {
+            puts(b"cp: failed to write destination file: ");
+            puts(dst);
+            puts(b"\n");
+        }
+    }
+}
+
+// Built-in Command: wc (Count lines, words, and bytes)
+fn cmd_wc(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: wc <filename>\n");
+        return;
+    }
+
+    let mut fname_buf = [0u8; 16];
+    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut i = 0;
+    while i < len {
+        fname_buf[i] = filename[i];
+        i += 1;
+    }
+    fname_buf[len] = 0;
+
+    unsafe {
+        let bytes_read = fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
+        if bytes_read < 0 {
+            puts(b"wc: cannot open file: ");
+            puts(filename);
+            puts(b"\n");
+            return;
+        }
+
+        let total = bytes_read as usize;
+        let mut lines: u32 = 0;
+        let mut words: u32 = 0;
+        let mut in_word = false;
+
+        let mut idx = 0;
+        while idx < total {
+            let b = SHELL_FILE_BUF[idx];
+            if b == b'\n' {
+                lines += 1;
+            }
+            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                words += 1;
+            }
+            idx += 1;
+        }
+
+        puts(b"  ");
+        print_u32(lines);
+        puts(b"  ");
+        print_u32(words);
+        puts(b"  ");
+        print_u32(total as u32);
+        puts(b"  ");
+        puts(filename);
+        puts(b"\n");
+    }
+}
+
+// Built-in Command: hexdump (Canonical hex dump)
+fn cmd_hexdump(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: hexdump <filename>\n");
+        return;
+    }
+
+    let mut fname_buf = [0u8; 16];
+    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut i = 0;
+    while i < len {
+        fname_buf[i] = filename[i];
+        i += 1;
+    }
+    fname_buf[len] = 0;
+
+    unsafe {
+        let bytes_read = fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 16384);
+        if bytes_read < 0 {
+            puts(b"hexdump: cannot open file: ");
+            puts(filename);
+            puts(b"\n");
+            return;
+        }
+
+        let total = bytes_read as usize;
+        let mut offset = 0;
+
+        while offset < total {
+            print_hex_u32(offset as u32);
+            puts(b": ");
+
+            let mut j = 0;
+            while j < 16 {
+                if offset + j < total {
+                    let b = SHELL_FILE_BUF[offset + j];
+                    print_hex_byte(b);
+                    print_char(b' ');
+                } else {
+                    puts(b"   ");
+                }
+                if j == 7 {
+                    print_char(b' ');
+                }
+                j += 1;
+            }
+
+            puts(b" |");
+            j = 0;
+            while j < 16 {
+                if offset + j < total {
+                    let b = SHELL_FILE_BUF[offset + j];
+                    if b >= 32 && b <= 126 {
+                        print_char(b);
+                    } else {
+                        print_char(b'.');
+                    }
+                }
+                j += 1;
+            }
+            puts(b"|\n");
+
+            offset += 16;
+        }
+    }
+}
+
 // Built-in Command: help
 fn cmd_help(_args: &[u8]) {
     puts(b"\nAvailable CykShell Commands:\n");
@@ -325,6 +582,46 @@ pub static COMMANDS: &[Command] = &[
         name: b"DEL",
         description: b"",
         handler: cmd_rm,
+    },
+    Command {
+        name: b"touch",
+        description: b"Create an empty file or touch file",
+        handler: cmd_touch,
+    },
+    Command {
+        name: b"TOUCH",
+        description: b"",
+        handler: cmd_touch,
+    },
+    Command {
+        name: b"cp",
+        description: b"Copy a file (e.g. cp src.txt dst.txt)",
+        handler: cmd_cp,
+    },
+    Command {
+        name: b"CP",
+        description: b"",
+        handler: cmd_cp,
+    },
+    Command {
+        name: b"wc",
+        description: b"Count lines, words, and bytes in a file",
+        handler: cmd_wc,
+    },
+    Command {
+        name: b"WC",
+        description: b"",
+        handler: cmd_wc,
+    },
+    Command {
+        name: b"hexdump",
+        description: b"Display hex and ASCII dump of a file",
+        handler: cmd_hexdump,
+    },
+    Command {
+        name: b"HEXDUMP",
+        description: b"",
+        handler: cmd_hexdump,
     },
     Command {
         name: b"reboot",

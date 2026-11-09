@@ -5,7 +5,3 @@ edit     EDIT.BIN
 vi       EDIT.BIN
 hello    HELLO.BIN
 sysdemo  SYSDEMO.BIN
-touch    TOUCH.BIN
-cp       CP.BIN
-wc       WC.BIN
-hexdump  HEXDUMP.BIN
