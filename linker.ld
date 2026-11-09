@@ -22,11 +22,17 @@ SECTIONS
 
     .text : {
         KEEP(*boot.o(.text*))    /* 32-bit assembly entry landing code goes FIRST */
+        KEEP(*cykastd.o(.text*)) /* Retain all standard library & I/O functions for apps */
+        KEEP(*fat16.o(.text*))   /* Retain all FAT16 read/write routines for apps */
         *(.text*)                /* All executive code routines */
         . = ALIGN(4);
+        KEEP(*cykastd.o(.rodata*))
+        KEEP(*fat16.o(.rodata*))
         *(.rodata*)              /* Global string literals and constants */
         *(.rdata*)               /* Read-only data for MinGW/PE-COFF toolchains */
         . = ALIGN(4);
+        KEEP(*cykastd.o(.data*))
+        KEEP(*fat16.o(.data*))
         *(.data*)                /* Initialized global variables */
         *(.data.rel.ro*)         /* Initialized pointers to read-only strings */
         *(.data.rel.ro.local*)

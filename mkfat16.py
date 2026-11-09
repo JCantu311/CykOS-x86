@@ -120,8 +120,8 @@ def format_disk(image_path, files_to_add=None):
             base_name = name_parts[0].ljust(8)[:8].encode("ascii")
             ext = name_parts[1].ljust(3)[:3].encode("ascii") if len(name_parts) > 1 else b"   "
 
-            start_cluster = next_cluster
             file_size = len(file_bytes)
+            start_cluster = next_cluster if file_size > 0 else 0
 
             # Write directory entry (32 bytes)
             entry_offset = root_entry_index * 32
@@ -198,7 +198,11 @@ if __name__ == "__main__":
                     ext = os.path.splitext(fname)[1].upper()
                     if ext in [".BIN", ".COM", ".DRV"]:
                         with open(fpath, "rb") as bf:
-                            sample_files[target_name] = bf.read()
-                            print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(sample_files[target_name])} bytes)")
+                            content = bf.read()
+                            if len(content) == 0:
+                                print(f"[mkfat16] Warning: Skipping 0-byte file: {fname}")
+                                continue
+                            sample_files[target_name] = content
+                            print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
 
     format_disk(target_img, sample_files)

@@ -138,6 +138,7 @@ if command -v rustc &> /dev/null; then
     # Compile default editor (edit.rs)
     if [ -f edit.rs ]; then
         echo "  Compiling Level 4 Editor (edit.rs)..."
+        rm -f bin/EDIT.BIN bin/libedit.a bin/edit.o
         if rustc --target i686-unknown-linux-gnu -O \
             -C overflow-checks=no \
             -C relocation-model=static \
@@ -147,8 +148,11 @@ if command -v rustc &> /dev/null; then
             if [ -f bin/kernel_syms.ld ]; then
                 $LD -m elf_i386 -T user.ld bin/kernel_syms.ld --whole-archive bin/libedit.a --no-whole-archive -o bin/EDIT.BIN 2>/dev/null || \
                 $LD -m elf_i386 -T user.ld bin/kernel_syms.ld bin/libedit.a -o bin/EDIT.BIN
-                if [ -f bin/EDIT.BIN ]; then
+                if [ -s bin/EDIT.BIN ]; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN"
+                else
+                    echo "  -> Error: bin/EDIT.BIN linking failed or produced empty file!" >&2
+                    rm -f bin/EDIT.BIN
                 fi
             fi
             rm -f bin/libedit.a

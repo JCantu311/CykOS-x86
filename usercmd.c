@@ -5,7 +5,7 @@
 #define USERCMDS_FILE     "USERCMDS.LST"    // List (LST) of userland commands
 #define USERCMDS_FALLBACK "USERCMDS.TXT"    // Fallback compatibility
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
-#define USER_APP_MAX_SIZE 0x10000   // 64 KB maximum application binary size
+#define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
 
 // Internal helper to convert character to uppercase
 static char uc(char c) {
@@ -141,6 +141,14 @@ int exec_user_command(const char* cmd_name, const char* args) {
         print_string(target_file);
         print_string("\n");
         return 1; // Handled (error shown)
+    }
+
+    // Check if executable file is empty
+    if (app_entry.file_size == 0) {
+        print_color_string("CykShell: executable is empty (0 bytes): ", VGA_RED);
+        print_string(target_file);
+        print_string("\n");
+        return 1;
     }
 
     // Load binary into application memory

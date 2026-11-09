@@ -254,6 +254,11 @@ pub static COMMANDS: &[Command] = &[
         description: b"Power off the virtual machine",
         handler: cmd_shutdown,
     },
+    Command {
+        name: b"exit",
+        description: b"Exit the shell (shutdown)",
+        handler: cmd_shutdown,
+    },
     // Future user applications or additional built-ins can be registered here!
 ];
 
