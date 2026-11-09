@@ -52,7 +52,7 @@ static mut LINES: [u8; MAX_LINES * MAX_LINE_LEN] = [0; MAX_LINES * MAX_LINE_LEN]
 static mut LINE_LENS: [usize; MAX_LINES] = [0; MAX_LINES];
 static mut NUM_LINES: usize = 1;
 
-static mut FILENAME_BUF: [u8; 16] = [0; 16];
+static mut FILENAME_BUF: [u8; 64] = [0; 64];
 static mut CMD_BUF: [u8; 32] = [0; 32];
 static mut CMD_LEN: usize = 0;
 static mut STATUS_MSG: [u8; 48] = [0; 48];
@@ -113,7 +113,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             let arg1 = *argv.add(1);
             if !arg1.is_null() {
                 let mut idx = 0;
-                while *arg1.add(idx) != 0 && idx < 12 {
+                while *arg1.add(idx) != 0 && idx < 63 {
                     *FILENAME_BUF.as_mut_ptr().add(idx) = *arg1.add(idx);
                     idx += 1;
                 }
@@ -235,7 +235,7 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
 
         // Active Filename
         unsafe {
-            for i in 0..16 {
+            for i in 0..64 {
                 let b = *FILENAME_BUF.as_ptr().add(i);
                 if b == 0 { break; }
                 vga_write_cell(pos, 24, b, status_attr);

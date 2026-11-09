@@ -196,6 +196,34 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_MKDIR: {
+            // arg1 = path
+            int res = fat16_mkdir((const char*)arg1);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
+        case SYS_RMDIR: {
+            // arg1 = path
+            int res = fat16_rmdir((const char*)arg1);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
+        case SYS_CHDIR: {
+            // arg1 = path
+            int res = fat16_chdir((const char*)arg1);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
+        case SYS_GETCWD: {
+            // arg1 = buffer, arg2 = max_bytes
+            int res = fat16_getcwd((char*)arg1, (unsigned int)arg2);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
         default: {
             // Unknown syscall
             regs->eax = (unsigned int)-1;

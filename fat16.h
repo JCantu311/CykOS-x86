@@ -31,6 +31,16 @@ int fat16_read_file_by_name(const char* filename, void* buffer, unsigned int max
 int fat16_write_file(const char* filename, const void* data, unsigned int size);
 int fat16_delete_file(const char* filename);
 int fat16_list_directory(fat16_dir_callback_t callback);
+int fat16_list_directory_cluster(unsigned short dir_cluster, fat16_dir_callback_t callback);
+
+// Hierarchical Directory Management
+int fat16_mkdir(const char* path);
+int fat16_rmdir(const char* path);
+int fat16_chdir(const char* path);
+int fat16_getcwd(char* buffer, unsigned int max_bytes);
+unsigned short fat16_get_cwd_cluster(void);
+const char* fat16_get_cwd_path(void);
+
 void fat16_print_volume_info(void);
 
 #endif // FAT16_H

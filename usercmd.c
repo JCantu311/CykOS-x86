@@ -2,8 +2,8 @@
 #include "fat16.h"
 #include "cykastd.h"
 
-#define USERCMDS_FILE     "USERCMDS.LST"    // List (LST) of userland commands
-#define USERCMDS_FALLBACK "USERCMDS.TXT"    // Fallback compatibility
+#define USERCMDS_FILE     "/USERCMDS.LST"   // List (LST) of userland commands
+#define USERCMDS_FALLBACK "/USERCMDS.TXT"   // Fallback compatibility
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
 
@@ -137,10 +137,27 @@ int exec_user_command(const char* cmd_name, const char* args) {
     // Locate the binary on FAT16
     fat16_entry_t app_entry;
     if (fat16_find_file(target_file, &app_entry) != 0) {
-        print_color_string("CykShell: executable not found: ", VGA_RED);
-        print_string(target_file);
-        print_string("\n");
-        return 1; // Handled (error shown)
+        // If not found in current directory and not an absolute path, check root directory
+        int found_in_root = 0;
+        if (target_file[0] != '/' && target_file[0] != '\\') {
+            char root_target[32];
+            root_target[0] = '/';
+            int t = 0;
+            while (target_file[t] && t < 30) {
+                root_target[t + 1] = target_file[t];
+                t++;
+            }
+            root_target[t + 1] = '\0';
+            if (fat16_find_file(root_target, &app_entry) == 0) {
+                found_in_root = 1;
+            }
+        }
+        if (!found_in_root) {
+            print_color_string("CykShell: executable not found: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1; // Handled (error shown)
+        }
     }
 
     // Check if executable file is empty

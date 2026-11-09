@@ -29,6 +29,10 @@ extern "C" {
     fn fat16_delete_file(filename: *const u8) -> i32;
     fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
     fn fat16_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
+    fn fat16_mkdir(path: *const u8) -> i32;
+    fn fat16_rmdir(path: *const u8) -> i32;
+    fn fat16_chdir(path: *const u8) -> i32;
+    fn fat16_getcwd(buffer: *mut u8, max_bytes: u32) -> i32;
 
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
@@ -182,7 +186,18 @@ extern "C" fn dir_entry_callback(name_ptr: *const u8, size: u32, is_dir: u8) {
 // Built-in Command: dir (MS-DOS compatible directory listing)
 fn cmd_dir(_args: &[u8]) {
     puts(b"\n Volume in drive C is CYKOS_DISK\n");
-    puts(b" Directory of C:\\\n\n");
+    puts(b" Directory of C:");
+    let mut buf = [0u8; 128];
+    let len = unsafe { fat16_getcwd(buf.as_mut_ptr(), 128) };
+    if len > 0 {
+        let ulen = len as usize;
+        for i in 0..ulen {
+            unsafe { print_char(buf[i]); }
+        }
+    } else {
+        puts(b"\\");
+    }
+    puts(b"\n\n");
 
     unsafe {
         DIR_FILE_COUNT = 0;
@@ -244,8 +259,8 @@ fn cmd_rm(args: &[u8]) {
         return;
     }
 
-    let mut fname_buf = [0u8; 16];
-    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut fname_buf = [0u8; 64];
+    let len = if filename.len() < 63 { filename.len() } else { 63 };
     let mut i = 0;
     while i < len {
         fname_buf[i] = filename[i];
@@ -282,8 +297,8 @@ fn cmd_touch(args: &[u8]) {
         return;
     }
 
-    let mut fname_buf = [0u8; 16];
-    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut fname_buf = [0u8; 64];
+    let len = if filename.len() < 63 { filename.len() } else { 63 };
     let mut i = 0;
     while i < len {
         fname_buf[i] = filename[i];
@@ -338,8 +353,8 @@ fn cmd_cp(args: &[u8]) {
         return;
     }
 
-    let mut src_buf = [0u8; 16];
-    let src_len = if src.len() < 15 { src.len() } else { 15 };
+    let mut src_buf = [0u8; 64];
+    let src_len = if src.len() < 63 { src.len() } else { 63 };
     let mut i = 0;
     while i < src_len {
         src_buf[i] = src[i];
@@ -347,8 +362,8 @@ fn cmd_cp(args: &[u8]) {
     }
     src_buf[src_len] = 0;
 
-    let mut dst_buf = [0u8; 16];
-    let dst_len = if dst.len() < 15 { dst.len() } else { 15 };
+    let mut dst_buf = [0u8; 64];
+    let dst_len = if dst.len() < 63 { dst.len() } else { 63 };
     i = 0;
     while i < dst_len {
         dst_buf[i] = dst[i];
@@ -390,8 +405,8 @@ fn cmd_wc(args: &[u8]) {
         return;
     }
 
-    let mut fname_buf = [0u8; 16];
-    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut fname_buf = [0u8; 64];
+    let len = if filename.len() < 63 { filename.len() } else { 63 };
     let mut i = 0;
     while i < len {
         fname_buf[i] = filename[i];
@@ -448,8 +463,8 @@ fn cmd_hexdump(args: &[u8]) {
         return;
     }
 
-    let mut fname_buf = [0u8; 16];
-    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut fname_buf = [0u8; 64];
+    let len = if filename.len() < 63 { filename.len() } else { 63 };
     let mut i = 0;
     while i < len {
         fname_buf[i] = filename[i];
@@ -505,6 +520,124 @@ fn cmd_hexdump(args: &[u8]) {
 
             offset += 16;
         }
+    }
+}
+
+// Built-in Command: mkdir (Create directory)
+fn cmd_mkdir(args: &[u8]) {
+    let dirname = trim_slice(args);
+    if dirname.is_empty() {
+        puts(b"Usage: mkdir <directory>\n");
+        return;
+    }
+
+    let mut dname_buf = [0u8; 64];
+    let len = if dirname.len() < 63 { dirname.len() } else { 63 };
+    let mut i = 0;
+    while i < len {
+        dname_buf[i] = dirname[i];
+        i += 1;
+    }
+    dname_buf[len] = 0;
+
+    let res = unsafe { fat16_mkdir(dname_buf.as_ptr()) };
+    if res == 0 {
+        puts(b"Created directory: ");
+        puts(dirname);
+        puts(b"\n");
+    } else if res == -3 {
+        puts(b"mkdir: directory already exists: ");
+        puts(dirname);
+        puts(b"\n");
+    } else if res == -4 {
+        puts(b"mkdir: disk full\n");
+    } else {
+        puts(b"mkdir: failed to create directory.\n");
+    }
+}
+
+// Built-in Command: rmdir (Remove empty directory)
+fn cmd_rmdir(args: &[u8]) {
+    let dirname = trim_slice(args);
+    if dirname.is_empty() {
+        puts(b"Usage: rmdir <directory>\n");
+        return;
+    }
+
+    let mut dname_buf = [0u8; 64];
+    let len = if dirname.len() < 63 { dirname.len() } else { 63 };
+    let mut i = 0;
+    while i < len {
+        dname_buf[i] = dirname[i];
+        i += 1;
+    }
+    dname_buf[len] = 0;
+
+    let res = unsafe { fat16_rmdir(dname_buf.as_ptr()) };
+    if res == 0 {
+        puts(b"Removed directory: ");
+        puts(dirname);
+        puts(b"\n");
+    } else if res == -3 {
+        puts(b"rmdir: directory not found: ");
+        puts(dirname);
+        puts(b"\n");
+    } else if res == -4 {
+        puts(b"rmdir: not a directory: ");
+        puts(dirname);
+        puts(b"\n");
+    } else if res == -5 {
+        puts(b"rmdir: cannot delete root directory\n");
+    } else if res == -6 {
+        puts(b"rmdir: directory not empty: ");
+        puts(dirname);
+        puts(b"\n");
+    } else {
+        puts(b"rmdir: failed to remove directory.\n");
+    }
+}
+
+// Built-in Command: cd (Change current working directory)
+fn cmd_cd(args: &[u8]) {
+    let path = trim_slice(args);
+    let mut path_buf = [0u8; 64];
+    let len = if path.len() < 63 { path.len() } else { 63 };
+    let mut i = 0;
+    while i < len {
+        path_buf[i] = path[i];
+        i += 1;
+    }
+    path_buf[len] = 0;
+
+    let res = unsafe {
+        if len == 0 {
+            let root = [b'\\', 0];
+            fat16_chdir(root.as_ptr())
+        } else {
+            fat16_chdir(path_buf.as_ptr())
+        }
+    };
+
+    if res != 0 {
+        puts(b"cd: directory not found: ");
+        puts(path);
+        puts(b"\n");
+    }
+}
+
+// Built-in Command: pwd (Print current working directory)
+fn cmd_pwd(_args: &[u8]) {
+    let mut buf = [0u8; 128];
+    let len = unsafe { fat16_getcwd(buf.as_mut_ptr(), 128) };
+    if len >= 0 {
+        puts(b"C:");
+        let ulen = len as usize;
+        for i in 0..ulen {
+            unsafe { print_char(buf[i]); }
+        }
+        puts(b"\n");
+    } else {
+        puts(b"pwd: error getting current directory\n");
     }
 }
 
@@ -653,6 +786,46 @@ pub static COMMANDS: &[Command] = &[
         description: b"",
         handler: cmd_shutdown,
     },
+    Command {
+        name: b"mkdir",
+        description: b"Create a directory (e.g. mkdir docs)",
+        handler: cmd_mkdir,
+    },
+    Command {
+        name: b"MKDIR",
+        description: b"",
+        handler: cmd_mkdir,
+    },
+    Command {
+        name: b"rmdir",
+        description: b"Remove an empty directory (e.g. rmdir docs)",
+        handler: cmd_rmdir,
+    },
+    Command {
+        name: b"RMDIR",
+        description: b"",
+        handler: cmd_rmdir,
+    },
+    Command {
+        name: b"cd",
+        description: b"Change current directory (e.g. cd docs, cd ..)",
+        handler: cmd_cd,
+    },
+    Command {
+        name: b"CD",
+        description: b"",
+        handler: cmd_cd,
+    },
+    Command {
+        name: b"pwd",
+        description: b"Print current working directory",
+        handler: cmd_pwd,
+    },
+    Command {
+        name: b"PWD",
+        description: b"",
+        handler: cmd_pwd,
+    },
     // Future user applications or additional built-ins can be registered here!
 ];
 
@@ -753,6 +926,10 @@ const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"cp",
     b"wc",
     b"hexdump",
+    b"mkdir",
+    b"rmdir",
+    b"cd",
+    b"pwd",
 ];
 
 #[no_mangle]
@@ -763,7 +940,18 @@ pub extern "C" fn shell_main() -> ! {
     puts(b"========================================\n\n");
 
     loop {
-        puts(b"CykOS> ");
+        let mut cwd_buf = [0u8; 128];
+        let cwd_len = unsafe { fat16_getcwd(cwd_buf.as_mut_ptr(), 128) };
+        puts(b"C:");
+        if cwd_len > 0 {
+            let ulen = cwd_len as usize;
+            for i in 0..ulen {
+                unsafe { print_char(cwd_buf[i]); }
+            }
+        } else {
+            puts(b"\\");
+        }
+        puts(b"> ");
 
         let mut start_x: i32 = 0;
         let mut start_y: i32 = 0;

@@ -18,6 +18,10 @@
 #define SYS_FAT_READ      105 // Convenience read file by name
 #define SYS_FAT_WRITE     106 // Convenience write file by name
 #define SYS_FAT_DELETE    107 // Delete file by name
+#define SYS_MKDIR         108 // Create directory (path)
+#define SYS_RMDIR         109 // Remove directory (path)
+#define SYS_CHDIR         110 // Change directory (path)
+#define SYS_GETCWD        111 // Get current working directory (buf, max)
 
 // File descriptor constants
 #define FD_STDIN          0

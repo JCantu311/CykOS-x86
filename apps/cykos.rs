@@ -20,6 +20,10 @@ pub const SYS_SLEEP: u32      = 104;
 pub const SYS_FAT_READ: u32   = 105;
 pub const SYS_FAT_WRITE: u32  = 106;
 pub const SYS_FAT_DELETE: u32 = 107;
+pub const SYS_MKDIR: u32      = 108;
+pub const SYS_RMDIR: u32      = 109;
+pub const SYS_CHDIR: u32      = 110;
+pub const SYS_GETCWD: u32     = 111;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -212,6 +216,79 @@ pub fn delete_file(filename: &str) -> Result<(), i32> {
 
     if res == 0 {
         Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Create a new directory on FAT16
+pub fn mkdir(path: &str) -> Result<(), i32> {
+    let mut buf = [0u8; 64];
+    let len = if path.len() < 63 { path.len() } else { 63 };
+    for i in 0..len {
+        buf[i] = path.as_bytes()[i];
+    }
+    buf[len] = 0;
+
+    let res = unsafe {
+        syscall::syscall1(SYS_MKDIR, buf.as_ptr() as u32) as i32
+    };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Remove an empty directory from FAT16
+pub fn rmdir(path: &str) -> Result<(), i32> {
+    let mut buf = [0u8; 64];
+    let len = if path.len() < 63 { path.len() } else { 63 };
+    for i in 0..len {
+        buf[i] = path.as_bytes()[i];
+    }
+    buf[len] = 0;
+
+    let res = unsafe {
+        syscall::syscall1(SYS_RMDIR, buf.as_ptr() as u32) as i32
+    };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Change current working directory
+pub fn chdir(path: &str) -> Result<(), i32> {
+    let mut buf = [0u8; 64];
+    let len = if path.len() < 63 { path.len() } else { 63 };
+    for i in 0..len {
+        buf[i] = path.as_bytes()[i];
+    }
+    buf[len] = 0;
+
+    let res = unsafe {
+        syscall::syscall1(SYS_CHDIR, buf.as_ptr() as u32) as i32
+    };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Get current working directory path string
+pub fn getcwd(buf: &mut [u8]) -> Result<usize, i32> {
+    let res = unsafe {
+        syscall::syscall2(SYS_GETCWD, buf.as_mut_ptr() as u32, buf.len() as u32) as i32
+    };
+
+    if res >= 0 {
+        Ok(res as usize)
     } else {
         Err(res)
     }
