@@ -89,45 +89,36 @@ $LD -m elf_i386 -T linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
     python3 -c "
-import re
+import re, sys
 symbols = {}
 with open('bin/kernel.map') as f:
     for line in f:
         line = line.strip()
         if not line:
             continue
+        # Format 1: GNU ld (0x00007e00 symbol_name)
         m = re.search(r'\b0x([0-9a-fA-F]{4,16})\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
         if m:
-            symbols[m.group(2)] = '0x' + m.group(1)
+            val = int(m.group(1), 16)
+            name = m.group(2)
+            if 0x7E00 <= val < 0x40000 and name not in symbols:
+                symbols[name] = f'0x{val:08x}'
             continue
+        # Format 2: ld.lld (00007e00 ... symbol_name)
         parts = line.split()
         if len(parts) >= 2:
             if re.match(r'^[0-9a-fA-F]{4,16}$', parts[0]) and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', parts[-1]):
-                symbols[parts[-1]] = '0x' + parts[0]
+                val = int(parts[0], 16)
+                name = parts[-1]
+                if 0x7E00 <= val < 0x40000 and name not in symbols:
+                    symbols[name] = f'0x{val:08x}'
 
 with open('bin/kernel_syms.ld', 'w') as out:
-    for sym, addr in symbols.items():
+    for sym, addr in sorted(symbols.items()):
         out.write(f'{sym} = {addr};\n')
-" 2>/dev/null || python -c "
-import re
-symbols = {}
-with open('bin/kernel.map') as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        m = re.search(r'\b0x([0-9a-fA-F]{4,16})\s+([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
-        if m:
-            symbols[m.group(2)] = '0x' + m.group(1)
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            if re.match(r'^[0-9a-fA-F]{4,16}$', parts[0]) and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', parts[-1]):
-                symbols[parts[-1]] = '0x' + parts[0]
 
-with open('bin/kernel_syms.ld', 'w') as out:
-    for sym, addr in symbols.items():
-        out.write(f'{sym} = {addr};\n')
+key_syms = [s for s in ['print_string', 'print_char', 'fat16_read_file_by_name', 'fat16_write_file'] if s in symbols]
+print(f'  -> Exported {len(symbols)} kernel symbols. Key symbols found: {\", \".join(key_syms)}')
 " 2>/dev/null || true
 fi
 

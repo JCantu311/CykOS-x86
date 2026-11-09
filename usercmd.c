@@ -271,6 +271,9 @@ int exec_user_command(const char* cmd_name, const char* args) {
         print_string("[exec] Sanity test (call 0x60000) PASSED\n");
     }
 
+    print_color_string("[exec] Press ANY KEY to jump to 0x50000...\n", VGA_GREEN);
+    get_char();
+
     print_string("[exec] Calling entry at 0x50000...\n");
     app_main_fn entry = (app_main_fn)dest;
     int result = entry(argc, s_argv);
