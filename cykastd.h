@@ -17,6 +17,9 @@ void clear_screen(void);
 void print_char(char c);
 void print_string(const char* str);
 int strncmp(const char* str1, const char* str2, size_t n);
+size_t strlen(const char* str);
+void* memcpy(void* dest, const void* src, size_t n);
+void* memset(void* dest, int val, size_t n);
 void print_color_string(const char* str, unsigned char color);
 
 // NEW: Hardware Port Communication Wrappers

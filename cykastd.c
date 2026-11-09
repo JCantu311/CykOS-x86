@@ -105,6 +105,31 @@ int strncmp(const char* str1, const char* str2, size_t n) {
     return 0;
 }
 
+size_t strlen(const char* str) {
+    size_t len = 0;
+    while (str && str[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+void* memcpy(void* dest, const void* src, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = s[i];
+    }
+    return dest;
+}
+
+void* memset(void* dest, int val, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = (unsigned char)val;
+    }
+    return dest;
+}
+
 void secwait(unsigned int seconds) {
     // PIT Channel 2 polling-based delay (no interrupts needed)
     // PIT oscillator: 1,193,182 Hz
