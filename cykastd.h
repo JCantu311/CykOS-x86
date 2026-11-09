@@ -27,6 +27,8 @@ void rust_eh_personality(void);
 void print_color_string(const char* str, unsigned char color);
 void update_hardware_cursor(void);
 void enable_hardware_cursor(void);
+void get_cursor_pos(int* x, int* y);
+void set_cursor_pos(int x, int y);
 
 // NEW: Hardware Port Communication Wrappers
 unsigned char inb(unsigned short port);

@@ -3,6 +3,15 @@
 
 use core::panic::PanicInfo;
 
+// Navigation & Special Key Codes
+const KEY_UP: u8       = 0x80;
+const KEY_DOWN: u8     = 0x81;
+const KEY_LEFT: u8     = 0x82;
+const KEY_RIGHT: u8    = 0x83;
+const KEY_HOME: u8     = 0x84;
+const KEY_END: u8      = 0x85;
+const KEY_DELETE: u8   = 0x89;
+
 // Level 1 Kernel & Driver C Function Declarations
 extern "C" {
     fn clear_screen();
@@ -14,7 +23,10 @@ extern "C" {
     fn secwait(seconds: u32);
     fn outb(port: u16, data: u8);
     fn outw(port: u16, data: u16);
+    fn get_cursor_pos(x: *mut i32, y: *mut i32);
+    fn set_cursor_pos(x: i32, y: i32);
     fn fat16_list_directory(callback: extern "C" fn(*const u8, u32, u8)) -> i32;
+    fn fat16_delete_file(filename: *const u8) -> i32;
 
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
@@ -204,6 +216,41 @@ fn cmd_shutdown(_args: &[u8]) {
     }
 }
 
+// Built-in Command: rm / del (Delete file from FAT16)
+fn cmd_rm(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: rm <filename>\n");
+        return;
+    }
+
+    let mut fname_buf = [0u8; 16];
+    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    let mut i = 0;
+    while i < len {
+        fname_buf[i] = filename[i];
+        i += 1;
+    }
+    fname_buf[len] = 0;
+
+    let res = unsafe { fat16_delete_file(fname_buf.as_ptr()) };
+    if res == 0 {
+        puts(b"Deleted file: ");
+        puts(filename);
+        puts(b"\n");
+    } else if res == -3 {
+        puts(b"rm: file not found: ");
+        puts(filename);
+        puts(b"\n");
+    } else if res == -4 {
+        puts(b"rm: cannot delete directory: ");
+        puts(filename);
+        puts(b"\n");
+    } else {
+        puts(b"rm: failed to delete file.\n");
+    }
+}
+
 // Built-in Command: help
 fn cmd_help(_args: &[u8]) {
     puts(b"\nAvailable CykShell Commands:\n");
@@ -258,6 +305,26 @@ pub static COMMANDS: &[Command] = &[
         name: b"DIR",
         description: b"",
         handler: cmd_dir,
+    },
+    Command {
+        name: b"rm",
+        description: b"Delete a file from the disk (e.g. rm file.txt)",
+        handler: cmd_rm,
+    },
+    Command {
+        name: b"RM",
+        description: b"",
+        handler: cmd_rm,
+    },
+    Command {
+        name: b"del",
+        description: b"Delete a file (alias for rm)",
+        handler: cmd_rm,
+    },
+    Command {
+        name: b"DEL",
+        description: b"",
+        handler: cmd_rm,
     },
     Command {
         name: b"reboot",
@@ -365,18 +432,51 @@ fn dispatch_command(raw_line: &[u8]) {
 // Static line buffer in .bss (avoids runtime stack allocations/zeroing)
 static mut LINE_BUF: [u8; 128] = [0; 128];
 
+// Command History (Up to 16 commands)
+const MAX_HISTORY: usize = 16;
+static mut HISTORY: [[u8; 128]; MAX_HISTORY] = [[0; 128]; MAX_HISTORY];
+static mut HISTORY_LENS: [usize; MAX_HISTORY] = [0; MAX_HISTORY];
+static mut HISTORY_COUNT: usize = 0;
+
+// Autocomplete list
+const AUTOCOMPLETE_LIST: &[&[u8]] = &[
+    b"help",
+    b"clear",
+    b"dir",
+    b"rm",
+    b"del",
+    b"reboot",
+    b"shutdown",
+    b"exit",
+    b"edit",
+    b"vi",
+    b"hello",
+    b"sysdemo",
+    b"touch",
+    b"cp",
+    b"wc",
+    b"hexdump",
+];
+
 #[no_mangle]
 pub extern "C" fn shell_main() -> ! {
     puts(b"\n========================================\n");
-    puts_color(b" CykOS Interactive Shell (CykShell v0.1)\n", 0x0A); // VGA Green
+    puts_color(b" CykOS Interactive Shell (CykShell v0.2)\n", 0x0A); // VGA Green
     puts(b" Type 'help' for available commands.\n");
     puts(b"========================================\n\n");
 
-    let mut line_len: usize = 0;
-
     loop {
         puts(b"CykOS> ");
-        line_len = 0;
+
+        let mut start_x: i32 = 0;
+        let mut start_y: i32 = 0;
+        unsafe { get_cursor_pos(&mut start_x, &mut start_y); }
+
+        let mut line_len: usize = 0;
+        let mut cursor_pos: usize = 0;
+        let mut history_browse = unsafe { HISTORY_COUNT };
+        let mut saved_scratch = [0u8; 128];
+        let mut saved_scratch_len = 0;
 
         loop {
             let c = unsafe { get_char() };
@@ -384,18 +484,179 @@ pub extern "C" fn shell_main() -> ! {
             if c == b'\n' || c == b'\r' {
                 unsafe { print_char(b'\n'); }
                 break;
+            } else if c == KEY_LEFT {
+                if cursor_pos > 0 {
+                    cursor_pos -= 1;
+                    unsafe { set_cursor_pos(start_x + cursor_pos as i32, start_y); }
+                }
+            } else if c == KEY_RIGHT {
+                if cursor_pos < line_len {
+                    cursor_pos += 1;
+                    unsafe { set_cursor_pos(start_x + cursor_pos as i32, start_y); }
+                }
+            } else if c == KEY_HOME {
+                cursor_pos = 0;
+                unsafe { set_cursor_pos(start_x, start_y); }
+            } else if c == KEY_END {
+                cursor_pos = line_len;
+                unsafe { set_cursor_pos(start_x + line_len as i32, start_y); }
+            } else if c == KEY_UP {
+                // Browse back in history
+                unsafe {
+                    if HISTORY_COUNT > 0 && history_browse > 0 {
+                        let available = if HISTORY_COUNT > MAX_HISTORY { MAX_HISTORY } else { HISTORY_COUNT };
+                        let min_allowed = HISTORY_COUNT - available;
+                        if history_browse > min_allowed {
+                            if history_browse == HISTORY_COUNT {
+                                // Save current typed line
+                                for i in 0..line_len { saved_scratch[i] = LINE_BUF[i]; }
+                                saved_scratch_len = line_len;
+                            }
+                            history_browse -= 1;
+                            let slot = history_browse % MAX_HISTORY;
+                            let new_len = HISTORY_LENS[slot];
+                            for i in 0..new_len { LINE_BUF[i] = HISTORY[slot][i]; }
+
+                            // Redraw line
+                            set_cursor_pos(start_x, start_y);
+                            for i in 0..new_len { print_char(LINE_BUF[i]); }
+                            let mut cur = new_len;
+                            while cur < line_len { print_char(b' '); cur += 1; }
+                            line_len = new_len;
+                            cursor_pos = new_len;
+                            set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                        }
+                    }
+                }
+            } else if c == KEY_DOWN {
+                // Browse forward in history
+                unsafe {
+                    if history_browse < HISTORY_COUNT {
+                        history_browse += 1;
+                        let new_len = if history_browse == HISTORY_COUNT {
+                            for i in 0..saved_scratch_len { LINE_BUF[i] = saved_scratch[i]; }
+                            saved_scratch_len
+                        } else {
+                            let slot = history_browse % MAX_HISTORY;
+                            let hlen = HISTORY_LENS[slot];
+                            for i in 0..hlen { LINE_BUF[i] = HISTORY[slot][i]; }
+                            hlen
+                        };
+
+                        // Redraw line
+                        set_cursor_pos(start_x, start_y);
+                        for i in 0..new_len { print_char(LINE_BUF[i]); }
+                        let mut cur = new_len;
+                        while cur < line_len { print_char(b' '); cur += 1; }
+                        line_len = new_len;
+                        cursor_pos = new_len;
+                        set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                    }
+                }
+            } else if c == b'\t' {
+                // Tab Autocompletion
+                if line_len > 0 && cursor_pos == line_len {
+                    unsafe {
+                        let prefix = &LINE_BUF[..line_len];
+                        let mut match_candidate: Option<&[u8]> = None;
+                        let mut match_count = 0;
+
+                        for &cand in AUTOCOMPLETE_LIST {
+                            if cand.len() >= prefix.len() && bytes_eq(&cand[..prefix.len()], prefix) {
+                                match_candidate = Some(cand);
+                                match_count += 1;
+                            }
+                        }
+
+                        if match_count == 1 {
+                            if let Some(cand) = match_candidate {
+                                for i in 0..cand.len() { LINE_BUF[i] = cand[i]; }
+                                LINE_BUF[cand.len()] = b' ';
+                                let new_len = cand.len() + 1;
+
+                                set_cursor_pos(start_x, start_y);
+                                for i in 0..new_len { print_char(LINE_BUF[i]); }
+                                line_len = new_len;
+                                cursor_pos = new_len;
+                                set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                            }
+                        }
+                    }
+                }
             } else if c == 0x08 { // Backspace
-                if line_len > 0 {
-                    line_len -= 1;
-                    unsafe { print_char(0x08); }
+                unsafe {
+                    if cursor_pos > 0 {
+                        let mut i = cursor_pos - 1;
+                        while i + 1 < line_len {
+                            LINE_BUF[i] = LINE_BUF[i + 1];
+                            i += 1;
+                        }
+                        line_len -= 1;
+                        cursor_pos -= 1;
+
+                        set_cursor_pos(start_x, start_y);
+                        for j in 0..line_len { print_char(LINE_BUF[j]); }
+                        print_char(b' ');
+                        set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                    }
+                }
+            } else if c == KEY_DELETE { // Delete
+                unsafe {
+                    if cursor_pos < line_len {
+                        let mut i = cursor_pos;
+                        while i + 1 < line_len {
+                            LINE_BUF[i] = LINE_BUF[i + 1];
+                            i += 1;
+                        }
+                        line_len -= 1;
+
+                        set_cursor_pos(start_x, start_y);
+                        for j in 0..line_len { print_char(LINE_BUF[j]); }
+                        print_char(b' ');
+                        set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                    }
                 }
             } else if c >= 32 && c <= 126 { // Printable ASCII range
                 unsafe {
                     if line_len < LINE_BUF.len() - 1 {
-                        LINE_BUF[line_len] = c;
-                        line_len += 1;
-                        print_char(c);
+                        if cursor_pos == line_len {
+                            LINE_BUF[line_len] = c;
+                            line_len += 1;
+                            cursor_pos += 1;
+                            print_char(c);
+                        } else {
+                            let mut i = line_len;
+                            while i > cursor_pos {
+                                LINE_BUF[i] = LINE_BUF[i - 1];
+                                i -= 1;
+                            }
+                            LINE_BUF[cursor_pos] = c;
+                            line_len += 1;
+                            cursor_pos += 1;
+
+                            set_cursor_pos(start_x, start_y);
+                            for j in 0..line_len { print_char(LINE_BUF[j]); }
+                            set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                        }
                     }
+                }
+            }
+        }
+
+        // Save command to history (if non-empty and not identical to previous)
+        if line_len > 0 {
+            unsafe {
+                let is_dup = HISTORY_COUNT > 0 &&
+                    HISTORY_LENS[(HISTORY_COUNT - 1) % MAX_HISTORY] == line_len &&
+                    bytes_eq(&HISTORY[(HISTORY_COUNT - 1) % MAX_HISTORY][..line_len], &LINE_BUF[..line_len]);
+
+                if !is_dup {
+                    let slot = HISTORY_COUNT % MAX_HISTORY;
+                    for i in 0..line_len {
+                        HISTORY[slot][i] = LINE_BUF[i];
+                    }
+                    HISTORY_LENS[slot] = line_len;
+                    HISTORY_COUNT += 1;
                 }
             }
         }

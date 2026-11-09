@@ -189,6 +189,13 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_FAT_DELETE: {
+            // arg1 = filename
+            int res = fat16_delete_file((const char*)arg1);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
         default: {
             // Unknown syscall
             regs->eax = (unsigned int)-1;

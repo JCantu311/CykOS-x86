@@ -26,6 +26,21 @@ void enable_hardware_cursor(void) {
     update_hardware_cursor();
 }
 
+void get_cursor_pos(int* x, int* y) {
+    if (x) *x = cursor_x;
+    if (y) *y = cursor_y;
+}
+
+void set_cursor_pos(int x, int y) {
+    if (x < 0) x = 0;
+    if (x >= VGA_WIDTH) x = VGA_WIDTH - 1;
+    if (y < 0) y = 0;
+    if (y >= VGA_HEIGHT) y = VGA_HEIGHT - 1;
+    cursor_x = x;
+    cursor_y = y;
+    update_hardware_cursor();
+}
+
 void clear_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short blank = (CONSOLE_COLOR << 8) | ' ';

@@ -17,6 +17,7 @@
 #define SYS_SLEEP         104 // Sleep for specified seconds
 #define SYS_FAT_READ      105 // Convenience read file by name
 #define SYS_FAT_WRITE     106 // Convenience write file by name
+#define SYS_FAT_DELETE    107 // Delete file by name
 
 // File descriptor constants
 #define FD_STDIN          0

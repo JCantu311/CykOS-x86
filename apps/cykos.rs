@@ -19,6 +19,7 @@ pub const SYS_HAS_KEY: u32    = 103;
 pub const SYS_SLEEP: u32      = 104;
 pub const SYS_FAT_READ: u32   = 105;
 pub const SYS_FAT_WRITE: u32  = 106;
+pub const SYS_FAT_DELETE: u32 = 107;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -187,6 +188,26 @@ pub fn write_file(filename: &str, data: &[u8]) -> Result<(), i32> {
 
     let res = unsafe {
         syscall::syscall3(SYS_FAT_WRITE, fname_buf.as_ptr() as u32, data.as_ptr() as u32, data.len() as u32) as i32
+    };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
+/// Delete a file from FAT16 by name
+pub fn delete_file(filename: &str) -> Result<(), i32> {
+    let mut fname_buf = [0u8; 16];
+    let len = if filename.len() < 15 { filename.len() } else { 15 };
+    for i in 0..len {
+        fname_buf[i] = filename.as_bytes()[i];
+    }
+    fname_buf[len] = 0;
+
+    let res = unsafe {
+        syscall::syscall1(SYS_FAT_DELETE, fname_buf.as_ptr() as u32) as i32
     };
 
     if res == 0 {

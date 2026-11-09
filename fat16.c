@@ -574,3 +574,69 @@ int fat16_read_file_by_name(const char* filename, void* buffer, unsigned int max
     }
     return fat16_read_file(&entry, buffer, max_bytes);
 }
+
+/**
+ * Deletes a file from the FAT16 volume.
+ * Frees its cluster chain and marks the directory entry with 0xE5.
+ * Returns 0 on success, negative error code on failure.
+ */
+int fat16_delete_file(const char* filename) {
+    if (!g_fat16.is_mounted || !filename) {
+        return -1;
+    }
+
+    char target_name[8];
+    char target_ext[3];
+    format_to_8_3(filename, target_name, target_ext);
+
+    for (unsigned int sector = 0; sector < g_fat16.root_dir_sectors; sector++) {
+        unsigned int dir_lba = g_fat16.root_dir_lba + sector;
+        if (ata_read_sectors(dir_lba, 1, g_sector_buf) != 0) {
+            return -2;
+        }
+
+        fat16_raw_entry_t* entries = (fat16_raw_entry_t*)g_sector_buf;
+        for (int i = 0; i < 16; i++) {
+            unsigned char first_byte = (unsigned char)entries[i].name[0];
+
+            if (first_byte == 0x00) {
+                return -3; // End of directory, file not found
+            }
+            if (first_byte == 0xE5) {
+                continue; // Already deleted
+            }
+
+            if (entries[i].attributes == FAT_ATTR_LFN || (entries[i].attributes & FAT_ATTR_VOLUME_ID)) {
+                continue;
+            }
+
+            if (strncmp(entries[i].name, target_name, 8) == 0 &&
+                strncmp(entries[i].ext, target_ext, 3) == 0) {
+
+                // Do not delete directories via file delete
+                if (entries[i].attributes & FAT_ATTR_DIRECTORY) {
+                    return -4;
+                }
+
+                // Free the cluster chain if any clusters were allocated
+                unsigned short start_cluster = entries[i].first_cluster_low;
+                if (start_cluster >= 2 && start_cluster < 0xFFF8) {
+                    fat16_free_cluster_chain(start_cluster);
+                }
+
+                // Mark entry as deleted (0xE5)
+                entries[i].name[0] = (char)0xE5;
+
+                // Write directory sector back to disk
+                if (ata_write_sectors(dir_lba, 1, g_sector_buf) != 0) {
+                    return -5;
+                }
+
+                g_cached_fat_lba = 0xFFFFFFFF;
+                return 0; // Successfully deleted
+            }
+        }
+    }
+
+    return -3; // Not found
+}
