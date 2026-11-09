@@ -18,6 +18,19 @@ static inline void kbd_outb(unsigned short port, unsigned char data) {
 // Internal modifier states
 static int g_shift_state = 0;
 static int g_caps_lock = 0;
+static int g_extended = 0;
+
+// Navigation & Special Key Codes (0x80 - 0x89)
+#define KEY_UP       ((char)0x80)
+#define KEY_DOWN     ((char)0x81)
+#define KEY_LEFT     ((char)0x82)
+#define KEY_RIGHT    ((char)0x83)
+#define KEY_HOME     ((char)0x84)
+#define KEY_END      ((char)0x85)
+#define KEY_PAGEUP   ((char)0x86)
+#define KEY_PAGEDOWN ((char)0x87)
+#define KEY_INSERT   ((char)0x88)
+#define KEY_DELETE   ((char)0x89)
 
 // Standard US QWERTY Scancode Set 1 Lookup Tables
 static const char scancode_normal[128] = {
@@ -59,6 +72,10 @@ static char keyboard_get_scancode(void) {
 static char keyboard_scancode_to_ascii(unsigned char scancode) {
     // Extended scancode escape prefix (e.g., arrow keys)
     if (scancode == 0xE0) {
+        g_extended = 1;
+        return 0;
+    }
+    if (scancode == 0xE1) {
         return 0;
     }
 
@@ -68,10 +85,14 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
         if (released == 0x2A || released == 0x36) { // Left or Right Shift release
             g_shift_state = 0;
         }
+        g_extended = 0;
         return 0;
     }
 
     // Key presses (make codes)
+    int was_extended = g_extended;
+    g_extended = 0;
+
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift press
         g_shift_state = 1;
         return 0;
@@ -80,6 +101,21 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
     if (scancode == 0x3A) { // Caps Lock toggle
         g_caps_lock = !g_caps_lock;
         return 0;
+    }
+
+    // Navigation and editing keys (both dedicated extended cluster and keypad)
+    switch (scancode) {
+        case 0x48: return KEY_UP;
+        case 0x50: return KEY_DOWN;
+        case 0x4B: return KEY_LEFT;
+        case 0x4D: return KEY_RIGHT;
+        case 0x47: return KEY_HOME;
+        case 0x4F: return KEY_END;
+        case 0x49: return KEY_PAGEUP;
+        case 0x51: return KEY_PAGEDOWN;
+        case 0x52: return KEY_INSERT;
+        case 0x53: return KEY_DELETE;
+        default: break;
     }
 
     if (scancode >= 128) {
@@ -120,6 +156,7 @@ static int keyboard_init(void) {
     // 2. Reset internal states
     g_shift_state = 0;
     g_caps_lock = 0;
+    g_extended = 0;
 
     return 0; // Success
 }

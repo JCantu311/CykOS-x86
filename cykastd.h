@@ -36,6 +36,18 @@ void outw(unsigned short port, unsigned short data);
 
 void secwait(unsigned int seconds);
 
+// Navigation & Special Key Codes (0x80 - 0x89)
+#define KEY_UP       ((char)0x80)
+#define KEY_DOWN     ((char)0x81)
+#define KEY_LEFT     ((char)0x82)
+#define KEY_RIGHT    ((char)0x83)
+#define KEY_HOME     ((char)0x84)
+#define KEY_END      ((char)0x85)
+#define KEY_PAGEUP   ((char)0x86)
+#define KEY_PAGEDOWN ((char)0x87)
+#define KEY_INSERT   ((char)0x88)
+#define KEY_DELETE   ((char)0x89)
+
 // NEW: Keyboard Engine
 char get_scancode(void);
 char scancode_to_ascii(unsigned char scancode);

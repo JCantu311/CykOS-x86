@@ -28,6 +28,18 @@ const TEXT_ROWS: usize = 24; // Rows 0..23 for text editing; Row 24 for status &
 const MAX_LINES: usize = 256;
 const MAX_LINE_LEN: usize = 80;
 
+// Navigation & Special Key Codes
+const KEY_UP: u8       = 0x80;
+const KEY_DOWN: u8     = 0x81;
+const KEY_LEFT: u8     = 0x82;
+const KEY_RIGHT: u8    = 0x83;
+const KEY_HOME: u8     = 0x84;
+const KEY_END: u8      = 0x85;
+const KEY_PAGEUP: u8   = 0x86;
+const KEY_PAGEDOWN: u8 = 0x87;
+const KEY_INSERT: u8   = 0x88;
+const KEY_DELETE: u8   = 0x89;
+
 #[derive(Copy, Clone, PartialEq)]
 enum Mode {
     Normal,
@@ -346,7 +358,7 @@ fn run_editor() -> i32 {
         match mode {
             Mode::Normal => {
                 match key {
-                    b'i' => { // Enter Insert mode before cursor
+                    b'i' | KEY_INSERT => { // Enter Insert mode before cursor
                         mode = Mode::Insert;
                         set_status(b"");
                     }
@@ -407,41 +419,54 @@ fn run_editor() -> i32 {
                         mode = Mode::Command;
                         unsafe { CMD_LEN = 0; }
                     }
-                    b'h' => { // Left
+                    b'h' | KEY_LEFT => { // Left
                         if cursor_col > 0 { cursor_col -= 1; }
                     }
-                    b'l' => { // Right
+                    b'l' | KEY_RIGHT => { // Right
                         let max_col = unsafe { get_line_len(cursor_row) };
                         if cursor_col < max_col && cursor_col + 1 < MAX_LINE_LEN {
                             cursor_col += 1;
                         }
                     }
-                    b'j' => { // Down
+                    b'j' | KEY_DOWN => { // Down
                         if cursor_row + 1 < unsafe { NUM_LINES } {
                             cursor_row += 1;
                             let max_col = unsafe { get_line_len(cursor_row) };
                             if cursor_col > max_col { cursor_col = max_col; }
                         }
                     }
-                    b'k' => { // Up
+                    b'k' | KEY_UP => { // Up
                         if cursor_row > 0 {
                             cursor_row -= 1;
                             let max_col = unsafe { get_line_len(cursor_row) };
                             if cursor_col > max_col { cursor_col = max_col; }
                         }
                     }
-                    b'0' => { // Beginning of line
+                    b'0' | KEY_HOME => { // Beginning of line
                         cursor_col = 0;
                     }
-                    b'$' => { // End of line
+                    b'$' | KEY_END => { // End of line
                         cursor_col = unsafe { get_line_len(cursor_row) };
                     }
-                    b'x' => { // Delete character under cursor
+                    KEY_PAGEUP => {
+                        cursor_row = if cursor_row > TEXT_ROWS { cursor_row - TEXT_ROWS } else { 0 };
+                        let max_col = unsafe { get_line_len(cursor_row) };
+                        if cursor_col > max_col { cursor_col = max_col; }
+                    }
+                    KEY_PAGEDOWN => {
+                        let total = unsafe { NUM_LINES };
+                        cursor_row = if cursor_row + TEXT_ROWS < total { cursor_row + TEXT_ROWS } else if total > 0 { total - 1 } else { 0 };
+                        let max_col = unsafe { get_line_len(cursor_row) };
+                        if cursor_col > max_col { cursor_col = max_col; }
+                    }
+                    b'x' | KEY_DELETE => { // Delete character under cursor
                         unsafe {
                             let len = get_line_len(cursor_row);
                             if cursor_col < len {
-                                for c in cursor_col..(len - 1) {
+                                let mut c = cursor_col;
+                                while c + 1 < len {
                                     set_char_at(cursor_row, c, get_char_at(cursor_row, c + 1));
+                                    c += 1;
                                 }
                                 set_line_len(cursor_row, len - 1);
                             }
@@ -478,12 +503,58 @@ fn run_editor() -> i32 {
                     if cursor_col > 0 && cursor_col >= max_col {
                         cursor_col = if max_col > 0 { max_col - 1 } else { 0 };
                     }
+                } else if key == KEY_LEFT {
+                    if cursor_col > 0 { cursor_col -= 1; }
+                } else if key == KEY_RIGHT {
+                    let max_col = unsafe { get_line_len(cursor_row) };
+                    if cursor_col < max_col && cursor_col + 1 < MAX_LINE_LEN {
+                        cursor_col += 1;
+                    }
+                } else if key == KEY_UP {
+                    if cursor_row > 0 {
+                        cursor_row -= 1;
+                        let max_col = unsafe { get_line_len(cursor_row) };
+                        if cursor_col > max_col { cursor_col = max_col; }
+                    }
+                } else if key == KEY_DOWN {
+                    if cursor_row + 1 < unsafe { NUM_LINES } {
+                        cursor_row += 1;
+                        let max_col = unsafe { get_line_len(cursor_row) };
+                        if cursor_col > max_col { cursor_col = max_col; }
+                    }
+                } else if key == KEY_HOME {
+                    cursor_col = 0;
+                } else if key == KEY_END {
+                    cursor_col = unsafe { get_line_len(cursor_row) };
+                } else if key == KEY_PAGEUP {
+                    cursor_row = if cursor_row > TEXT_ROWS { cursor_row - TEXT_ROWS } else { 0 };
+                    let max_col = unsafe { get_line_len(cursor_row) };
+                    if cursor_col > max_col { cursor_col = max_col; }
+                } else if key == KEY_PAGEDOWN {
+                    let total = unsafe { NUM_LINES };
+                    cursor_row = if cursor_row + TEXT_ROWS < total { cursor_row + TEXT_ROWS } else if total > 0 { total - 1 } else { 0 };
+                    let max_col = unsafe { get_line_len(cursor_row) };
+                    if cursor_col > max_col { cursor_col = max_col; }
+                } else if key == KEY_DELETE {
+                    unsafe {
+                        let len = get_line_len(cursor_row);
+                        if cursor_col < len {
+                            let mut c = cursor_col;
+                            while c + 1 < len {
+                                set_char_at(cursor_row, c, get_char_at(cursor_row, c + 1));
+                                c += 1;
+                            }
+                            set_line_len(cursor_row, len - 1);
+                        }
+                    }
                 } else if key == 0x08 { // Backspace
                     unsafe {
                         if cursor_col > 0 {
                             let len = get_line_len(cursor_row);
-                            for c in (cursor_col - 1)..(len - 1) {
+                            let mut c = cursor_col - 1;
+                            while c + 1 < len {
                                 set_char_at(cursor_row, c, get_char_at(cursor_row, c + 1));
+                                c += 1;
                             }
                             set_line_len(cursor_row, len - 1);
                             cursor_col -= 1;

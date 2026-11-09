@@ -25,6 +25,20 @@ pub const FD_STDOUT: u32 = 1;
 pub const FD_STDERR: u32 = 2;
 
 // =========================================================================
+// Navigation & Special Key Codes
+// =========================================================================
+pub const KEY_UP: u8       = 0x80;
+pub const KEY_DOWN: u8     = 0x81;
+pub const KEY_LEFT: u8     = 0x82;
+pub const KEY_RIGHT: u8    = 0x83;
+pub const KEY_HOME: u8     = 0x84;
+pub const KEY_END: u8      = 0x85;
+pub const KEY_PAGEUP: u8   = 0x86;
+pub const KEY_PAGEDOWN: u8 = 0x87;
+pub const KEY_INSERT: u8   = 0x88;
+pub const KEY_DELETE: u8   = 0x89;
+
+// =========================================================================
 // Low-Level int 0x80 Syscall Dispatchers
 // =========================================================================
 pub mod syscall {

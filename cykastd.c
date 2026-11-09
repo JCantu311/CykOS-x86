@@ -281,13 +281,37 @@ static const char fallback_scancode_normal[128] = {
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
 };
 
+static int g_fallback_extended = 0;
+
 char scancode_to_ascii(unsigned char scancode) {
     cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
     if (kbd && kbd->scancode_to_ascii) {
         return kbd->scancode_to_ascii(scancode);
     }
+    if (scancode == 0xE0) {
+        g_fallback_extended = 1;
+        return 0;
+    }
+    if (scancode == 0xE1) {
+        return 0;
+    }
     if (scancode & 0x80) {
+        g_fallback_extended = 0;
         return 0; // Key release
+    }
+    g_fallback_extended = 0;
+    switch (scancode) {
+        case 0x48: return KEY_UP;
+        case 0x50: return KEY_DOWN;
+        case 0x4B: return KEY_LEFT;
+        case 0x4D: return KEY_RIGHT;
+        case 0x47: return KEY_HOME;
+        case 0x4F: return KEY_END;
+        case 0x49: return KEY_PAGEUP;
+        case 0x51: return KEY_PAGEDOWN;
+        case 0x52: return KEY_INSERT;
+        case 0x53: return KEY_DELETE;
+        default: break;
     }
     if (scancode < 128) {
         return fallback_scancode_normal[scancode];
