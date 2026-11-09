@@ -196,6 +196,12 @@ int bcmp(const void* s1, const void* s2, size_t n) {
 void rust_eh_personality(void) {
 }
 
+void rust_begin_unwind(void) {
+    while (1) {
+        asm volatile("hlt");
+    }
+}
+
 void secwait(unsigned int seconds) {
     // PIT Channel 2 polling-based delay (no interrupts needed)
     // PIT oscillator: 1,193,182 Hz

@@ -15,8 +15,6 @@ extern "C" {
     fn print_string(s: *const u8);
     fn get_char() -> u8;
     fn has_key() -> i32;
-    fn outb(port: u16, data: u8);
-    fn outw(port: u16, data: u16);
     fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
     fn fat16_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
 }
@@ -50,16 +48,18 @@ static mut STATUS_MSG: [u8; 48] = [0; 48];
 // =========================================================================
 // Hardware Cursor & VGA Direct Access
 // =========================================================================
+#[inline(always)]
 fn set_cursor(col: usize, row: usize) {
     let pos = (row * SCREEN_COLS + col) as u16;
     unsafe {
-        outb(0x3D4, 0x0E);
-        outb(0x3D5, (pos >> 8) as u8);
-        outb(0x3D4, 0x0F);
-        outb(0x3D5, (pos & 0xFF) as u8);
+        core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Eu8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") ((pos >> 8) & 0xFF) as u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Fu8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") (pos & 0xFF) as u8, options(nomem, nostack));
     }
 }
 
+#[inline(always)]
 fn vga_write_cell(col: usize, row: usize, ch: u8, attr: u8) {
     if col < SCREEN_COLS && row < 25 {
         let offset = (row * SCREEN_COLS + col) * 2;
@@ -72,11 +72,13 @@ fn vga_write_cell(col: usize, row: usize, ch: u8, attr: u8) {
 
 fn set_status(msg: &[u8]) {
     unsafe {
-        for b in STATUS_MSG.iter_mut() {
-            *b = 0;
+        for i in 0..48 {
+            STATUS_MSG[i] = 0;
         }
-        let len = if msg.len() < STATUS_MSG.len() - 1 { msg.len() } else { STATUS_MSG.len() - 1 };
-        STATUS_MSG[..len].copy_from_slice(&msg[..len]);
+        let len = if msg.len() < 47 { msg.len() } else { 47 };
+        for i in 0..len {
+            STATUS_MSG[i] = msg[i];
+        }
     }
 }
 
@@ -113,16 +115,14 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
     }
 
     if mode == Mode::Command {
-        // Draw command input prompt: e.g. ":w"
         vga_write_cell(0, 24, b':', 0x0F);
         unsafe {
             for i in 0..CMD_LEN {
                 vga_write_cell(1 + i, 24, CMD_BUF[i], 0x0F);
             }
+            set_cursor(1 + CMD_LEN, 24);
         }
-        set_cursor(1 + unsafe { CMD_LEN }, 24);
     } else {
-        // Mode indicator
         let mode_str: &[u8] = match mode {
             Mode::Insert => b"-- INSERT -- ",
             Mode::Normal => b"NORMAL ",
@@ -130,14 +130,15 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
         };
 
         let mut pos = 0;
-        for &b in mode_str {
-            vga_write_cell(pos, 24, b, status_attr);
+        for i in 0..mode_str.len() {
+            vga_write_cell(pos, 24, mode_str[i], status_attr);
             pos += 1;
         }
 
         // Active Filename
         unsafe {
-            for &b in FILENAME_BUF.iter() {
+            for i in 0..16 {
+                let b = FILENAME_BUF[i];
                 if b == 0 { break; }
                 vga_write_cell(pos, 24, b, status_attr);
                 pos += 1;
@@ -147,13 +148,11 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
         // Status / error message if set
         unsafe {
             if STATUS_MSG[0] != 0 {
-                vga_write_cell(pos, 24, b' ', status_attr);
-                pos += 1;
-                vga_write_cell(pos, 24, b'-', status_attr);
-                pos += 1;
-                vga_write_cell(pos, 24, b' ', status_attr);
-                pos += 1;
-                for &b in STATUS_MSG.iter() {
+                vga_write_cell(pos, 24, b' ', status_attr); pos += 1;
+                vga_write_cell(pos, 24, b'-', status_attr); pos += 1;
+                vga_write_cell(pos, 24, b' ', status_attr); pos += 1;
+                for i in 0..48 {
+                    let b = STATUS_MSG[i];
                     if b == 0 { break; }
                     vga_write_cell(pos, 24, b, status_attr);
                     pos += 1;
@@ -161,8 +160,7 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
             }
         }
 
-        // Place hardware cursor at edit position
-        let screen_r = cursor_row.saturating_sub(row_offset);
+        let screen_r = if cursor_row >= row_offset { cursor_row - row_offset } else { 0 };
         set_cursor(cursor_col, screen_r);
     }
 }
@@ -181,8 +179,9 @@ fn load_file(filename: *const u8) {
 
         NUM_LINES = 0;
         let mut cur_col = 0;
+        let total = bytes as usize;
 
-        for i in 0..(bytes as usize) {
+        for i in 0..total {
             let b = LOAD_BUF[i];
             if b == b'\r' {
                 continue;
@@ -198,8 +197,10 @@ fn load_file(filename: *const u8) {
         }
 
         if cur_col > 0 || NUM_LINES == 0 {
-            LINE_LENS[NUM_LINES] = cur_col;
-            NUM_LINES += 1;
+            if NUM_LINES < MAX_LINES {
+                LINE_LENS[NUM_LINES] = cur_col;
+                NUM_LINES += 1;
+            }
         }
 
         set_status(b"[Loaded]");
@@ -276,13 +277,18 @@ fn run_editor() -> i32 {
                     b'o' => { // Open newline below and insert
                         unsafe {
                             if NUM_LINES < MAX_LINES {
-                                for r in (cursor_row + 1..NUM_LINES + 1).rev() {
+                                let mut r = NUM_LINES;
+                                while r > cursor_row + 1 {
                                     LINE_LENS[r] = LINE_LENS[r - 1];
                                     for c in 0..MAX_LINE_LEN {
                                         LINES[r][c] = LINES[r - 1][c];
                                     }
+                                    r -= 1;
                                 }
                                 LINE_LENS[cursor_row + 1] = 0;
+                                for c in 0..MAX_LINE_LEN {
+                                    LINES[cursor_row + 1][c] = 0;
+                                }
                                 NUM_LINES += 1;
                                 cursor_row += 1;
                                 cursor_col = 0;
@@ -294,13 +300,18 @@ fn run_editor() -> i32 {
                     b'O' => { // Open newline above and insert
                         unsafe {
                             if NUM_LINES < MAX_LINES {
-                                for r in (cursor_row..NUM_LINES).rev() {
-                                    LINE_LENS[r + 1] = LINE_LENS[r];
+                                let mut r = NUM_LINES;
+                                while r > cursor_row {
+                                    LINE_LENS[r] = LINE_LENS[r - 1];
                                     for c in 0..MAX_LINE_LEN {
-                                        LINES[r + 1][c] = LINES[r][c];
+                                        LINES[r][c] = LINES[r - 1][c];
                                     }
+                                    r -= 1;
                                 }
                                 LINE_LENS[cursor_row] = 0;
+                                for c in 0..MAX_LINE_LEN {
+                                    LINES[cursor_row][c] = 0;
+                                }
                                 NUM_LINES += 1;
                                 cursor_col = 0;
                                 mode = Mode::Insert;
@@ -381,7 +392,7 @@ fn run_editor() -> i32 {
                     mode = Mode::Normal;
                     let max_col = unsafe { LINE_LENS[cursor_row] };
                     if cursor_col > 0 && cursor_col >= max_col {
-                        cursor_col = max_col.saturating_sub(1);
+                        cursor_col = if max_col > 0 { max_col - 1 } else { 0 };
                     }
                 } else if key == 0x08 { // Backspace
                     unsafe {
@@ -417,14 +428,16 @@ fn run_editor() -> i32 {
                 } else if key == b'\n' || key == b'\r' { // Enter -> Newline
                     unsafe {
                         if NUM_LINES < MAX_LINES {
-                            for r in (cursor_row + 1..NUM_LINES + 1).rev() {
+                            let mut r = NUM_LINES;
+                            while r > cursor_row + 1 {
                                 LINE_LENS[r] = LINE_LENS[r - 1];
                                 for c in 0..MAX_LINE_LEN {
                                     LINES[r][c] = LINES[r - 1][c];
                                 }
+                                r -= 1;
                             }
                             let cur_len = LINE_LENS[cursor_row];
-                            let split_len = cur_len.saturating_sub(cursor_col);
+                            let split_len = if cur_len >= cursor_col { cur_len - cursor_col } else { 0 };
                             LINE_LENS[cursor_row] = cursor_col;
                             LINE_LENS[cursor_row + 1] = split_len;
 
@@ -441,8 +454,10 @@ fn run_editor() -> i32 {
                     unsafe {
                         let len = LINE_LENS[cursor_row];
                         if len < MAX_LINE_LEN - 1 {
-                            for c in (cursor_col..len).rev() {
-                                LINES[cursor_row][c + 1] = LINES[cursor_row][c];
+                            let mut c = len;
+                            while c > cursor_col {
+                                LINES[cursor_row][c] = LINES[cursor_row][c - 1];
+                                c -= 1;
                             }
                             LINES[cursor_row][cursor_col] = key;
                             LINE_LENS[cursor_row] += 1;
@@ -464,14 +479,17 @@ fn run_editor() -> i32 {
                         }
                     }
                 } else if key == b'\n' || key == b'\r' { // Execute command
-                    let cmd_slice = unsafe { &CMD_BUF[..CMD_LEN] };
-                    if cmd_slice == b"w" {
+                    let is_w = unsafe { CMD_LEN == 1 && CMD_BUF[0] == b'w' };
+                    let is_q = unsafe { (CMD_LEN == 1 && CMD_BUF[0] == b'q') || (CMD_LEN == 2 && CMD_BUF[0] == b'q' && CMD_BUF[1] == b'!') };
+                    let is_wq = unsafe { CMD_LEN == 2 && CMD_BUF[0] == b'w' && CMD_BUF[1] == b'q' };
+
+                    if is_w {
                         save_file();
                         mode = Mode::Normal;
-                    } else if cmd_slice == b"q" || cmd_slice == b"q!" {
+                    } else if is_q {
                         unsafe { clear_screen(); }
                         return 0; // Exit back to shell
-                    } else if cmd_slice == b"wq" {
+                    } else if is_wq {
                         if save_file() {
                             unsafe { clear_screen(); }
                             return 0;
@@ -514,7 +532,8 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         }
         NUM_LINES = 1;
         CMD_LEN = 0;
-        for b in FILENAME_BUF.iter_mut() { *b = 0; }
+        for i in 0..16 { FILENAME_BUF[i] = 0; }
+        for i in 0..48 { STATUS_MSG[i] = 0; }
 
         // Read filename argument from argv[1] if passed
         let mut found_arg = false;
@@ -535,7 +554,9 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         // Default filename if not specified
         if !found_arg {
             let def = b"UNTITLED.TXT";
-            FILENAME_BUF[..def.len()].copy_from_slice(def);
+            for i in 0..def.len() {
+                FILENAME_BUF[i] = def[i];
+            }
         }
 
         load_file(FILENAME_BUF.as_ptr());
