@@ -235,8 +235,18 @@ pub static COMMANDS: &[Command] = &[
         handler: cmd_help,
     },
     Command {
+        name: b"HELP",
+        description: b"",
+        handler: cmd_help,
+    },
+    Command {
         name: b"clear",
         description: b"Clear the terminal display",
+        handler: cmd_clear,
+    },
+    Command {
+        name: b"CLEAR",
+        description: b"",
         handler: cmd_clear,
     },
     Command {
@@ -245,8 +255,18 @@ pub static COMMANDS: &[Command] = &[
         handler: cmd_dir,
     },
     Command {
+        name: b"DIR",
+        description: b"",
+        handler: cmd_dir,
+    },
+    Command {
         name: b"reboot",
         description: b"Reboot the operating system",
+        handler: cmd_reboot,
+    },
+    Command {
+        name: b"REBOOT",
+        description: b"",
         handler: cmd_reboot,
     },
     Command {
@@ -255,8 +275,18 @@ pub static COMMANDS: &[Command] = &[
         handler: cmd_shutdown,
     },
     Command {
+        name: b"SHUTDOWN",
+        description: b"",
+        handler: cmd_shutdown,
+    },
+    Command {
         name: b"exit",
         description: b"Exit the shell (shutdown)",
+        handler: cmd_shutdown,
+    },
+    Command {
+        name: b"EXIT",
+        description: b"",
         handler: cmd_shutdown,
     },
     // Future user applications or additional built-ins can be registered here!
