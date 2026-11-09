@@ -24,24 +24,21 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Load kernel sectors into memory at 0x7E00 (contiguous with MBR)
-    ; First attempt INT 13h AH=42h (LBA Extended Read)
-    ; Buffer: 0x07E0:0x0000 = physical 0x7E00. 100 sectors = 50 KB (never crosses 64KB boundary)
+    ; Load full kernel (90 KB = 180 sectors) into memory starting at 0x7E00
+    ; Chunk 1: 100 sectors (50 KB) from LBA 1 into 0x07E0:0x0000 (physical 0x7E00)
     mov si, dap
     mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
-    jnc .read_ok
+    jc disk_error
 
-    ; Fallback: standard CHS read of sectors 2..61 on Track 0 (60 sectors = 30 KB)
-    mov ax, 0x07E0
-    mov es, ax
-    xor bx, bx
-    mov ah, 0x02
-    mov al, 60
-    mov ch, 0
-    mov dh, 0
-    mov cl, 2
+    ; Chunk 2: 80 sectors (40 KB) from LBA 101 into 0x1460:0x0000 (physical 0x14600)
+    mov word [dap_count], 80
+    mov word [dap_seg], 0x1460
+    mov word [dap_lba], 101
+    mov word [dap_lba + 2], 0
+    mov si, dap
+    mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
     jc disk_error
@@ -94,6 +91,7 @@ align 4
 dap:
     db 0x10                 ; Packet size = 16 bytes
     db 0x00                 ; Reserved (0)
+dap_count:
     dw 100                  ; 100 sectors (50 KB)
     dw 0x0000               ; Offset (always 0)
 dap_seg:

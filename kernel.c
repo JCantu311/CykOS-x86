@@ -85,7 +85,7 @@ void kernel_main(void) {
         print_color_string("Warning: No Level 2 modules loaded.\n", VGA_RED);
     }
 
-    secwait(1); 
+    secwait(3); 
 
     print_string("Loading CykShell...\n");
 
