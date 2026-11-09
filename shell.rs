@@ -285,6 +285,9 @@ fn dispatch_command(raw_line: &[u8]) {
 // Main Interactive Shell Loop (Level 3 Entry Point)
 // =========================================================================
 
+// Static line buffer in .bss (avoids runtime stack allocations/zeroing)
+static mut LINE_BUF: [u8; 128] = [0; 128];
+
 #[no_mangle]
 pub extern "C" fn shell_main() -> ! {
     puts(b"\n========================================\n");
@@ -292,7 +295,6 @@ pub extern "C" fn shell_main() -> ! {
     puts(b" Type 'help' for available commands.\n");
     puts(b"========================================\n\n");
 
-    let mut line_buf = [0u8; 128];
     let mut line_len: usize = 0;
 
     loop {
@@ -311,14 +313,18 @@ pub extern "C" fn shell_main() -> ! {
                     unsafe { print_char(0x08); }
                 }
             } else if c >= 32 && c <= 126 { // Printable ASCII range
-                if line_len < line_buf.len() - 1 {
-                    line_buf[line_len] = c;
-                    line_len += 1;
-                    unsafe { print_char(c); }
+                unsafe {
+                    if line_len < LINE_BUF.len() - 1 {
+                        LINE_BUF[line_len] = c;
+                        line_len += 1;
+                        print_char(c);
+                    }
                 }
             }
         }
 
-        dispatch_command(&line_buf[..line_len]);
+        unsafe {
+            dispatch_command(&LINE_BUF[..line_len]);
+        }
     }
 }

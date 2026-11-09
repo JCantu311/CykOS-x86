@@ -61,16 +61,16 @@ if command -v rustc &> /dev/null; then
         rustup target add i686-unknown-linux-gnu 2>/dev/null || true
     fi
 
-    # Compile with optimizations, disabled overflow panics, and staticlib bundling
-    if rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a 2>/dev/null; then
+    # Compile with optimizations, disabled overflow panics, no SSE, and staticlib bundling
+    if rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort -C target-feature=-sse,-sse2 --crate-type=staticlib shell.rs -o bin/libshell.a 2>/dev/null; then
         echo "CykShell compiled successfully into bin/libshell.a."
         SHELL_LIB="bin/libshell.a"
-    elif rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+    elif rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort -C target-feature=-sse,-sse2 --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
         echo "CykShell compiled successfully into bin/shell.o."
         SHELL_LIB="bin/shell.o"
     else
         echo "Attempting compilation with verbose output..."
-        rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a
+        rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort -C target-feature=-sse,-sse2 --crate-type=staticlib shell.rs -o bin/libshell.a
         SHELL_LIB="bin/libshell.a"
     fi
 else

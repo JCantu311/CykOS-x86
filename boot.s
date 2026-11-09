@@ -25,18 +25,28 @@ _start:
     int 0x13
 
     ; Load kernel sectors into memory at 0x7E00 (contiguous with MBR)
-    ; QEMU/SeaBIOS handles multi-track AH=02h reads transparently via internal LBA
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, 0x7E00
-    mov ah, 0x02
-    mov al, 127             ; Read 127 sectors = ~63.5 KB
-    mov ch, 0
-    mov dh, 0
-    mov cl, 2               ; Start at sector 2 (CHS) = LBA 1
+    ; First attempt INT 13h AH=42h (LBA Extended Read)
+    ; Buffer: 0x07E0:0x0000 = physical 0x7E00. 100 sectors = 50 KB (never crosses 64KB boundary)
+    mov si, dap
+    mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
-    jc disk_error           
+    jnc .read_ok
+
+    ; Fallback: standard CHS read of sectors 2..61 on Track 0 (60 sectors = 30 KB)
+    mov ax, 0x07E0
+    mov es, ax
+    xor bx, bx
+    mov ah, 0x02
+    mov al, 60
+    mov ch, 0
+    mov dh, 0
+    mov cl, 2
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc disk_error
+
+.read_ok:           
 
     in al, 0x92
     or al, 2
@@ -80,18 +90,17 @@ DATA_SEG equ gdt_data - gdt_start
 
 BOOT_DRIVE: db 0            
 
-align 2
+align 4
 dap:
     db 0x10                 ; Packet size = 16 bytes
     db 0x00                 ; Reserved (0)
-    dw 64                   ; 64 sectors per chunk (32 KB)
+    dw 100                  ; 100 sectors (50 KB)
     dw 0x0000               ; Offset (always 0)
 dap_seg:
-    dw 0x07E0               ; Segment (physical 0x7E00)
+    dw 0x07E0               ; Segment (0x07E0:0x0000 = physical 0x7E00)
 dap_lba:
-    dw 1                    ; LBA low word
-    dw 0                    ; LBA second word
-    dd 0                    ; LBA high dword            
+    dd 1                    ; LBA low 32 bits (Sector 1)
+    dd 0                    ; LBA high 32 bits
 
 ; =========================================================================
 ; SECTOR 2+: This code goes into the standard text section
@@ -107,6 +116,16 @@ init_32bit_protected:
     mov ss, ax
 
     mov esp, 0x90000        
+
+    ; Enable SSE in CR0 and CR4
+    mov eax, cr0
+    and ax, 0xFFFB          ; Clear CR0.EM (bit 2) - disable FPU emulation
+    or ax, 0x0002           ; Set CR0.MP (bit 1) - monitor coprocessor
+    mov cr0, eax
+
+    mov eax, cr4
+    or eax, (1 << 9) | (1 << 10) ; Set CR4.OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
+    mov cr4, eax
 
     call kernel_main        
 
