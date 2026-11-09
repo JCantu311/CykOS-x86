@@ -133,9 +133,8 @@ if command -v rustc &> /dev/null; then
     link_user_app() {
         local input="$1"
         local output="$2"
-        # Try linking with --gc-sections to keep binary lean, fallback without
-        $LD -m elf_i386 -T user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output" 2>/dev/null || \
-        $LD -m elf_i386 -T user.ld -u main bin/kernel_syms.ld "$input" -o "$output"
+        # Link with --gc-sections to keep binary lean
+        $LD -m elf_i386 -T user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output"
     }
 
     # Compile default editor (edit.rs)
@@ -144,8 +143,8 @@ if command -v rustc &> /dev/null; then
         rm -f bin/EDIT.BIN bin/libedit.a bin/edit.o
 
         # Strategy 1: Try --emit=obj (produces small binary, no libcore bloat)
-        if rustc $RUST_FLAGS --emit=obj edit.rs -o bin/edit.o 2>/dev/null; then
-            if link_user_app bin/edit.o bin/EDIT.BIN 2>/dev/null; then
+        if rustc $RUST_FLAGS --emit=obj edit.rs -o bin/edit.o; then
+            if link_user_app bin/edit.o bin/EDIT.BIN; then
                 echo "  -> Created Level 4 binary: bin/EDIT.BIN (from .o)"
                 rm -f bin/edit.o
             else

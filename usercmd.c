@@ -221,6 +221,10 @@ int exec_user_command(const char* cmd_name, const char* args) {
     }
     s_argv[argc] = (void*)0; // NULL termination
 
+    print_string("[CykShell] Launching ");
+    print_string(target_file);
+    print_string("...\n");
+
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
     app_main_fn entry = (app_main_fn)dest;

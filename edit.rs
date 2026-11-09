@@ -46,6 +46,61 @@ static mut CMD_LEN: usize = 0;
 static mut STATUS_MSG: [u8; 48] = [0; 48];
 
 // =========================================================================
+// Application Entry Point (MUST BE FIRST FUNCTION IN OBJECT FILE)
+// =========================================================================
+#[no_mangle]
+#[link_section = ".entry"]
+pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
+    unsafe {
+        // Reset state
+        for l in 0..MAX_LINES {
+            LINE_LENS[l] = 0;
+            for c in 0..MAX_LINE_LEN {
+                LINES[l][c] = 0;
+            }
+        }
+        NUM_LINES = 1;
+        CMD_LEN = 0;
+        for i in 0..16 { FILENAME_BUF[i] = 0; }
+        for i in 0..48 { STATUS_MSG[i] = 0; }
+
+        // Read filename argument from argv[1] if passed
+        let mut found_arg = false;
+        if argc > 1 && !argv.is_null() {
+            let arg1 = *argv.add(1);
+            if !arg1.is_null() {
+                let mut idx = 0;
+                while *arg1.add(idx) != 0 && idx < 12 {
+                    FILENAME_BUF[idx] = *arg1.add(idx);
+                    idx += 1;
+                }
+                if idx > 0 {
+                    found_arg = true;
+                }
+            }
+        }
+
+        // Default filename if not specified
+        if !found_arg {
+            let def = b"UNTITLED.TXT";
+            for i in 0..def.len() {
+                FILENAME_BUF[i] = def[i];
+            }
+        }
+
+        load_file(FILENAME_BUF.as_ptr());
+    }
+
+    run_editor()
+}
+
+// Dual entry point compatibility
+#[no_mangle]
+pub extern "C" fn user_edit(argc: isize, argv: *const *const u8) -> i32 {
+    main(argc, argv)
+}
+
+// =========================================================================
 // Hardware Cursor & VGA Direct Access
 // =========================================================================
 #[inline(always)]
@@ -510,65 +565,6 @@ fn run_editor() -> i32 {
             }
         }
     }
-}
-
-// =========================================================================
-// Application Entry Points (Level 4 Userland)
-// =========================================================================
-
-// CRITICAL: This attribute pins 'main' into the ".entry" section.
-// user.ld places KEEP(*(.entry)) at byte 0 of the binary so the kernel
-// can call directly into (void*)0x50000 without any indirection.
-#[no_mangle]
-#[link_section = ".entry"]
-pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
-    unsafe {
-        // Reset state
-        for l in 0..MAX_LINES {
-            LINE_LENS[l] = 0;
-            for c in 0..MAX_LINE_LEN {
-                LINES[l][c] = 0;
-            }
-        }
-        NUM_LINES = 1;
-        CMD_LEN = 0;
-        for i in 0..16 { FILENAME_BUF[i] = 0; }
-        for i in 0..48 { STATUS_MSG[i] = 0; }
-
-        // Read filename argument from argv[1] if passed
-        let mut found_arg = false;
-        if argc > 1 && !argv.is_null() {
-            let arg1 = *argv.add(1);
-            if !arg1.is_null() {
-                let mut idx = 0;
-                while *arg1.add(idx) != 0 && idx < 12 {
-                    FILENAME_BUF[idx] = *arg1.add(idx);
-                    idx += 1;
-                }
-                if idx > 0 {
-                    found_arg = true;
-                }
-            }
-        }
-
-        // Default filename if not specified
-        if !found_arg {
-            let def = b"UNTITLED.TXT";
-            for i in 0..def.len() {
-                FILENAME_BUF[i] = def[i];
-            }
-        }
-
-        load_file(FILENAME_BUF.as_ptr());
-    }
-
-    run_editor()
-}
-
-// Dual entry point compatibility
-#[no_mangle]
-pub extern "C" fn user_edit(argc: isize, argv: *const *const u8) -> i32 {
-    main(argc, argv)
 }
 
 // Panic Handler for freestanding environment
