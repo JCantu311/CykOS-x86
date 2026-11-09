@@ -6,7 +6,8 @@ SECTIONS
     . = 0x50000;
 
     .text : {
-        /* Entry point first so entry at 0x50000 jumps directly to it */
+        /* Entry point MUST be at byte 0 — CPU jumps here directly */
+        KEEP(*(.entry))
         *(.text.user_edit)
         *(.text.main)
         *(.text._start)

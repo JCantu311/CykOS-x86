@@ -497,7 +497,12 @@ fn run_editor() -> i32 {
 // =========================================================================
 // Application Entry Points (Level 4 Userland)
 // =========================================================================
+
+// CRITICAL: This attribute pins 'main' into the ".entry" section.
+// user.ld places KEEP(*(.entry)) at byte 0 of the binary so the kernel
+// can call directly into (void*)0x50000 without any indirection.
 #[no_mangle]
+#[link_section = ".entry"]
 pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     unsafe {
         // Reset state
