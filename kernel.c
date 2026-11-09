@@ -217,6 +217,8 @@ void kernel_main(void) {
     }
 
     print_color_string(welcome_message, VGA_GREEN);
+
+    print_string("Loading CykShell...\n");
     
     while (1) {
         asm("hlt");
