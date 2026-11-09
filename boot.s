@@ -24,23 +24,22 @@ _start:
     mov dl, [BOOT_DRIVE]
     int 0x13
 
-    ; Read 192 sectors (96 KB) sequentially into memory starting at 0x7E00
-    ; Read in 6 chunks of 32 sectors to avoid crossing any 64KB physical segment boundaries
-    mov cx, 6               ; 6 chunks * 32 sectors = 192 sectors
-    mov bx, 0x07E0          ; Starting segment (0x07E0:0x0000 = physical 0x7E00)
-    mov dword [dap_lba], 1  ; Start at LBA 1 (immediately after Sector 0 MBR)
-
-.read_loop:
-    mov [dap_seg], bx
+    ; Load kernel using INT 13h LBA Extensions (two 32KB chunks = 64KB total)
+    ; Chunk 1: 64 sectors (32KB) from LBA 1 to 0x07E0:0x0000 (physical 0x7E00)
     mov si, dap
     mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
     jc disk_error
 
-    add dword [dap_lba], 32 ; Advance 32 sectors
-    add bx, 0x0400          ; 32 sectors * 512 bytes = 16,384 bytes = 0x400 paragraphs
-    loop .read_loop           
+    ; Chunk 2: 64 sectors (32KB) from LBA 65 to 0x0FE0:0x0000 (physical 0xFE00)
+    mov word [dap_seg], 0x0FE0
+    mov word [dap_lba], 65
+    mov si, dap
+    mov ah, 0x42
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc disk_error           
 
     in al, 0x92
     or al, 2
@@ -84,17 +83,18 @@ DATA_SEG equ gdt_data - gdt_start
 
 BOOT_DRIVE: db 0            
 
-align 4
+align 2
 dap:
     db 0x10                 ; Packet size = 16 bytes
     db 0x00                 ; Reserved (0)
-    dw 32                   ; 32 sectors per chunk
+    dw 64                   ; 64 sectors per chunk (32 KB)
     dw 0x0000               ; Offset (always 0)
 dap_seg:
-    dw 0x07E0               ; Segment
+    dw 0x07E0               ; Segment (physical 0x7E00)
 dap_lba:
-    dd 1                    ; LBA low
-    dd 0                    ; LBA high            
+    dw 1                    ; LBA low word
+    dw 0                    ; LBA second word
+    dd 0                    ; LBA high dword            
 
 ; =========================================================================
 ; SECTOR 2+: This code goes into the standard text section
@@ -109,7 +109,7 @@ init_32bit_protected:
     mov gs, ax
     mov ss, ax
 
-    mov esp, 0x70000        
+    mov esp, 0x90000        
 
     call kernel_main        
 
