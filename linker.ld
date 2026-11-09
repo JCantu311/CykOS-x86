@@ -40,7 +40,7 @@ SECTIONS
     }
 
     /DISCARD/ : {
-        *(.eh_frame)
+        *(.eh_frame*)
         *(.note*)
         *(.comment)
         *(.debug*)
