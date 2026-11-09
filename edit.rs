@@ -35,8 +35,8 @@ enum Mode {
     Command,
 }
 
-// Static storage: prevents stack overflows in freestanding environment
-static mut LINES: [[u8; MAX_LINE_LEN]; MAX_LINES] = [[0; MAX_LINE_LEN]; MAX_LINES];
+// Static storage: flat arrays in .bss
+static mut LINES: [u8; MAX_LINES * MAX_LINE_LEN] = [0; MAX_LINES * MAX_LINE_LEN];
 static mut LINE_LENS: [usize; MAX_LINES] = [0; MAX_LINES];
 static mut NUM_LINES: usize = 1;
 
@@ -44,6 +44,37 @@ static mut FILENAME_BUF: [u8; 16] = [0; 16];
 static mut CMD_BUF: [u8; 32] = [0; 32];
 static mut CMD_LEN: usize = 0;
 static mut STATUS_MSG: [u8; 48] = [0; 48];
+static mut LOAD_BUF: [u8; 16384] = [0; 16384];
+static mut SAVE_BUF: [u8; 16384] = [0; 16384];
+
+// =========================================================================
+// Raw Pointer Helpers (Avoid rustc bounds-checking calls into libcore)
+// =========================================================================
+#[inline(always)]
+unsafe fn get_line_len(r: usize) -> usize {
+    if r < MAX_LINES { *LINE_LENS.as_ptr().add(r) } else { 0 }
+}
+
+#[inline(always)]
+unsafe fn set_line_len(r: usize, val: usize) {
+    if r < MAX_LINES { *LINE_LENS.as_mut_ptr().add(r) = val; }
+}
+
+#[inline(always)]
+unsafe fn get_char_at(r: usize, c: usize) -> u8 {
+    if r < MAX_LINES && c < MAX_LINE_LEN {
+        *LINES.as_ptr().add(r * MAX_LINE_LEN + c)
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
+unsafe fn set_char_at(r: usize, c: usize, val: u8) {
+    if r < MAX_LINES && c < MAX_LINE_LEN {
+        *LINES.as_mut_ptr().add(r * MAX_LINE_LEN + c) = val;
+    }
+}
 
 // =========================================================================
 // Application Entry Point (MUST BE FIRST FUNCTION IN OBJECT FILE)
@@ -54,15 +85,15 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     unsafe {
         // Reset state
         for l in 0..MAX_LINES {
-            LINE_LENS[l] = 0;
+            set_line_len(l, 0);
             for c in 0..MAX_LINE_LEN {
-                LINES[l][c] = 0;
+                set_char_at(l, c, 0);
             }
         }
         NUM_LINES = 1;
         CMD_LEN = 0;
-        for i in 0..16 { FILENAME_BUF[i] = 0; }
-        for i in 0..48 { STATUS_MSG[i] = 0; }
+        for i in 0..16 { *FILENAME_BUF.as_mut_ptr().add(i) = 0; }
+        for i in 0..48 { *STATUS_MSG.as_mut_ptr().add(i) = 0; }
 
         // Read filename argument from argv[1] if passed
         let mut found_arg = false;
@@ -71,7 +102,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             if !arg1.is_null() {
                 let mut idx = 0;
                 while *arg1.add(idx) != 0 && idx < 12 {
-                    FILENAME_BUF[idx] = *arg1.add(idx);
+                    *FILENAME_BUF.as_mut_ptr().add(idx) = *arg1.add(idx);
                     idx += 1;
                 }
                 if idx > 0 {
@@ -84,7 +115,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         if !found_arg {
             let def = b"UNTITLED.TXT";
             for i in 0..def.len() {
-                FILENAME_BUF[i] = def[i];
+                *FILENAME_BUF.as_mut_ptr().add(i) = *def.as_ptr().add(i);
             }
         }
 
@@ -128,11 +159,11 @@ fn vga_write_cell(col: usize, row: usize, ch: u8, attr: u8) {
 fn set_status(msg: &[u8]) {
     unsafe {
         for i in 0..48 {
-            STATUS_MSG[i] = 0;
+            *STATUS_MSG.as_mut_ptr().add(i) = 0;
         }
         let len = if msg.len() < 47 { msg.len() } else { 47 };
         for i in 0..len {
-            STATUS_MSG[i] = msg[i];
+            *STATUS_MSG.as_mut_ptr().add(i) = *msg.as_ptr().add(i);
         }
     }
 }
@@ -144,12 +175,12 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
     // 1. Render text rows (0..23)
     for screen_row in 0..TEXT_ROWS {
         let line_idx = row_offset + screen_row;
-        let line_len = unsafe { if line_idx < NUM_LINES { LINE_LENS[line_idx] } else { 0 } };
+        let line_len = unsafe { if line_idx < NUM_LINES { get_line_len(line_idx) } else { 0 } };
 
         for col in 0..SCREEN_COLS {
             let (ch, attr) = if line_idx < unsafe { NUM_LINES } {
                 if col < line_len {
-                    (unsafe { LINES[line_idx][col] }, 0x07) // Light grey text
+                    (unsafe { get_char_at(line_idx, col) }, 0x07) // Light grey text
                 } else {
                     (b' ', 0x07)
                 }
@@ -173,7 +204,7 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
         vga_write_cell(0, 24, b':', 0x0F);
         unsafe {
             for i in 0..CMD_LEN {
-                vga_write_cell(1 + i, 24, CMD_BUF[i], 0x0F);
+                vga_write_cell(1 + i, 24, *CMD_BUF.as_ptr().add(i), 0x0F);
             }
             set_cursor(1 + CMD_LEN, 24);
         }
@@ -186,14 +217,14 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
 
         let mut pos = 0;
         for i in 0..mode_str.len() {
-            vga_write_cell(pos, 24, mode_str[i], status_attr);
+            vga_write_cell(pos, 24, unsafe { *mode_str.as_ptr().add(i) }, status_attr);
             pos += 1;
         }
 
         // Active Filename
         unsafe {
             for i in 0..16 {
-                let b = FILENAME_BUF[i];
+                let b = *FILENAME_BUF.as_ptr().add(i);
                 if b == 0 { break; }
                 vga_write_cell(pos, 24, b, status_attr);
                 pos += 1;
@@ -202,12 +233,12 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
 
         // Status / error message if set
         unsafe {
-            if STATUS_MSG[0] != 0 {
+            if *STATUS_MSG.as_ptr() != 0 {
                 vga_write_cell(pos, 24, b' ', status_attr); pos += 1;
                 vga_write_cell(pos, 24, b'-', status_attr); pos += 1;
                 vga_write_cell(pos, 24, b' ', status_attr); pos += 1;
                 for i in 0..48 {
-                    let b = STATUS_MSG[i];
+                    let b = *STATUS_MSG.as_ptr().add(i);
                     if b == 0 { break; }
                     vga_write_cell(pos, 24, b, status_attr);
                     pos += 1;
@@ -224,7 +255,6 @@ fn render(cursor_col: usize, cursor_row: usize, row_offset: usize, mode: Mode) {
 // File I/O
 // =========================================================================
 fn load_file(filename: *const u8) {
-    static mut LOAD_BUF: [u8; 16384] = [0; 16384];
     unsafe {
         let bytes = fat16_read_file_by_name(filename, LOAD_BUF.as_mut_ptr(), 16384);
         if bytes <= 0 {
@@ -237,23 +267,23 @@ fn load_file(filename: *const u8) {
         let total = bytes as usize;
 
         for i in 0..total {
-            let b = LOAD_BUF[i];
+            let b = *LOAD_BUF.as_ptr().add(i);
             if b == b'\r' {
                 continue;
             } else if b == b'\n' {
-                LINE_LENS[NUM_LINES] = cur_col;
+                set_line_len(NUM_LINES, cur_col);
                 NUM_LINES += 1;
                 cur_col = 0;
                 if NUM_LINES >= MAX_LINES { break; }
             } else if cur_col < MAX_LINE_LEN {
-                LINES[NUM_LINES][cur_col] = b;
+                set_char_at(NUM_LINES, cur_col, b);
                 cur_col += 1;
             }
         }
 
         if cur_col > 0 || NUM_LINES == 0 {
             if NUM_LINES < MAX_LINES {
-                LINE_LENS[NUM_LINES] = cur_col;
+                set_line_len(NUM_LINES, cur_col);
                 NUM_LINES += 1;
             }
         }
@@ -263,21 +293,20 @@ fn load_file(filename: *const u8) {
 }
 
 fn save_file() -> bool {
-    static mut SAVE_BUF: [u8; 16384] = [0; 16384];
     unsafe {
         let mut total_bytes = 0;
         for line_idx in 0..NUM_LINES {
-            let len = LINE_LENS[line_idx];
+            let len = get_line_len(line_idx);
             for col in 0..len {
                 if total_bytes < 16380 {
-                    SAVE_BUF[total_bytes] = LINES[line_idx][col];
+                    *SAVE_BUF.as_mut_ptr().add(total_bytes) = get_char_at(line_idx, col);
                     total_bytes += 1;
                 }
             }
             if line_idx + 1 < NUM_LINES && total_bytes < 16380 {
-                SAVE_BUF[total_bytes] = b'\r';
+                *SAVE_BUF.as_mut_ptr().add(total_bytes) = b'\r';
                 total_bytes += 1;
-                SAVE_BUF[total_bytes] = b'\n';
+                *SAVE_BUF.as_mut_ptr().add(total_bytes) = b'\n';
                 total_bytes += 1;
             }
         }
@@ -323,7 +352,7 @@ fn run_editor() -> i32 {
                     }
                     b'a' => { // Append after cursor
                         mode = Mode::Insert;
-                        let max_col = unsafe { LINE_LENS[cursor_row] };
+                        let max_col = unsafe { get_line_len(cursor_row) };
                         if cursor_col < max_col && cursor_col + 1 < MAX_LINE_LEN {
                             cursor_col += 1;
                         }
@@ -334,15 +363,15 @@ fn run_editor() -> i32 {
                             if NUM_LINES < MAX_LINES {
                                 let mut r = NUM_LINES;
                                 while r > cursor_row + 1 {
-                                    LINE_LENS[r] = LINE_LENS[r - 1];
+                                    set_line_len(r, get_line_len(r - 1));
                                     for c in 0..MAX_LINE_LEN {
-                                        LINES[r][c] = LINES[r - 1][c];
+                                        set_char_at(r, c, get_char_at(r - 1, c));
                                     }
                                     r -= 1;
                                 }
-                                LINE_LENS[cursor_row + 1] = 0;
+                                set_line_len(cursor_row + 1, 0);
                                 for c in 0..MAX_LINE_LEN {
-                                    LINES[cursor_row + 1][c] = 0;
+                                    set_char_at(cursor_row + 1, c, 0);
                                 }
                                 NUM_LINES += 1;
                                 cursor_row += 1;
@@ -357,15 +386,15 @@ fn run_editor() -> i32 {
                             if NUM_LINES < MAX_LINES {
                                 let mut r = NUM_LINES;
                                 while r > cursor_row {
-                                    LINE_LENS[r] = LINE_LENS[r - 1];
+                                    set_line_len(r, get_line_len(r - 1));
                                     for c in 0..MAX_LINE_LEN {
-                                        LINES[r][c] = LINES[r - 1][c];
+                                        set_char_at(r, c, get_char_at(r - 1, c));
                                     }
                                     r -= 1;
                                 }
-                                LINE_LENS[cursor_row] = 0;
+                                set_line_len(cursor_row, 0);
                                 for c in 0..MAX_LINE_LEN {
-                                    LINES[cursor_row][c] = 0;
+                                    set_char_at(cursor_row, c, 0);
                                 }
                                 NUM_LINES += 1;
                                 cursor_col = 0;
@@ -382,7 +411,7 @@ fn run_editor() -> i32 {
                         if cursor_col > 0 { cursor_col -= 1; }
                     }
                     b'l' => { // Right
-                        let max_col = unsafe { LINE_LENS[cursor_row] };
+                        let max_col = unsafe { get_line_len(cursor_row) };
                         if cursor_col < max_col && cursor_col + 1 < MAX_LINE_LEN {
                             cursor_col += 1;
                         }
@@ -390,14 +419,14 @@ fn run_editor() -> i32 {
                     b'j' => { // Down
                         if cursor_row + 1 < unsafe { NUM_LINES } {
                             cursor_row += 1;
-                            let max_col = unsafe { LINE_LENS[cursor_row] };
+                            let max_col = unsafe { get_line_len(cursor_row) };
                             if cursor_col > max_col { cursor_col = max_col; }
                         }
                     }
                     b'k' => { // Up
                         if cursor_row > 0 {
                             cursor_row -= 1;
-                            let max_col = unsafe { LINE_LENS[cursor_row] };
+                            let max_col = unsafe { get_line_len(cursor_row) };
                             if cursor_col > max_col { cursor_col = max_col; }
                         }
                     }
@@ -405,16 +434,16 @@ fn run_editor() -> i32 {
                         cursor_col = 0;
                     }
                     b'$' => { // End of line
-                        cursor_col = unsafe { LINE_LENS[cursor_row] };
+                        cursor_col = unsafe { get_line_len(cursor_row) };
                     }
                     b'x' => { // Delete character under cursor
                         unsafe {
-                            let len = LINE_LENS[cursor_row];
+                            let len = get_line_len(cursor_row);
                             if cursor_col < len {
                                 for c in cursor_col..(len - 1) {
-                                    LINES[cursor_row][c] = LINES[cursor_row][c + 1];
+                                    set_char_at(cursor_row, c, get_char_at(cursor_row, c + 1));
                                 }
-                                LINE_LENS[cursor_row] -= 1;
+                                set_line_len(cursor_row, len - 1);
                             }
                         }
                     }
@@ -422,9 +451,9 @@ fn run_editor() -> i32 {
                         unsafe {
                             if NUM_LINES > 1 {
                                 for r in cursor_row..(NUM_LINES - 1) {
-                                    LINE_LENS[r] = LINE_LENS[r + 1];
+                                    set_line_len(r, get_line_len(r + 1));
                                     for c in 0..MAX_LINE_LEN {
-                                        LINES[r][c] = LINES[r + 1][c];
+                                        set_char_at(r, c, get_char_at(r + 1, c));
                                     }
                                 }
                                 NUM_LINES -= 1;
@@ -433,7 +462,7 @@ fn run_editor() -> i32 {
                                 }
                                 cursor_col = 0;
                             } else {
-                                LINE_LENS[0] = 0;
+                                set_line_len(0, 0);
                                 cursor_col = 0;
                             }
                         }
@@ -445,33 +474,33 @@ fn run_editor() -> i32 {
             Mode::Insert => {
                 if key == 0x1B { // Escape -> Normal Mode
                     mode = Mode::Normal;
-                    let max_col = unsafe { LINE_LENS[cursor_row] };
+                    let max_col = unsafe { get_line_len(cursor_row) };
                     if cursor_col > 0 && cursor_col >= max_col {
                         cursor_col = if max_col > 0 { max_col - 1 } else { 0 };
                     }
                 } else if key == 0x08 { // Backspace
                     unsafe {
                         if cursor_col > 0 {
-                            let len = LINE_LENS[cursor_row];
+                            let len = get_line_len(cursor_row);
                             for c in (cursor_col - 1)..(len - 1) {
-                                LINES[cursor_row][c] = LINES[cursor_row][c + 1];
+                                set_char_at(cursor_row, c, get_char_at(cursor_row, c + 1));
                             }
-                            LINE_LENS[cursor_row] -= 1;
+                            set_line_len(cursor_row, len - 1);
                             cursor_col -= 1;
                         } else if cursor_row > 0 {
                             // Merge with line above
-                            let prev_len = LINE_LENS[cursor_row - 1];
-                            let cur_len = LINE_LENS[cursor_row];
+                            let prev_len = get_line_len(cursor_row - 1);
+                            let cur_len = get_line_len(cursor_row);
                             if prev_len + cur_len < MAX_LINE_LEN {
                                 for c in 0..cur_len {
-                                    LINES[cursor_row - 1][prev_len + c] = LINES[cursor_row][c];
+                                    set_char_at(cursor_row - 1, prev_len + c, get_char_at(cursor_row, c));
                                 }
-                                LINE_LENS[cursor_row - 1] += cur_len;
+                                set_line_len(cursor_row - 1, prev_len + cur_len);
 
                                 for r in cursor_row..(NUM_LINES - 1) {
-                                    LINE_LENS[r] = LINE_LENS[r + 1];
+                                    set_line_len(r, get_line_len(r + 1));
                                     for c in 0..MAX_LINE_LEN {
-                                        LINES[r][c] = LINES[r + 1][c];
+                                        set_char_at(r, c, get_char_at(r + 1, c));
                                     }
                                 }
                                 NUM_LINES -= 1;
@@ -485,19 +514,19 @@ fn run_editor() -> i32 {
                         if NUM_LINES < MAX_LINES {
                             let mut r = NUM_LINES;
                             while r > cursor_row + 1 {
-                                LINE_LENS[r] = LINE_LENS[r - 1];
+                                set_line_len(r, get_line_len(r - 1));
                                 for c in 0..MAX_LINE_LEN {
-                                    LINES[r][c] = LINES[r - 1][c];
+                                    set_char_at(r, c, get_char_at(r - 1, c));
                                 }
                                 r -= 1;
                             }
-                            let cur_len = LINE_LENS[cursor_row];
+                            let cur_len = get_line_len(cursor_row);
                             let split_len = if cur_len >= cursor_col { cur_len - cursor_col } else { 0 };
-                            LINE_LENS[cursor_row] = cursor_col;
-                            LINE_LENS[cursor_row + 1] = split_len;
+                            set_line_len(cursor_row, cursor_col);
+                            set_line_len(cursor_row + 1, split_len);
 
                             for c in 0..split_len {
-                                LINES[cursor_row + 1][c] = LINES[cursor_row][cursor_col + c];
+                                set_char_at(cursor_row + 1, c, get_char_at(cursor_row, cursor_col + c));
                             }
 
                             NUM_LINES += 1;
@@ -507,15 +536,15 @@ fn run_editor() -> i32 {
                     }
                 } else if key >= 32 && key <= 126 { // Printable character
                     unsafe {
-                        let len = LINE_LENS[cursor_row];
+                        let len = get_line_len(cursor_row);
                         if len < MAX_LINE_LEN - 1 {
                             let mut c = len;
                             while c > cursor_col {
-                                LINES[cursor_row][c] = LINES[cursor_row][c - 1];
+                                set_char_at(cursor_row, c, get_char_at(cursor_row, c - 1));
                                 c -= 1;
                             }
-                            LINES[cursor_row][cursor_col] = key;
-                            LINE_LENS[cursor_row] += 1;
+                            set_char_at(cursor_row, cursor_col, key);
+                            set_line_len(cursor_row, len + 1);
                             cursor_col += 1;
                         }
                     }
@@ -534,9 +563,9 @@ fn run_editor() -> i32 {
                         }
                     }
                 } else if key == b'\n' || key == b'\r' { // Execute command
-                    let is_w = unsafe { CMD_LEN == 1 && CMD_BUF[0] == b'w' };
-                    let is_q = unsafe { (CMD_LEN == 1 && CMD_BUF[0] == b'q') || (CMD_LEN == 2 && CMD_BUF[0] == b'q' && CMD_BUF[1] == b'!') };
-                    let is_wq = unsafe { CMD_LEN == 2 && CMD_BUF[0] == b'w' && CMD_BUF[1] == b'q' };
+                    let is_w = unsafe { CMD_LEN == 1 && *CMD_BUF.as_ptr() == b'w' };
+                    let is_q = unsafe { (CMD_LEN == 1 && *CMD_BUF.as_ptr() == b'q') || (CMD_LEN == 2 && *CMD_BUF.as_ptr() == b'q' && *CMD_BUF.as_ptr().add(1) == b'!') };
+                    let is_wq = unsafe { CMD_LEN == 2 && *CMD_BUF.as_ptr() == b'w' && *CMD_BUF.as_ptr().add(1) == b'q' };
 
                     if is_w {
                         save_file();
@@ -556,8 +585,8 @@ fn run_editor() -> i32 {
                     }
                 } else if key >= 32 && key <= 126 {
                     unsafe {
-                        if CMD_LEN < CMD_BUF.len() - 1 {
-                            CMD_BUF[CMD_LEN] = key;
+                        if CMD_LEN < 31 {
+                            *CMD_BUF.as_mut_ptr().add(CMD_LEN) = key;
                             CMD_LEN += 1;
                         }
                     }
