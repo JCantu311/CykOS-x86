@@ -90,7 +90,7 @@ void kernel_main(void) {
     print_string("Loading CykShell...\n");
 
     // Launch Level 3 CykShell directly without waiting for user input
-    shell_main();
+    // shell_main();
     
     while (1) {
         asm("hlt");
