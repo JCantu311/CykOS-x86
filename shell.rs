@@ -17,9 +17,11 @@ const KEY_DELETE: u8   = 0x89;
 // Level 1 Kernel & Driver C Function Declarations
 extern "C" {
     fn clear_screen();
-    fn print_char(c: u8);
+    #[link_name = "print_char"]
+    fn kernel_print_char(c: u8);
     fn print_string(s: *const u8);
-    fn print_color_string(s: *const u8, color: u8);
+    #[link_name = "print_color_string"]
+    fn kernel_print_color_string(s: *const u8, color: u8);
     fn get_char() -> u8;
     fn has_key() -> i32;
     fn secwait(seconds: u32);
@@ -39,6 +41,12 @@ extern "C" {
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
     fn list_user_commands();
+
+    // Temporary in-memory standard input/output for synchronous pipelines.
+    fn syscall_pipe_begin(input: *const u8, input_len: u32, output: *mut u8, output_capacity: u32);
+    fn syscall_pipe_end() -> u32;
+    fn syscall_pipe_write(data: *const u8, length: u32) -> u32;
+    fn syscall_pipe_read(data: *mut u8, length: u32) -> i32;
 }
 
 // Panic Handler for freestanding environment
@@ -53,6 +61,35 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 // Low-Level I/O Helpers
+static mut PIPE_CAPTURE_ACTIVE: bool = false;
+
+fn print_char(c: u8) {
+    unsafe {
+        if PIPE_CAPTURE_ACTIVE {
+            syscall_pipe_write(&c as *const u8, 1);
+        } else {
+            kernel_print_char(c);
+        }
+    }
+}
+
+fn print_color_string(s: *const u8, color: u8) {
+    if s.is_null() {
+        return;
+    }
+    unsafe {
+        if PIPE_CAPTURE_ACTIVE {
+            let mut index = 0;
+            while *s.add(index) != 0 {
+                syscall_pipe_write(s.add(index), 1);
+                index += 1;
+            }
+        } else {
+            kernel_print_color_string(s, color);
+        }
+    }
+}
+
 fn puts(s: &[u8]) {
     for &b in s {
         unsafe {
@@ -290,6 +327,9 @@ fn cmd_rm(args: &[u8]) {
 
 // Static file buffer in .bss for shell file operations (32 KB)
 static mut SHELL_FILE_BUF: [u8; 32768] = [0; 32768];
+static mut SCRIPT_BUF: [u8; 32768] = [0; 32768];
+static mut SCRIPT_ACTIVE: bool = false;
+static mut PIPE_BUFFERS: [[u8; 32768]; 2] = [[0; 32768]; 2];
 
 // Built-in Command: touch (Create or touch an empty file)
 fn cmd_touch(args: &[u8]) {
@@ -402,29 +442,33 @@ fn cmd_cp(args: &[u8]) {
 // Built-in Command: wc (Count lines, words, and bytes)
 fn cmd_wc(args: &[u8]) {
     let filename = trim_slice(args);
-    if filename.is_empty() {
-        puts(b"Usage: wc <filename>\n");
-        return;
-    }
-
-    let mut fname_buf = [0u8; 64];
-    let len = if filename.len() < 63 { filename.len() } else { 63 };
-    let mut i = 0;
-    while i < len {
-        fname_buf[i] = filename[i];
-        i += 1;
-    }
-    fname_buf[len] = 0;
-
-    unsafe {
-        let bytes_read = fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
-        if bytes_read < 0 {
+    let bytes_read = unsafe {
+        if filename.is_empty() {
+            syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768)
+        } else {
+            let mut fname_buf = [0u8; 64];
+            let len = if filename.len() < 63 { filename.len() } else { 63 };
+            let mut i = 0;
+            while i < len {
+                fname_buf[i] = filename[i];
+                i += 1;
+            }
+            fname_buf[len] = 0;
+            fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
+        }
+    };
+    if bytes_read < 0 {
+        if filename.is_empty() {
+            puts(b"Usage: wc <filename> (or pipe input)\n");
+        } else {
             puts(b"wc: cannot open file: ");
             puts(filename);
             puts(b"\n");
-            return;
         }
+        return;
+    }
 
+    unsafe {
         let total = bytes_read as usize;
         let mut lines: u32 = 0;
         let mut words: u32 = 0;
@@ -971,9 +1015,28 @@ fn cmd_help(_args: &[u8]) {
     puts(b"\n");
 }
 
+fn cmd_run(args: &[u8]) {
+    let filename = trim_slice(args);
+    if filename.is_empty() {
+        puts(b"Usage: run <script.SHE>\n");
+        return;
+    }
+    run_script(filename);
+}
+
 // Configurable Command Registry Table
 // Space is reserved below for future built-ins and user applications!
 pub static COMMANDS: &[Command] = &[
+    Command {
+        name: b"run",
+        description: b"Run a shell script (e.g. run startup.SHE)",
+        handler: cmd_run,
+    },
+    Command {
+        name: b"RUN",
+        description: b"",
+        handler: cmd_run,
+    },
     Command {
         name: b"help",
         description: b"Display this list of recognized commands",
@@ -1157,8 +1220,74 @@ pub static COMMANDS: &[Command] = &[
     // Future user applications or additional built-ins can be registered here!
 ];
 
+fn is_she_file(name: &[u8]) -> bool {
+    let len = name.len();
+    len >= 4 && name[len - 4] == b'.' &&
+        (name[len - 3] == b'S' || name[len - 3] == b's') &&
+        (name[len - 2] == b'H' || name[len - 2] == b'h') &&
+        (name[len - 1] == b'E' || name[len - 1] == b'e')
+}
+
+fn run_script(filename: &[u8]) {
+    if !is_she_file(filename) {
+        puts(b"CykShell: scripts must use the .SHE extension\n");
+        return;
+    }
+    unsafe {
+        if SCRIPT_ACTIVE {
+            puts(b"CykShell: nested scripts are not supported\n");
+            return;
+        }
+        SCRIPT_ACTIVE = true;
+    }
+
+    if filename.len() >= 64 {
+        puts(b"CykShell: script path is too long\n");
+        unsafe { SCRIPT_ACTIVE = false; }
+        return;
+    }
+    let mut filename_buf = [0u8; 64];
+    for i in 0..filename.len() {
+        filename_buf[i] = filename[i];
+    }
+    filename_buf[filename.len()] = 0;
+
+    let bytes_read = unsafe {
+        fat16_read_file_by_name(filename_buf.as_ptr(), SCRIPT_BUF.as_mut_ptr(), 32767)
+    };
+    if bytes_read < 0 {
+        puts(b"CykShell: cannot open script: ");
+        puts(filename);
+        puts(b"\n");
+        unsafe { SCRIPT_ACTIVE = false; }
+        return;
+    }
+
+    let total = bytes_read as usize;
+    unsafe { SCRIPT_BUF[total] = 0; }
+    let mut line_start = 0;
+    let mut index = 0;
+    while index <= total {
+        let at_end = index == total;
+        let at_newline = !at_end && unsafe { SCRIPT_BUF[index] == b'\n' };
+        if at_end || at_newline {
+            let line = unsafe { trim_slice(&SCRIPT_BUF[line_start..index]) };
+            if !line.is_empty() && line[0] != b'#' {
+                if line.len() > 127 {
+                    puts(b"CykShell: script line exceeds 127 bytes\n");
+                } else {
+                    dispatch_command(line);
+                }
+            }
+            line_start = index + 1;
+        }
+        index += 1;
+    }
+    unsafe { SCRIPT_ACTIVE = false; }
+}
+
 // Command Dispatcher
-fn dispatch_command(raw_line: &[u8]) {
+fn dispatch_single_command(raw_line: &[u8]) {
     let trimmed = trim_slice(raw_line);
     if trimmed.is_empty() {
         return;
@@ -1166,7 +1295,7 @@ fn dispatch_command(raw_line: &[u8]) {
 
     // Split at first space into (command, args)
     let mut split_idx = 0;
-    while split_idx < trimmed.len() && trimmed[split_idx] != b' ' {
+    while split_idx < trimmed.len() && trimmed[split_idx] != b' ' && trimmed[split_idx] != b'\t' {
         split_idx += 1;
     }
 
@@ -1180,6 +1309,11 @@ fn dispatch_command(raw_line: &[u8]) {
     // Strip leading "./" or ".\\" path prefix if user typed e.g. "./edit.bin"
     if cmd_name.len() >= 2 && cmd_name[0] == b'.' && (cmd_name[1] == b'/' || cmd_name[1] == b'\\') {
         cmd_name = &cmd_name[2..];
+    }
+
+    if is_she_file(cmd_name) {
+        run_script(cmd_name);
+        return;
     }
 
     // 1. Check built-in commands first
@@ -1221,6 +1355,99 @@ fn dispatch_command(raw_line: &[u8]) {
     puts(b"CykShell: command not found: ");
     puts(cmd_name);
     puts(b"\nType 'help' to view available commands.\n");
+}
+
+const MAX_PIPE_STAGES: usize = 8;
+const PIPE_BUFFER_CAPACITY: usize = 32768;
+
+fn dispatch_command(raw_line: &[u8]) {
+    let trimmed = trim_slice(raw_line);
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let mut stages = [(0usize, 0usize); MAX_PIPE_STAGES];
+    let mut stage_count = 0;
+    let mut stage_start = 0;
+    let mut quote = 0u8;
+    let mut index = 0;
+    while index <= trimmed.len() {
+        if index == trimmed.len() {
+            if quote != 0 {
+                puts(b"CykShell: unterminated quote in pipeline\n");
+                return;
+            }
+            if stage_count == MAX_PIPE_STAGES {
+                puts(b"CykShell: pipeline supports at most 8 commands\n");
+                return;
+            }
+            stages[stage_count] = (stage_start, index);
+            stage_count += 1;
+            break;
+        }
+
+        let byte = trimmed[index];
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = byte;
+        } else if byte == b'|' {
+            if stage_count == MAX_PIPE_STAGES - 1 {
+                puts(b"CykShell: pipeline supports at most 8 commands\n");
+                return;
+            }
+            stages[stage_count] = (stage_start, index);
+            stage_count += 1;
+            stage_start = index + 1;
+        }
+        index += 1;
+    }
+
+    if stage_count == 1 {
+        dispatch_single_command(trimmed);
+        return;
+    }
+
+    for &(start, end) in &stages[..stage_count] {
+        if trim_slice(&trimmed[start..end]).is_empty() {
+            puts(b"CykShell: empty command in pipeline\n");
+            return;
+        }
+    }
+
+    let mut input_ptr = core::ptr::null();
+    let mut input_len = 0u32;
+    for stage_index in 0..stage_count {
+        let (start, end) = stages[stage_index];
+        let stage = trim_slice(&trimmed[start..end]);
+        let output_ptr = if stage_index + 1 < stage_count {
+            unsafe { PIPE_BUFFERS[stage_index % 2].as_mut_ptr() }
+        } else {
+            core::ptr::null_mut()
+        };
+
+        unsafe {
+            syscall_pipe_begin(
+                input_ptr,
+                input_len,
+                output_ptr,
+                if output_ptr.is_null() { 0 } else { PIPE_BUFFER_CAPACITY as u32 },
+            );
+            PIPE_CAPTURE_ACTIVE = !output_ptr.is_null();
+        }
+        dispatch_single_command(stage);
+        let output_len = unsafe {
+            PIPE_CAPTURE_ACTIVE = false;
+            syscall_pipe_end()
+        };
+
+        if stage_index + 1 < stage_count {
+            input_ptr = unsafe { PIPE_BUFFERS[stage_index % 2].as_ptr() };
+            input_len = output_len;
+        }
+    }
 }
 
 // =========================================================================

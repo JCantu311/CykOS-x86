@@ -29,5 +29,10 @@
 #define FD_STDERR         2
 
 void syscall_init(void);
+void syscall_pipe_begin(const char* input, unsigned int input_len, char* output, unsigned int output_capacity);
+unsigned int syscall_pipe_end(void);
+unsigned int syscall_pipe_write(const char* data, unsigned int length);
+int syscall_pipe_read(char* data, unsigned int length);
+int syscall_pipe_active(void);
 
 #endif // SYSCALL_H

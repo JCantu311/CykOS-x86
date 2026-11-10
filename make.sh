@@ -239,5 +239,10 @@ else
     truncate -s 16777216 bin/os_image.bin 2>/dev/null || truncate -s 16m bin/os_image.bin
 fi
 
+# 11. Optional: Convert image to vdi for VirtualBox
+# if command -v VBoxManage &> /dev/null; then
+#     VBoxManage convertfromraw bin/os_image.bin bin/os_image.vdi --format VDI
+# fi
+
 echo "----------------------------------------"
 echo "Build successful! Created bin/os_image.bin with Kernel (L1), Drivers (L2), Shell (L3), and Apps (L4)."

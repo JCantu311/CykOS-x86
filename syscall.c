@@ -14,6 +14,57 @@ typedef struct {
 } fd_table_t;
 
 static fd_table_t g_fds[MAX_FDS];
+static const char* g_pipe_input;
+static unsigned int g_pipe_input_len;
+static unsigned int g_pipe_input_pos;
+static char* g_pipe_output;
+static unsigned int g_pipe_output_capacity;
+static unsigned int g_pipe_output_len;
+static int g_pipe_active;
+
+void syscall_pipe_begin(const char* input, unsigned int input_len, char* output, unsigned int output_capacity) {
+    g_pipe_input = input;
+    g_pipe_input_len = input_len;
+    g_pipe_input_pos = 0;
+    g_pipe_output = output;
+    g_pipe_output_capacity = output_capacity;
+    g_pipe_output_len = 0;
+    g_pipe_active = 1;
+}
+
+unsigned int syscall_pipe_end(void) {
+    unsigned int output_len = g_pipe_output_len;
+    g_pipe_input = 0;
+    g_pipe_input_len = 0;
+    g_pipe_input_pos = 0;
+    g_pipe_output = 0;
+    g_pipe_output_capacity = 0;
+    g_pipe_output_len = 0;
+    g_pipe_active = 0;
+    return output_len;
+}
+
+unsigned int syscall_pipe_write(const char* data, unsigned int length) {
+    if (!g_pipe_active || !g_pipe_output || !data) return 0;
+    unsigned int available = g_pipe_output_capacity - g_pipe_output_len;
+    unsigned int written = length < available ? length : available;
+    memcpy(g_pipe_output + g_pipe_output_len, data, written);
+    g_pipe_output_len += written;
+    return written;
+}
+
+int syscall_pipe_read(char* data, unsigned int length) {
+    if (!g_pipe_active || !g_pipe_input || !data) return -1;
+    unsigned int available = g_pipe_input_len - g_pipe_input_pos;
+    unsigned int bytes = length < available ? length : available;
+    memcpy(data, g_pipe_input + g_pipe_input_pos, bytes);
+    g_pipe_input_pos += bytes;
+    return (int)bytes;
+}
+
+int syscall_pipe_active(void) {
+    return g_pipe_active;
+}
 
 static void syscall_handler(registers_t* regs) {
     unsigned int syscall_num = regs->eax;
@@ -43,10 +94,14 @@ static void syscall_handler(registers_t* regs) {
             }
 
             if (fd == FD_STDOUT) {
-                for (size_t i = 0; i < count; i++) {
-                    print_char(buf[i]);
+                if (g_pipe_active && g_pipe_output) {
+                    regs->eax = syscall_pipe_write(buf, (unsigned int)count);
+                } else {
+                    for (size_t i = 0; i < count; i++) {
+                        print_char(buf[i]);
+                    }
+                    regs->eax = (unsigned int)count;
                 }
-                regs->eax = (unsigned int)count;
             } else if (fd == FD_STDERR) {
                 for (size_t i = 0; i < count; i++) {
                     char temp[2] = { buf[i], '\0' };
@@ -71,16 +126,21 @@ static void syscall_handler(registers_t* regs) {
             }
 
             if (fd == FD_STDIN) {
-                size_t read_bytes = 0;
-                while (read_bytes < count) {
-                    char c = get_char();
-                    buf[read_bytes++] = c;
-                    print_char(c); // Echo character
-                    if (c == '\n' || c == '\r') {
-                        break;
+                if (g_pipe_active && g_pipe_input) {
+                    int bytes = syscall_pipe_read(buf, (unsigned int)count);
+                    regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
+                } else {
+                    size_t read_bytes = 0;
+                    while (read_bytes < count) {
+                        char c = get_char();
+                        buf[read_bytes++] = c;
+                        print_char(c); // Echo character
+                        if (c == '\n' || c == '\r') {
+                            break;
+                        }
                     }
+                    regs->eax = (unsigned int)read_bytes;
                 }
-                regs->eax = (unsigned int)read_bytes;
             } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use) {
                 int bytes = fat16_read_file(&g_fds[fd].entry, buf, count);
                 regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
