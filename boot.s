@@ -4,6 +4,10 @@ extern kernel_main
 extern __bss_start
 extern __bss_end
 
+%define E820_COUNT 0x04FC
+%define E820_MAP   0x0500
+%define E820_LIMIT 20
+
 section .boot       ; Dedicated to Sector 1 ONLY (MBR)
 _start:
     cli
@@ -16,34 +20,51 @@ _start:
     mov sp, 0x7C00
 
     mov [BOOT_DRIVE], dl
+    call collect_memory_map
 
-    cmp dl, 0
-    jne .drive_ok
-    mov byte [BOOT_DRIVE], 0x80
-
-.drive_ok:
     xor ax, ax
     mov dl, [BOOT_DRIVE]
     int 0x13
+
+    ; Require BIOS Enhanced Disk Drive (EDD) LBA support.
+    mov bx, 0x55AA
+    mov ah, 0x41
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc disk_error
+    cmp bx, 0xAA55
+    jne disk_error
+    test cx, 1
+    jz disk_error
 
     ; Load kernel from disk using INT 13h AH=42h (Extended LBA Read)
     ; Read in 4 chunks of 64 sectors (32 KB per chunk) = 256 sectors (128 KB total)
     ; Each chunk has offset 0x0000, advancing segment by 0x0800 (32 KB physical)
     ; This avoids real-mode 64KB segment overflow entirely.
-    mov bp, 4               ; 4 chunks * 64 sectors = 256 sectors (128 KB)
+    mov byte [CHUNKS_LEFT], 4 ; 4 chunks * 64 sectors (128 KB)
 
 .load_chunk:
+    mov byte [RETRIES], 3
+.retry_chunk:
     mov si, dap
     mov ah, 0x42
     mov dl, [BOOT_DRIVE]
     int 0x13
-    jc disk_error
+    jnc .chunk_loaded
 
+    xor ax, ax
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    dec byte [RETRIES]
+    jnz .retry_chunk
+    jmp disk_error
+
+.chunk_loaded:
     ; Advance LBA by 64 sectors
     add dword [dap_lba], 64
     ; Advance Segment by 0x0800 (32 KB)
     add word [dap_seg], 0x0800
-    dec bp
+    dec byte [CHUNKS_LEFT]
     jnz .load_chunk
 
 .read_ok:           
@@ -71,6 +92,30 @@ disk_error:
     hlt
     jmp .error_loop
 
+collect_memory_map:
+    mov dword [E820_COUNT], 0
+    xor ebx, ebx
+    mov di, E820_MAP
+.e820_next:
+    cmp dword [E820_COUNT], E820_LIMIT
+    jae .e820_done
+    mov dword [es:di + 20], 1
+    mov eax, 0xE820
+    mov edx, 0x534D4150
+    mov ecx, 24
+    int 0x15
+    jc .e820_done
+    cmp eax, 0x534D4150
+    jne .e820_done
+    cmp ecx, 20
+    jb .e820_done
+    add di, 24
+    inc dword [E820_COUNT]
+    test ebx, ebx
+    jnz .e820_next
+.e820_done:
+    ret
+
 align 4
 gdt_start:
 gdt_null:
@@ -90,7 +135,9 @@ gdt_descriptor:
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
 
-BOOT_DRIVE: db 0            
+BOOT_DRIVE: db 0
+RETRIES: db 0
+CHUNKS_LEFT: db 0
 
 align 4
 dap:

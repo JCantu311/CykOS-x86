@@ -1,6 +1,10 @@
 #include "fat16.h"
 #include "ata.h"
 #include "cykastd.h"
+#include "vfs.h"
+
+#define FAT16_MAX_VOLUMES 16
+#define FAT16_VIRTUAL_DRIVE_DIR 0xFFFF
 
 // Raw on-disk FAT16 BIOS Parameter Block (512 bytes total)
 typedef struct __attribute__((packed)) {
@@ -55,6 +59,7 @@ typedef struct __attribute__((packed)) {
 
 // Runtime state for the mounted FAT16 volume
 typedef struct {
+    unsigned char ata_device;
     unsigned int partition_lba;
     unsigned short bytes_per_sector;
     unsigned char sectors_per_cluster;
@@ -67,12 +72,17 @@ typedef struct {
     unsigned int root_dir_sectors;
     unsigned int data_lba;
     char volume_label[12];
+    char mount_name[12];
     int is_mounted;
 } fat16_state_t;
 
 static fat16_state_t g_fat16;
+static fat16_state_t g_volumes[FAT16_MAX_VOLUMES];
+static unsigned char g_volume_count;
+static unsigned char g_active_volume;
+static unsigned char g_cwd_volume;
 static unsigned short g_cwd_cluster = 0; // 0 = Root directory
-static char g_cwd_path[128] = "\\";      // Current working directory path
+static char g_cwd_path[128] = "/";        // Current working directory path
 static unsigned short g_sector_buf[256];      // 512-byte scratch buffer
 static unsigned short g_fat_cache_buf[256];  // 512-byte FAT sector cache
 static unsigned int g_cached_fat_lba = 0xFFFFFFFF;
@@ -142,7 +152,75 @@ static unsigned short fat16_get_next_cluster(unsigned short current_cluster) {
 }
 
 // Verify whether a given sector looks like a valid FAT16 BPB
-static int check_bpb_at_lba(unsigned int lba) {
+static int fat16_activate_volume(unsigned char volume_index) {
+    if (volume_index >= g_volume_count || !g_volumes[volume_index].is_mounted) {
+        return -1;
+    }
+    g_fat16 = g_volumes[volume_index];
+    g_active_volume = volume_index;
+    g_cached_fat_lba = 0xFFFFFFFF;
+    return ata_select_drive(g_fat16.ata_device);
+}
+
+static int fat16_name_equal(const char* a, const char* b) {
+    while (*a && *b) {
+        if (to_upper(*a) != to_upper(*b)) return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static int fat16_segment_name_equal(const char* segment, unsigned int length, const char* name) {
+    unsigned int i = 0;
+    while (i < length && name[i] && to_upper(segment[i]) == to_upper(name[i])) i++;
+    return i == length && name[i] == '\0';
+}
+
+static void fat16_make_mount_name(fat16_state_t* volume, unsigned char drive, unsigned char partition) {
+    int length = 0;
+    while (length < 11 && volume->volume_label[length] != '\0') {
+        char ch = to_upper(volume->volume_label[length]);
+        if (ch == ' ') ch = '_';
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) {
+            ch = '_';
+        }
+        volume->mount_name[length++] = ch;
+    }
+    if (length == 0) {
+        volume->mount_name[length++] = 'A';
+        volume->mount_name[length++] = 'T';
+        volume->mount_name[length++] = 'A';
+        volume->mount_name[length++] = (char)('0' + drive);
+        volume->mount_name[length++] = 'P';
+        volume->mount_name[length++] = (char)('0' + partition);
+    }
+    volume->mount_name[length] = '\0';
+
+    int duplicate = 1;
+    unsigned char suffix = 0;
+    while (duplicate) {
+        duplicate = 0;
+        for (unsigned char i = 1; i < g_volume_count; i++) {
+            if (fat16_name_equal(volume->mount_name, g_volumes[i].mount_name)) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate) {
+            suffix++;
+            int base_len = length < 9 ? length : 9;
+            volume->mount_name[base_len++] = '_';
+            volume->mount_name[base_len++] = (char)('0' + (suffix % 10));
+            volume->mount_name[base_len] = '\0';
+            length = base_len;
+            if (suffix >= 9) break;
+        }
+    }
+}
+
+static int check_bpb_at_lba(unsigned char drive, unsigned int lba) {
+    if (ata_select_drive(drive) != 0) return 0;
     if (ata_read_sectors(lba, 1, g_sector_buf) != 0) {
         return 0;
     }
@@ -180,6 +258,10 @@ static int check_bpb_at_lba(unsigned int lba) {
 
         memcpy(g_fat16.volume_label, bpb->volume_label, 11);
         g_fat16.volume_label[11] = '\0';
+        for (int i = 10; i >= 0 && g_fat16.volume_label[i] == ' '; i--) {
+            g_fat16.volume_label[i] = '\0';
+        }
+        g_fat16.ata_device = drive;
         g_fat16.is_mounted = 1;
         g_cached_fat_lba = 0xFFFFFFFF;
         return 1;
@@ -188,50 +270,105 @@ static int check_bpb_at_lba(unsigned int lba) {
     return 0;
 }
 
+static int fat16_register_volume(unsigned char drive, unsigned int lba, unsigned char partition) {
+    for (unsigned char i = 0; i < g_volume_count; i++) {
+        if (g_volumes[i].ata_device == drive && g_volumes[i].partition_lba == lba) {
+            return (int)i;
+        }
+    }
+    if (g_volume_count >= FAT16_MAX_VOLUMES || !check_bpb_at_lba(drive, lba)) {
+        return -1;
+    }
+    fat16_make_mount_name(&g_fat16, drive, partition);
+    g_volumes[g_volume_count] = g_fat16;
+    return g_volume_count++;
+}
+
 /**
  * Automatically locates and mounts a FAT16 filesystem on the primary drive.
  * Supports MBR partition tables, raw superfloppy volumes, and common partition offsets.
  * @return 0 on success, -1 on failure
  */
 int fat16_init(void) {
+    memset(g_volumes, 0, sizeof(g_volumes));
+    g_volume_count = 0;
+    g_active_volume = 0;
+    g_cwd_volume = 0;
+    g_cwd_cluster = 0;
+    memcpy(g_cwd_path, "/", 2);
+
+    if (!ata_probe_drive(0)) {
+        return -1;
+    }
+
     g_fat16.is_mounted = 0;
 
-    // 1. Read LBA 0 to check if it's an MBR with a partition table
-    if (ata_read_sectors(0, 1, g_sector_buf) == 0) {
-        unsigned char* raw = (unsigned char*)g_sector_buf;
-
-        // Check partition 1 at offset 446 (0x1BE)
-        mbr_partition_t* part1 = (mbr_partition_t*)(raw + 446);
-        if (part1->lba_start > 0 && part1->sector_count > 0) {
-            if (check_bpb_at_lba(part1->lba_start)) {
-                g_cwd_cluster = 0;
-                g_cwd_path[0] = '\\';
-                g_cwd_path[1] = '\0';
-                return 0; // Successfully mounted from MBR partition 1
+    if (ata_select_drive(0) == 0 && ata_read_sectors(0, 1, g_sector_buf) == 0) {
+        mbr_partition_t partitions[4];
+        memcpy(partitions, (unsigned char*)g_sector_buf + 446, sizeof(partitions));
+        for (unsigned char i = 0; i < 4; i++) {
+            mbr_partition_t* part = &partitions[i];
+            if (part->lba_start > 0 && part->sector_count > 0) {
+                if (fat16_register_volume(0, part->lba_start, i + 1) == 0) {
+                    break;
+                }
             }
         }
 
-        // 2. Check if LBA 0 itself is a raw FAT16 volume (superfloppy mode)
-        if (check_bpb_at_lba(0)) {
-            g_cwd_cluster = 0;
-            g_cwd_path[0] = '\\';
-            g_cwd_path[1] = '\0';
+        if (g_volume_count == 0 && fat16_register_volume(0, 0, 0) >= 0) {
             return 0;
         }
+        if (g_volume_count > 0) return 0;
     }
 
-    // 3. Fallback scan for common partition offsets (e.g., LBA 64, 128, 2048)
     unsigned int scan_offsets[] = {64, 128, 2048, 32};
     for (unsigned int i = 0; i < sizeof(scan_offsets) / sizeof(scan_offsets[0]); i++) {
-        if (check_bpb_at_lba(scan_offsets[i])) {
-            g_cwd_cluster = 0;
-            g_cwd_path[0] = '\\';
-            g_cwd_path[1] = '\0';
+        if (fat16_register_volume(0, scan_offsets[i], 0) >= 0) {
             return 0;
         }
     }
 
-    return -1; // No FAT16 filesystem detected
+    return -1;
+}
+
+int fat16_mount_extra_drives(void) {
+    if (g_volume_count == 0) return -1;
+    int mounted = 0;
+    unsigned int scan_offsets[] = {64, 128, 2048, 32};
+
+    for (unsigned char drive = 0; drive < 4; drive++) {
+        if (!ata_probe_drive(drive)) continue;
+        if (ata_select_drive(drive) != 0 || ata_read_sectors(0, 1, g_sector_buf) != 0) continue;
+
+        mbr_partition_t partitions[4];
+        memcpy(partitions, (unsigned char*)g_sector_buf + 446, sizeof(partitions));
+        int found_partition = 0;
+        for (unsigned char i = 0; i < 4; i++) {
+            mbr_partition_t* part = &partitions[i];
+            if (part->lba_start == 0 || part->sector_count == 0) continue;
+            found_partition = 1;
+            int index = fat16_register_volume(drive, part->lba_start, i + 1);
+            if (index > 0) mounted++;
+        }
+
+        if (!found_partition) {
+            int raw_volume_index = fat16_register_volume(drive, 0, 0);
+            if (raw_volume_index > 0) {
+                mounted++;
+                continue;
+            }
+            for (unsigned int i = 0; i < sizeof(scan_offsets) / sizeof(scan_offsets[0]); i++) {
+                int index = fat16_register_volume(drive, scan_offsets[i], 0);
+                if (index > 0) {
+                    mounted++;
+                    break;
+                }
+            }
+        }
+    }
+
+    fat16_activate_volume(g_cwd_volume);
+    return mounted;
 }
 
 // Context for scanning a directory's sectors across Root or Subdirectory cluster chains
@@ -324,7 +461,7 @@ static int fat16_find_in_dir(unsigned short dir_cluster, const char* target_name
 }
 
 // Resolves a directory path to its starting cluster number.
-// Supports absolute paths ("/DIR", "\DIR", "C:\DIR") and relative paths ("DIR", "..", "DIR/SUBDIR").
+// Supports Unix-style absolute paths and relative paths.
 static int fat16_traverse_path(const char* path, unsigned short* out_cluster) {
     if (!g_fat16.is_mounted) return -1;
     if (!path || path[0] == '\0') {
@@ -333,12 +470,6 @@ static int fat16_traverse_path(const char* path, unsigned short* out_cluster) {
     }
 
     const char* p = path;
-    // Skip drive letter (e.g. "C:" or "c:")
-    if ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) {
-        if (p[1] == ':') {
-            p += 2;
-        }
-    }
 
     unsigned short curr_cluster = g_cwd_cluster;
     if (*p == '/' || *p == '\\') {
@@ -398,6 +529,122 @@ static int fat16_traverse_path(const char* path, unsigned short* out_cluster) {
     return 0;
 }
 
+static int fat16_path_is_absolute(const char* path) {
+    return path && (path[0] == '/' || path[0] == '\\');
+}
+
+static int fat16_copy_path(const char* source, char* destination, unsigned int capacity) {
+    unsigned int i = 0;
+    while (source[i] && i + 1 < capacity) {
+        destination[i] = source[i];
+        i++;
+    }
+    destination[i] = '\0';
+    return source[i] == '\0' ? 0 : -1;
+}
+
+static int fat16_select_path_volume(const char* path, char* resolved_path, unsigned int capacity) {
+    if (!path || !resolved_path || capacity == 0) return -1;
+
+    if (!fat16_path_is_absolute(path) && g_cwd_cluster == FAT16_VIRTUAL_DRIVE_DIR) {
+        char combined[256];
+        int prefix_length = strlen(g_cwd_path);
+        if (prefix_length + strlen(path) + 2 >= sizeof(combined)) return -1;
+        memcpy(combined, g_cwd_path, prefix_length);
+        if (prefix_length > 1) combined[prefix_length++] = '/';
+        memcpy(combined + prefix_length, path, strlen(path) + 1);
+        return fat16_select_path_volume(combined, resolved_path, capacity);
+    }
+
+    unsigned char volume_index = fat16_path_is_absolute(path) ? 0 : g_cwd_volume;
+    const char* inner_path = path;
+
+    if (fat16_path_is_absolute(path)) {
+        const char* component = path;
+        while (*component == '/' || *component == '\\') component++;
+        const char* component_end = component;
+        while (*component_end && *component_end != '/' && *component_end != '\\') component_end++;
+        int is_mount_root = ((component_end - component) == 3 &&
+            fat16_segment_name_equal(component, 3, "mnt")) ||
+            ((component_end - component) == 5 && fat16_segment_name_equal(component, 5, "drive"));
+        if (is_mount_root) {
+            const char* mount_name = component_end;
+            while (*mount_name == '/' || *mount_name == '\\') mount_name++;
+            if (*mount_name != '\0') {
+                const char* mount_end = mount_name;
+                while (*mount_end && *mount_end != '/' && *mount_end != '\\') mount_end++;
+                unsigned int mount_length = (unsigned int)(mount_end - mount_name);
+                int found = 0;
+                for (unsigned char i = 1; i < g_volume_count; i++) {
+                    if (fat16_segment_name_equal(mount_name, mount_length, g_volumes[i].mount_name)) {
+                        volume_index = i;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) return -1;
+                if (*mount_end == '\0') {
+                    inner_path = "/";
+                } else {
+                    inner_path = mount_end;
+                }
+            }
+        }
+    }
+
+    if (fat16_activate_volume(volume_index) != 0) return -1;
+    return fat16_copy_path(inner_path, resolved_path, capacity);
+}
+
+static int fat16_normalize_absolute_path(const char* path, char* output, unsigned int capacity) {
+    if (!path || !output || capacity < 2) return -1;
+    char combined[256];
+    unsigned int combined_length = 0;
+
+    if (fat16_path_is_absolute(path)) {
+        if (fat16_copy_path(path, combined, sizeof(combined)) != 0) return -1;
+    } else {
+        combined_length = strlen(g_cwd_path);
+        if (combined_length + strlen(path) + 2 >= sizeof(combined)) return -1;
+        memcpy(combined, g_cwd_path, combined_length);
+        if (combined_length > 1) combined[combined_length++] = '/';
+        memcpy(combined + combined_length, path, strlen(path) + 1);
+    }
+
+    unsigned int out_length = 1;
+    output[0] = '/';
+    output[1] = '\0';
+    const char* cursor = combined;
+    while (*cursor == '/' || *cursor == '\\') cursor++;
+
+    while (*cursor) {
+        char component[128];
+        unsigned int component_length = 0;
+        while (*cursor && *cursor != '/' && *cursor != '\\') {
+            if (component_length + 1 >= sizeof(component)) return -1;
+            component[component_length++] = to_upper(*cursor++);
+        }
+        component[component_length] = '\0';
+        while (*cursor == '/' || *cursor == '\\') cursor++;
+
+        if (component_length == 0 || (component_length == 1 && component[0] == '.')) continue;
+        if (component_length == 2 && component[0] == '.' && component[1] == '.') {
+            while (out_length > 1 && output[out_length - 1] != '/') out_length--;
+            if (out_length > 1) out_length--;
+            output[out_length] = '\0';
+            continue;
+        }
+
+        unsigned int needed = component_length + (out_length > 1 ? 1 : 0);
+        if (out_length + needed >= capacity) return -1;
+        if (out_length > 1) output[out_length++] = '/';
+        memcpy(output + out_length, component, component_length);
+        out_length += component_length;
+        output[out_length] = '\0';
+    }
+    return 0;
+}
+
 // Split a path into parent directory cluster and leaf filename.
 static int fat16_resolve_parent_and_leaf(const char* path, unsigned short* out_dir_cluster, char* out_leaf, int max_leaf) {
     if (!path) return -1;
@@ -454,9 +701,15 @@ int fat16_find_file(const char* filename, fat16_entry_t* out_entry) {
         return -1;
     }
 
+    char resolved_path[256];
+    if (fat16_select_path_volume(filename, resolved_path, sizeof(resolved_path)) != 0 ||
+        fat16_name_equal(resolved_path, "/DRIVE")) {
+        return -1;
+    }
+
     unsigned short parent_cluster = 0;
     char leaf[32];
-    if (fat16_resolve_parent_and_leaf(filename, &parent_cluster, leaf, sizeof(leaf)) != 0) {
+    if (fat16_resolve_parent_and_leaf(resolved_path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
         return -1;
     }
 
@@ -464,7 +717,9 @@ int fat16_find_file(const char* filename, fat16_entry_t* out_entry) {
     char target_ext[3];
     format_to_8_3(leaf, target_name, target_ext);
 
-    return fat16_find_in_dir(parent_cluster, target_name, target_ext, out_entry, (void*)0, (void*)0);
+    int result = fat16_find_in_dir(parent_cluster, target_name, target_ext, out_entry, (void*)0, (void*)0);
+    if (result == 0) out_entry->volume_index = g_active_volume;
+    return result;
 }
 
 /**
@@ -475,48 +730,129 @@ int fat16_find_file(const char* filename, fat16_entry_t* out_entry) {
  * @return           Total bytes read, or -1 on error
  */
 int fat16_read_file(const fat16_entry_t* entry, void* buffer, unsigned int max_bytes) {
-    if (!g_fat16.is_mounted || !entry || !buffer || entry->first_cluster < 2) {
+    return fat16_read_file_at(entry, 0, buffer, max_bytes);
+}
+
+int fat16_read_file_at(const fat16_entry_t* entry, unsigned int offset, void* buffer, unsigned int length) {
+    if (!entry || (!buffer && length != 0) || fat16_activate_volume(entry->volume_index) != 0) {
         return -1;
     }
 
+    if (offset >= entry->file_size || length == 0) return 0;
+    if (entry->first_cluster < 2) return -1;
+    unsigned int bytes_remaining = entry->file_size - offset;
+    if (bytes_remaining > length) bytes_remaining = length;
+
     unsigned char* dest = (unsigned char*)buffer;
     unsigned short cluster = entry->first_cluster;
-    unsigned int bytes_remaining = entry->file_size;
-    if (bytes_remaining > max_bytes) {
-        bytes_remaining = max_bytes;
+    unsigned int cluster_bytes = (unsigned int)g_fat16.sectors_per_cluster * g_fat16.bytes_per_sector;
+    unsigned int cluster_skip = offset / cluster_bytes;
+    unsigned int cluster_offset = offset % cluster_bytes;
+    unsigned int max_clusters = (unsigned int)g_fat16.sectors_per_fat *
+        (g_fat16.bytes_per_sector / 2);
+
+    while (cluster_skip-- && cluster >= 2 && cluster < 0xFFF8 && max_clusters--) {
+        cluster = fat16_get_next_cluster(cluster);
     }
 
     unsigned int total_read = 0;
-
-    while (cluster >= 2 && cluster < 0xFFF8 && bytes_remaining > 0) {
+    while (cluster >= 2 && cluster < 0xFFF8 && bytes_remaining > 0 && max_clusters--) {
         unsigned int cluster_lba = g_fat16.data_lba + (cluster - 2) * g_fat16.sectors_per_cluster;
-
-        // Read all sectors of this cluster
-        for (unsigned char s = 0; s < g_fat16.sectors_per_cluster && bytes_remaining > 0; s++) {
-            if (ata_read_sectors(cluster_lba + s, 1, g_sector_buf) != 0) {
+        unsigned int sector_index = cluster_offset / g_fat16.bytes_per_sector;
+        unsigned int sector_offset = cluster_offset % g_fat16.bytes_per_sector;
+        while (sector_index < g_fat16.sectors_per_cluster && bytes_remaining > 0) {
+            if (ata_read_sectors(cluster_lba + sector_index, 1, g_sector_buf) != 0) {
                 return -1;
             }
 
-            unsigned int chunk = (bytes_remaining < g_fat16.bytes_per_sector) ? bytes_remaining : g_fat16.bytes_per_sector;
-            memcpy(dest + total_read, g_sector_buf, chunk);
+            unsigned int chunk = g_fat16.bytes_per_sector - sector_offset;
+            if (chunk > bytes_remaining) chunk = bytes_remaining;
+            memcpy(dest + total_read, (unsigned char*)g_sector_buf + sector_offset, chunk);
             total_read += chunk;
             bytes_remaining -= chunk;
+            sector_index++;
+            sector_offset = 0;
         }
 
+        cluster_offset = 0;
         cluster = fat16_get_next_cluster(cluster);
     }
 
     return (int)total_read;
 }
 
+static int fat16_vfs_mount(void) { return fat16_init(); }
+
+static int fat16_vfs_find(const char* path, vfs_file_t* out_file) {
+    fat16_entry_t entry;
+    if (!out_file || fat16_find_file(path, &entry) != 0) return -1;
+    memcpy(out_file->name, entry.filename, sizeof(out_file->name));
+    out_file->size = entry.file_size;
+    out_file->first_cluster = entry.first_cluster;
+    out_file->attributes = entry.attributes;
+    out_file->volume_index = entry.volume_index;
+    return 0;
+}
+
+static int fat16_vfs_read_at(const vfs_file_t* file, unsigned int offset, void* buffer, unsigned int length) {
+    fat16_entry_t entry;
+    if (!file) return -1;
+    memcpy(entry.filename, file->name, sizeof(entry.filename));
+    entry.file_size = file->size;
+    entry.first_cluster = (unsigned short)file->first_cluster;
+    entry.attributes = file->attributes;
+    entry.volume_index = file->volume_index;
+    return fat16_read_file_at(&entry, offset, buffer, length);
+}
+
+static int fat16_vfs_write(const char* path, const void* data, unsigned int length) {
+    return fat16_write_file(path, data, length);
+}
+
+static int fat16_vfs_delete(const char* path) { return fat16_delete_file(path); }
+static int fat16_vfs_mkdir(const char* path) { return fat16_mkdir(path); }
+static int fat16_vfs_rmdir(const char* path) { return fat16_rmdir(path); }
+static int fat16_vfs_chdir(const char* path) { return fat16_chdir(path); }
+static int fat16_vfs_getcwd(char* buffer, unsigned int capacity) { return fat16_getcwd(buffer, capacity); }
+
+static int fat16_vfs_list(const char* path, vfs_dir_callback_t callback) {
+    char previous[128];
+    if (!callback || fat16_getcwd(previous, sizeof(previous)) < 0) return -1;
+    if (path && path[0] && fat16_chdir(path) != 0) return -1;
+    int result = fat16_list_directory(callback);
+    if (path && path[0]) fat16_chdir(previous);
+    return result;
+}
+
+const vfs_driver_t fat16_vfs_driver = {
+    .name = "fat16",
+    .mount_root = fat16_vfs_mount,
+    .find_file = fat16_vfs_find,
+    .read_at = fat16_vfs_read_at,
+    .write_file = fat16_vfs_write,
+    .delete_file = fat16_vfs_delete,
+    .list_directory = fat16_vfs_list,
+    .mkdir = fat16_vfs_mkdir,
+    .rmdir = fat16_vfs_rmdir,
+    .chdir = fat16_vfs_chdir,
+    .getcwd = fat16_vfs_getcwd,
+};
+
 /**
  * Iterates through directory entries in any directory cluster (0 for Root, >= 2 for subdirectories)
  * and triggers the callback for each.
  */
 int fat16_list_directory_cluster(unsigned short dir_cluster, fat16_dir_callback_t callback) {
-    if (!g_fat16.is_mounted || !callback) {
+    if (!callback) {
         return -1;
     }
+    if (dir_cluster == FAT16_VIRTUAL_DRIVE_DIR) {
+        for (unsigned char i = 1; i < g_volume_count; i++) {
+            callback(g_volumes[i].mount_name, 0, 1);
+        }
+        return g_volume_count - 1;
+    }
+    if (!g_fat16.is_mounted) return -1;
 
     char display_name[13];
     fat16_dir_iter_t iter;
@@ -553,6 +889,10 @@ int fat16_list_directory_cluster(unsigned short dir_cluster, fat16_dir_callback_
  * Lists the current working directory.
  */
 int fat16_list_directory(fat16_dir_callback_t callback) {
+    if (g_cwd_cluster == FAT16_VIRTUAL_DRIVE_DIR) {
+        return fat16_list_directory_cluster(FAT16_VIRTUAL_DRIVE_DIR, callback);
+    }
+    if (fat16_activate_volume(g_cwd_volume) != 0) return -1;
     return fat16_list_directory_cluster(g_cwd_cluster, callback);
 }
 
@@ -631,9 +971,11 @@ int fat16_write_file(const char* filename, const void* data, unsigned int size) 
         return -1;
     }
 
+    char resolved_path[256];
+    if (fat16_select_path_volume(filename, resolved_path, sizeof(resolved_path)) != 0) return -1;
     unsigned short parent_cluster = 0;
     char leaf[32];
-    if (fat16_resolve_parent_and_leaf(filename, &parent_cluster, leaf, sizeof(leaf)) != 0) {
+    if (fat16_resolve_parent_and_leaf(resolved_path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
         return -1;
     }
 
@@ -795,9 +1137,11 @@ int fat16_delete_file(const char* filename) {
         return -1;
     }
 
+    char resolved_path[256];
+    if (fat16_select_path_volume(filename, resolved_path, sizeof(resolved_path)) != 0) return -1;
     unsigned short parent_cluster = 0;
     char leaf[32];
-    if (fat16_resolve_parent_and_leaf(filename, &parent_cluster, leaf, sizeof(leaf)) != 0) {
+    if (fat16_resolve_parent_and_leaf(resolved_path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
         return -1;
     }
 
@@ -843,9 +1187,11 @@ int fat16_mkdir(const char* path) {
         return -1;
     }
 
+    char resolved_path[256];
+    if (fat16_select_path_volume(path, resolved_path, sizeof(resolved_path)) != 0) return -1;
     unsigned short parent_cluster = 0;
     char leaf[32];
-    if (fat16_resolve_parent_and_leaf(path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
+    if (fat16_resolve_parent_and_leaf(resolved_path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
         return -1;
     }
 
@@ -957,9 +1303,11 @@ int fat16_rmdir(const char* path) {
         return -1;
     }
 
+    char resolved_path[256];
+    if (fat16_select_path_volume(path, resolved_path, sizeof(resolved_path)) != 0) return -1;
     unsigned short parent_cluster = 0;
     char leaf[32];
-    if (fat16_resolve_parent_and_leaf(path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
+    if (fat16_resolve_parent_and_leaf(resolved_path, &parent_cluster, leaf, sizeof(leaf)) != 0) {
         return -1;
     }
 
@@ -1029,91 +1377,32 @@ int fat16_rmdir(const char* path) {
  * Changes current working directory.
  */
 int fat16_chdir(const char* path) {
-    if (!g_fat16.is_mounted) return -1;
-    if (!path || path[0] == '\0') {
-        g_cwd_cluster = 0;
-        g_cwd_path[0] = '\\';
-        g_cwd_path[1] = '\0';
+    if (g_volume_count == 0) return -1;
+    if (!path || path[0] == '\0') path = "/";
+
+    char absolute_path[256];
+    if (fat16_normalize_absolute_path(path, absolute_path, sizeof(absolute_path)) != 0) return -1;
+    if (fat16_name_equal(absolute_path, "/MNT") || fat16_name_equal(absolute_path, "/DRIVE")) {
+        if (fat16_activate_volume(0) != 0) return -1;
+        g_cwd_volume = 0;
+        g_cwd_cluster = FAT16_VIRTUAL_DRIVE_DIR;
+        fat16_copy_path("/mnt", g_cwd_path, sizeof(g_cwd_path));
         return 0;
     }
 
+    char resolved_path[256];
+    unsigned char previous_volume = g_cwd_volume;
+    if (fat16_select_path_volume(absolute_path, resolved_path, sizeof(resolved_path)) != 0) return -1;
+    unsigned char target_volume = g_active_volume;
     unsigned short target_cluster = 0;
-    if (fat16_traverse_path(path, &target_cluster) != 0) {
-        return -1; // Directory not found
+    if (fat16_traverse_path(resolved_path, &target_cluster) != 0) {
+        fat16_activate_volume(previous_volume);
+        return -1;
     }
 
     g_cwd_cluster = target_cluster;
-
-    // Update g_cwd_path string
-    if (target_cluster == 0) {
-        g_cwd_path[0] = '\\';
-        g_cwd_path[1] = '\0';
-        return 0;
-    }
-
-    const char* p = path;
-    if ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) {
-        if (p[1] == ':') p += 2;
-    }
-
-    if (*p == '/' || *p == '\\') {
-        // Absolute path: reconstruct from path
-        int pos = 0;
-        g_cwd_path[pos++] = '\\';
-        while (*p == '/' || *p == '\\') p++;
-        while (*p != '\0' && pos < 126) {
-            char c = *p++;
-            if (c == '/' || c == '\\') {
-                if (g_cwd_path[pos - 1] != '\\') g_cwd_path[pos++] = '\\';
-                while (*p == '/' || *p == '\\') p++;
-            } else {
-                g_cwd_path[pos++] = to_upper(c);
-            }
-        }
-        if (pos > 1 && g_cwd_path[pos - 1] == '\\') pos--;
-        g_cwd_path[pos] = '\0';
-    } else {
-        // Relative path: process components ("..", "DIR", etc.)
-        while (*p != '\0') {
-            char seg[16];
-            int seg_len = 0;
-            while (*p != '\0' && *p != '/' && *p != '\\' && seg_len < 15) {
-                seg[seg_len++] = *p++;
-            }
-            seg[seg_len] = '\0';
-            while (*p == '/' || *p == '\\') p++;
-
-            if (seg_len == 0 || (seg_len == 1 && seg[0] == '.')) {
-                continue;
-            }
-
-            if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') {
-                // Remove last segment from g_cwd_path
-                int cur_len = strlen(g_cwd_path);
-                int last_slash = -1;
-                for (int i = 0; i < cur_len; i++) {
-                    if (g_cwd_path[i] == '\\') last_slash = i;
-                }
-                if (last_slash <= 0) {
-                    g_cwd_path[0] = '\\';
-                    g_cwd_path[1] = '\0';
-                } else {
-                    g_cwd_path[last_slash] = '\0';
-                }
-            } else {
-                // Append segment
-                int cur_len = strlen(g_cwd_path);
-                if (cur_len > 1 && cur_len < 125) {
-                    g_cwd_path[cur_len++] = '\\';
-                }
-                for (int i = 0; i < seg_len && cur_len < 126; i++) {
-                    g_cwd_path[cur_len++] = to_upper(seg[i]);
-                }
-                g_cwd_path[cur_len] = '\0';
-            }
-        }
-    }
-
+    g_cwd_volume = target_volume;
+    fat16_copy_path(absolute_path, g_cwd_path, sizeof(g_cwd_path));
     return 0;
 }
 

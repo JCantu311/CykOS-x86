@@ -21,6 +21,64 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             options(nostack)
         );
 
+        let path = b"/TMP/POSIX.TXT\0";
+        let payload = b"POSIX read/write/seek OK\n";
+        let mut fd: u32;
+        core::arch::asm!(
+            "int 0x80",
+            inout("eax") 5u32 => fd,
+            in("ebx") path.as_ptr() as u32,
+            in("ecx") 0x42u32,
+            in("edx") 0o666u32,
+            options(nostack)
+        );
+        if fd < 0xFFFFFFF0 {
+            let mut written: u32;
+            core::arch::asm!(
+                "int 0x80",
+                inout("eax") 4u32 => written,
+                in("ebx") fd,
+                in("ecx") payload.as_ptr() as u32,
+                in("edx") payload.len() as u32,
+                options(nostack)
+            );
+            let mut position: u32;
+            core::arch::asm!(
+                "int 0x80",
+                inout("eax") 19u32 => position,
+                in("ebx") fd,
+                in("ecx") 0u32,
+                in("edx") 0u32,
+                options(nostack)
+            );
+            let mut readback = [0u8; 32];
+            let mut read_count: u32;
+            core::arch::asm!(
+                "int 0x80",
+                inout("eax") 3u32 => read_count,
+                in("ebx") fd,
+                in("ecx") readback.as_mut_ptr() as u32,
+                in("edx") readback.len() as u32,
+                options(nostack)
+            );
+            if written == payload.len() as u32 && position == 0 && read_count == written {
+                core::arch::asm!(
+                    "int 0x80",
+                    inout("eax") 4u32 => _,
+                    in("ebx") 1u32,
+                    in("ecx") readback.as_ptr() as u32,
+                    in("edx") read_count,
+                    options(nostack)
+                );
+            }
+            core::arch::asm!(
+                "int 0x80",
+                inout("eax") 6u32 => _,
+                in("ebx") fd,
+                options(nostack)
+            );
+        }
+
         // Print argc
         let msg_argc = b"Process received argc: \0";
         core::arch::asm!(
@@ -51,8 +109,8 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             options(nostack)
         );
 
-        // Test Syscall 45: SYS_BRK (Dynamic Heap Allocation)
-        let msg_heap = b"[sysdemo] Testing SYS_BRK (Heap Allocation via int 0x80)...\n\0";
+        // Test the CykOS sbrk extension for incremental heap allocation.
+        let msg_heap = b"[sysdemo] Testing SYS_SBRK (Heap Allocation via int 0x80)...\n\0";
         core::arch::asm!(
             "int 0x80",
             inout("eax") 4u32 => _,
@@ -66,7 +124,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         let heap_ptr: u32;
         core::arch::asm!(
             "int 0x80",
-            inout("eax") 45u32 => heap_ptr, // SYS_BRK
+            inout("eax") 112u32 => heap_ptr, // SYS_SBRK
             in("ebx") 1024u32,               // 1KB increment
             options(nostack)
         );

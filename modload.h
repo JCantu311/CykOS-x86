@@ -3,7 +3,7 @@
 
 #include "module.h"
 
-// Initialize module manager, read MODULES.CFG from disk, and load all Level 2 drivers
+// Initialize module manager, read /BOOT/MODULES.CFG, and load Level 2 drivers.
 int modload_load_all(void);
 
 // Retrieve registered Level 2 keyboard driver (returns NULL if not loaded)

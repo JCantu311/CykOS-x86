@@ -29,14 +29,14 @@ extern "C" {
     fn outw(port: u16, data: u16);
     fn get_cursor_pos(x: *mut i32, y: *mut i32);
     fn set_cursor_pos(x: i32, y: i32);
-    fn fat16_list_directory(callback: extern "C" fn(*const u8, u32, u8)) -> i32;
-    fn fat16_delete_file(filename: *const u8) -> i32;
-    fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
-    fn fat16_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
-    fn fat16_mkdir(path: *const u8) -> i32;
-    fn fat16_rmdir(path: *const u8) -> i32;
-    fn fat16_chdir(path: *const u8) -> i32;
-    fn fat16_getcwd(buffer: *mut u8, max_bytes: u32) -> i32;
+    fn vfs_list_directory(path: *const u8, callback: extern "C" fn(*const u8, u32, u8)) -> i32;
+    fn vfs_delete_file(filename: *const u8) -> i32;
+    fn vfs_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
+    fn vfs_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
+    fn vfs_mkdir(path: *const u8) -> i32;
+    fn vfs_rmdir(path: *const u8) -> i32;
+    fn vfs_chdir(path: *const u8) -> i32;
+    fn vfs_getcwd(buffer: *mut u8, max_bytes: u32) -> i32;
 
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
@@ -224,23 +224,26 @@ extern "C" fn dir_entry_callback(name_ptr: *const u8, size: u32, is_dir: u8) {
 
 // Built-in Command: dir (MS-DOS compatible directory listing)
 fn cmd_dir(_args: &[u8]) {
-    puts(b"\n Volume in drive C is CYKOS_DISK\n");
-    puts(b" Directory of C:");
+    puts(b"\n Volume in root is CYKOS_DISK\n");
+    puts(b" Directory of ");
     let mut buf = [0u8; 128];
-    let len = unsafe { fat16_getcwd(buf.as_mut_ptr(), 128) };
+    let len = unsafe { vfs_getcwd(buf.as_mut_ptr(), 128) };
     if len > 0 {
         let ulen = len as usize;
         for i in 0..ulen {
             unsafe { print_char(buf[i]); }
         }
     } else {
-        puts(b"\\");
+        puts(b"/");
     }
     puts(b"\n\n");
 
     unsafe {
         DIR_FILE_COUNT = 0;
-        fat16_list_directory(dir_entry_callback);
+        if vfs_list_directory(core::ptr::null(), dir_entry_callback) < 0 {
+            puts(b"Directory read failed.\n");
+            return;
+        }
     }
 
     puts(b"\n               ");
@@ -307,7 +310,7 @@ fn cmd_rm(args: &[u8]) {
     }
     fname_buf[len] = 0;
 
-    let res = unsafe { fat16_delete_file(fname_buf.as_ptr()) };
+    let res = unsafe { vfs_delete_file(fname_buf.as_ptr()) };
     if res == 0 {
         puts(b"Deleted file: ");
         puts(filename);
@@ -350,10 +353,10 @@ fn cmd_touch(args: &[u8]) {
 
     unsafe {
         let mut check_buf = [0u8; 1];
-        let exists = fat16_read_file_by_name(fname_buf.as_ptr(), check_buf.as_mut_ptr(), 1);
+        let exists = vfs_read_file_by_name(fname_buf.as_ptr(), check_buf.as_mut_ptr(), 1);
         if exists < 0 {
             let dummy = 0u8;
-            let res = fat16_write_file(fname_buf.as_ptr(), &dummy, 0);
+            let res = vfs_write_file(fname_buf.as_ptr(), &dummy, 0);
             if res == 0 {
                 puts(b"Created: ");
                 puts(filename);
@@ -414,7 +417,7 @@ fn cmd_cp(args: &[u8]) {
     dst_buf[dst_len] = 0;
 
     unsafe {
-        let bytes_read = fat16_read_file_by_name(src_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
+        let bytes_read = vfs_read_file_by_name(src_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
         if bytes_read < 0 {
             puts(b"cp: cannot open source file: ");
             puts(src);
@@ -422,7 +425,7 @@ fn cmd_cp(args: &[u8]) {
             return;
         }
 
-        let res = fat16_write_file(dst_buf.as_ptr(), SHELL_FILE_BUF.as_ptr(), bytes_read as u32);
+        let res = vfs_write_file(dst_buf.as_ptr(), SHELL_FILE_BUF.as_ptr(), bytes_read as u32);
         if res == 0 {
             puts(b"Copied ");
             puts(src);
@@ -454,7 +457,7 @@ fn cmd_wc(args: &[u8]) {
                 i += 1;
             }
             fname_buf[len] = 0;
-            fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
+            vfs_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
         }
     };
     if bytes_read < 0 {
@@ -519,7 +522,7 @@ fn cmd_hexdump(args: &[u8]) {
     fname_buf[len] = 0;
 
     unsafe {
-        let bytes_read = fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 16384);
+        let bytes_read = vfs_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 16384);
         if bytes_read < 0 {
             puts(b"hexdump: cannot open file: ");
             puts(filename);
@@ -586,7 +589,7 @@ fn cmd_mkdir(args: &[u8]) {
     }
     dname_buf[len] = 0;
 
-    let res = unsafe { fat16_mkdir(dname_buf.as_ptr()) };
+    let res = unsafe { vfs_mkdir(dname_buf.as_ptr()) };
     if res == 0 {
         puts(b"Created directory: ");
         puts(dirname);
@@ -619,7 +622,7 @@ fn cmd_rmdir(args: &[u8]) {
     }
     dname_buf[len] = 0;
 
-    let res = unsafe { fat16_rmdir(dname_buf.as_ptr()) };
+    let res = unsafe { vfs_rmdir(dname_buf.as_ptr()) };
     if res == 0 {
         puts(b"Removed directory: ");
         puts(dirname);
@@ -657,10 +660,10 @@ fn cmd_cd(args: &[u8]) {
 
     let res = unsafe {
         if len == 0 {
-            let root = [b'\\', 0];
-            fat16_chdir(root.as_ptr())
+            let root = [b'/', 0];
+            vfs_chdir(root.as_ptr())
         } else {
-            fat16_chdir(path_buf.as_ptr())
+            vfs_chdir(path_buf.as_ptr())
         }
     };
 
@@ -674,9 +677,8 @@ fn cmd_cd(args: &[u8]) {
 // Built-in Command: pwd (Print current working directory)
 fn cmd_pwd(_args: &[u8]) {
     let mut buf = [0u8; 128];
-    let len = unsafe { fat16_getcwd(buf.as_mut_ptr(), 128) };
+    let len = unsafe { vfs_getcwd(buf.as_mut_ptr(), 128) };
     if len >= 0 {
-        puts(b"C:");
         let ulen = len as usize;
         for i in 0..ulen {
             unsafe { print_char(buf[i]); }
@@ -720,7 +722,9 @@ extern "C" fn ls_entry_callback(name_ptr: *const u8, _size: u32, is_dir: u8) {
 
 fn cmd_ls(_args: &[u8]) {
     unsafe {
-        fat16_list_directory(ls_entry_callback);
+        if vfs_list_directory(core::ptr::null(), ls_entry_callback) < 0 {
+            puts(b"ls: directory read failed\n");
+        }
     }
 }
 
@@ -746,30 +750,64 @@ static mut LESS_LINE_STARTS: [u32; 1024] = [0; 1024];
 static mut LESS_LINE_COUNT: usize = 0;
 
 fn cmd_less(args: &[u8]) {
-    let filename = trim_slice(args);
-    if filename.is_empty() {
-        puts(b"Usage: less <filename>\n");
-        return;
+    let target = trim_slice(args);
+    let mut display_name = target;
+    let mut bytes_read;
+    if target.is_empty() {
+        bytes_read = unsafe { syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768) };
+        if bytes_read < 0 {
+            puts(b"Usage: less <filename|command> (or pipe input)\n");
+            return;
+        }
+        display_name = b"pipe input";
+    } else {
+        bytes_read = -1;
+        if target.len() < 64 {
+            let mut fname_buf = [0u8; 64];
+            for i in 0..target.len() {
+                fname_buf[i] = target[i];
+            }
+            fname_buf[target.len()] = 0;
+            bytes_read = unsafe {
+                vfs_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
+            };
+        }
     }
 
-    let mut fname_buf = [0u8; 64];
-    let len = if filename.len() < 63 { filename.len() } else { 63 };
-    let mut i = 0;
-    while i < len {
-        fname_buf[i] = filename[i];
-        i += 1;
-    }
-    fname_buf[len] = 0;
+    if !target.is_empty() && bytes_read < 0 {
+        let mut command_name_end = 0;
+        while command_name_end < target.len() &&
+            target[command_name_end] != b' ' && target[command_name_end] != b'\t' {
+            command_name_end += 1;
+        }
+        let command_name = &target[..command_name_end];
+        if bytes_eq(command_name, b"less") || bytes_eq(command_name, b"LESS") {
+            puts(b"less: cannot page another less command\n");
+            return;
+        }
 
-    let bytes_read = unsafe {
-        fat16_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
-    };
-
-    if bytes_read < 0 {
-        puts(b"less: cannot open file: ");
-        puts(filename);
-        puts(b"\n");
-        return;
+        unsafe {
+            syscall_pipe_begin(core::ptr::null(), 0, PIPE_BUFFERS[0].as_mut_ptr(), PIPE_BUFFER_CAPACITY as u32);
+            PIPE_CAPTURE_ACTIVE = true;
+        }
+        let command_found = dispatch_single_command(target);
+        let command_output_len = unsafe {
+            PIPE_CAPTURE_ACTIVE = false;
+            syscall_pipe_end() as usize
+        };
+        if !command_found {
+            puts(b"less: cannot open file or run command: ");
+            puts(target);
+            puts(b"\n");
+            return;
+        }
+        unsafe {
+            for i in 0..command_output_len {
+                SHELL_FILE_BUF[i] = PIPE_BUFFERS[0][i];
+            }
+        }
+        bytes_read = command_output_len as i32;
+        display_name = b"command output";
     }
 
     let total = bytes_read as usize;
@@ -858,8 +896,8 @@ fn cmd_less(args: &[u8]) {
         // Write filename
         let mut pos: usize = 1;
         let mut fi: usize = 0;
-        while fi < filename.len() && pos < 40 {
-            vga_write(pos, 24, filename[fi], status_attr);
+        while fi < display_name.len() && pos < 40 {
+            vga_write(pos, 24, display_name[fi], status_attr);
             pos += 1;
             fi += 1;
         }
@@ -1253,7 +1291,7 @@ fn run_script(filename: &[u8]) {
     filename_buf[filename.len()] = 0;
 
     let bytes_read = unsafe {
-        fat16_read_file_by_name(filename_buf.as_ptr(), SCRIPT_BUF.as_mut_ptr(), 32767)
+        vfs_read_file_by_name(filename_buf.as_ptr(), SCRIPT_BUF.as_mut_ptr(), 32767)
     };
     if bytes_read < 0 {
         puts(b"CykShell: cannot open script: ");
@@ -1287,10 +1325,10 @@ fn run_script(filename: &[u8]) {
 }
 
 // Command Dispatcher
-fn dispatch_single_command(raw_line: &[u8]) {
+fn dispatch_single_command(raw_line: &[u8]) -> bool {
     let trimmed = trim_slice(raw_line);
     if trimmed.is_empty() {
-        return;
+        return true;
     }
 
     // Split at first space into (command, args)
@@ -1313,14 +1351,14 @@ fn dispatch_single_command(raw_line: &[u8]) {
 
     if is_she_file(cmd_name) {
         run_script(cmd_name);
-        return;
+        return true;
     }
 
     // 1. Check built-in commands first
     for cmd in COMMANDS {
         if bytes_eq(cmd.name, cmd_name) {
             (cmd.handler)(args);
-            return;
+            return true;
         }
     }
 
@@ -1348,13 +1386,14 @@ fn dispatch_single_command(raw_line: &[u8]) {
         args_buf[args_len] = 0;
 
         if exec_user_command(cmd_buf.as_ptr(), args_buf.as_ptr()) != 0 {
-            return;
+            return true;
         }
     }
 
     puts(b"CykShell: command not found: ");
     puts(cmd_name);
     puts(b"\nType 'help' to view available commands.\n");
+    false
 }
 
 const MAX_PIPE_STAGES: usize = 8;
@@ -1498,17 +1537,16 @@ pub extern "C" fn shell_main() -> ! {
 
     loop {
         let mut cwd_buf = [0u8; 128];
-        let cwd_len = unsafe { fat16_getcwd(cwd_buf.as_mut_ptr(), 128) };
-        puts(b"C:");
+        let cwd_len = unsafe { vfs_getcwd(cwd_buf.as_mut_ptr(), 128) };
         if cwd_len > 0 {
             let ulen = cwd_len as usize;
             for i in 0..ulen {
                 unsafe { print_char(cwd_buf[i]); }
             }
         } else {
-            puts(b"\\");
+            puts(b"/");
         }
-        puts(b"> ");
+        puts(b"] # ");
 
         let mut start_x: i32 = 0;
         let mut start_y: i32 = 0;
@@ -1707,4 +1745,9 @@ pub extern "C" fn shell_main() -> ! {
             dispatch_command(&LINE_BUF[..line_len]);
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
+    shell_main()
 }

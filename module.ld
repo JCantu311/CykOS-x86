@@ -2,8 +2,7 @@ OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Level 2 Driver Modules load at 0x40000 */
-    . = 0x40000;
+    . = __MODULE_LINK_BASE__;
 
     .text : {
         *(.header*)              /* cyk_module_header_t MUST be at byte 0 */

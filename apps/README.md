@@ -7,7 +7,7 @@ This directory provides the standalone tooling to compile, link, and package Rus
 - **Freestanding Rust**: All applications are written with `#![no_std]` and `#![no_main]`.
 - **Memory Layout**: Executables are loaded at `0x50000` (`USER_APP_BASE`) in 32-bit protected mode.
 - **External Linking**: Applications call kernel functions directly via `bin/kernel_syms.ld`. They are linked independently into flat binary files (`.BIN`) and never linked into the kernel ELF.
-- **Packaging**: Binaries placed in `apps/bin/` or `bin/` are automatically packaged into the FAT16 disk image (`bin/os_image.bin`) by `mkfat16.py`.
+- **Packaging**: The image builder places the shell in `/bin`, applications in `/usr/bin`, drivers and their manifest in `/boot`, aliases in `/etc`, and documentation in `/usr/share/doc`.
 
 ## Command Line Arguments (`argc`, `argv`)
 

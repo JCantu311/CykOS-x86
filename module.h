@@ -10,12 +10,17 @@
 #define MODULE_TYPE_DISPLAY   0x02
 #define MODULE_TYPE_MOUSE     0x03
 
+#ifndef MODULE_LOAD_ADDRESS
+#define MODULE_LOAD_ADDRESS   0x40000
+#endif
+
 // Generic Level 2 Module Header (Must reside at byte offset 0 of every .drv module)
 typedef struct {
     unsigned int magic;         // Must be CYKOS_MODULE_MAGIC
     char name[16];              // Module name (e.g., "cykeyboard")
     unsigned int version;       // Driver version (e.g., 0x00010000 = v1.0)
     unsigned int type;          // Module type (MODULE_TYPE_*)
+    unsigned int load_address;  // Fixed address the module was linked for
     int (*init)(void);          // Initialization entry point (returns 0 on success)
 } cyk_module_header_t;
 

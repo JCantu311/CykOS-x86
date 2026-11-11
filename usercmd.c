@@ -1,12 +1,17 @@
 #include "usercmd.h"
-#include "fat16.h"
+#include "vfs.h"
 #include "cykastd.h"
 #include "syscall.h"
 
-#define USERCMDS_FILE     "/USERCMDS.LST"   // List (LST) of userland commands
-#define USERCMDS_FALLBACK "/USERCMDS.TXT"   // Fallback compatibility
+#define USERCMDS_FILE     "/ETC/USERCMDS.LST"
+#define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
+#define USERCMDS_LEGACY   "/CYKOS/USERCMDS.LST"
+#define USERCMDS_OLD_FALLBACK "/CYKOS/USERCMDS.TXT"
+#define USER_BIN_DIR      "/USR/BIN/"
+#define LEGACY_BIN_DIR    "/CYKOS/"
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
+#define USER_PATH_MAX     64
 
 // Internal helper to convert character to uppercase
 static char uc(char c) {
@@ -23,6 +28,20 @@ static int str_casecmp(const char* a, const char* b) {
         a++; b++;
     }
     return (unsigned char)uc(*a) - (unsigned char)uc(*b);
+}
+
+static int build_path(const char* directory, const char* filename, char* output, int capacity) {
+    int index = 0;
+    while (directory[index] && index < capacity - 1) {
+        output[index] = directory[index];
+        index++;
+    }
+    int source_index = 0;
+    while (filename[source_index] && index < capacity - 1) {
+        output[index++] = filename[source_index++];
+    }
+    output[index] = '\0';
+    return filename[source_index] == '\0' ? 0 : -1;
 }
 
 // Skip whitespace and comment lines, extract next token into out_token
@@ -46,24 +65,26 @@ static const char* next_token(const char* p, char* out, int max) {
     return p;
 }
 
-// Read USERCMDS.TXT and search for an alias matching cmd_name.
+// Read the external command list and search for an alias matching cmd_name.
 // If found, writes the binary filename into out_bin and returns 1.
 static int find_alias(const char* cmd_name, char* out_bin, int out_max) {
-    fat16_entry_t cfg;
-    if (fat16_find_file(USERCMDS_FILE, &cfg) != 0) {
-        if (fat16_find_file(USERCMDS_FALLBACK, &cfg) != 0) {
-            return 0; // Config file not present on disk
+    vfs_file_t cfg;
+    if (vfs_find_file(USERCMDS_FILE, &cfg) != 0) {
+        if (vfs_find_file(USERCMDS_FALLBACK, &cfg) != 0 &&
+            vfs_find_file(USERCMDS_LEGACY, &cfg) != 0 &&
+            vfs_find_file(USERCMDS_OLD_FALLBACK, &cfg) != 0) {
+            return 0;
         }
     }
 
     char buf[1024];
     memset(buf, 0, sizeof(buf));
-    int bytes = fat16_read_file(&cfg, buf, sizeof(buf) - 1);
+    int bytes = vfs_read_at(&cfg, 0, buf, sizeof(buf) - 1);
     if (bytes <= 0) return 0;
 
     const char* cursor = buf;
-    char alias[16];
-    char binary[16];
+    char alias[32];
+    char binary[USER_PATH_MAX];
 
     while ((cursor = next_token(cursor, alias, sizeof(alias))) != (void*)0) {
         cursor = next_token(cursor, binary, sizeof(binary));
@@ -83,17 +104,33 @@ static int find_alias(const char* cmd_name, char* out_bin, int out_max) {
     return 0;
 }
 
+static void shell_output_string(const char* text) {
+    if (syscall_pipe_output_active()) {
+        syscall_pipe_write(text, strlen(text));
+    } else {
+        print_string(text);
+    }
+}
+
+static void shell_output_char(char ch) {
+    if (syscall_pipe_output_active()) {
+        syscall_pipe_write(&ch, 1);
+    } else {
+        print_char(ch);
+    }
+}
+
 int exec_user_command(const char* cmd_name, const char* args) {
     if (!cmd_name || cmd_name[0] == '\0') return 0;
 
-    char target_file[16];
+    char target_file[USER_PATH_MAX];
     target_file[0] = '\0';
 
     // Look up alias in USERCMDS.TXT
     if (!find_alias(cmd_name, target_file, sizeof(target_file))) {
         // Fallback: check if cmd_name is a direct file or has .BIN / .COM extension
-        fat16_entry_t probe;
-        if (fat16_find_file(cmd_name, &probe) == 0) {
+        vfs_file_t probe;
+        if (vfs_find_file(cmd_name, &probe) == 0) {
             int i = 0;
             while (cmd_name[i] && i < (int)sizeof(target_file) - 1) {
                 target_file[i] = cmd_name[i];
@@ -119,37 +156,54 @@ int exec_user_command(const char* cmd_name, const char* args) {
             test_bin[j++] = 'N';
             test_bin[j] = '\0';
 
-            if (fat16_find_file(test_bin, &probe) == 0) {
+            char app_target[USER_PATH_MAX];
+            char legacy_target[USER_PATH_MAX];
+            build_path(USER_BIN_DIR, test_bin, app_target, sizeof(app_target));
+            build_path(LEGACY_BIN_DIR, test_bin, legacy_target, sizeof(legacy_target));
+
+            if (vfs_find_file(test_bin, &probe) == 0) {
                 for (int k = 0; k <= j; k++) target_file[k] = test_bin[k];
+            } else if (vfs_find_file(app_target, &probe) == 0) {
+                memcpy(target_file, app_target, strlen(app_target) + 1);
+            } else if (vfs_find_file(legacy_target, &probe) == 0) {
+                memcpy(target_file, legacy_target, strlen(legacy_target) + 1);
             } else {
                 // Try <cmd>.COM
                 test_bin[j - 3] = 'C';
                 test_bin[j - 2] = 'O';
                 test_bin[j - 1] = 'M';
-                if (fat16_find_file(test_bin, &probe) == 0) {
+                if (vfs_find_file(test_bin, &probe) == 0) {
                     for (int k = 0; k <= j; k++) target_file[k] = test_bin[k];
                 } else {
-                    return 0; // Not an external command
+                    build_path(USER_BIN_DIR, test_bin, app_target, sizeof(app_target));
+                    build_path(LEGACY_BIN_DIR, test_bin, legacy_target, sizeof(legacy_target));
+                    if (vfs_find_file(app_target, &probe) == 0) {
+                        memcpy(target_file, app_target, strlen(app_target) + 1);
+                    } else if (vfs_find_file(legacy_target, &probe) == 0) {
+                        memcpy(target_file, legacy_target, strlen(legacy_target) + 1);
+                    } else {
+                        return 0;
+                    }
                 }
             }
         }
     }
 
-    // Locate the binary on FAT16
-    fat16_entry_t app_entry;
-    if (fat16_find_file(target_file, &app_entry) != 0) {
+    // Locate the binary through the mounted filesystem.
+    vfs_file_t app_entry;
+    if (vfs_find_file(target_file, &app_entry) != 0) {
         // If not found in current directory and not an absolute path, check root directory
         int found_in_root = 0;
         if (target_file[0] != '/' && target_file[0] != '\\') {
-            char root_target[32];
+            char root_target[USER_PATH_MAX];
             root_target[0] = '/';
             int t = 0;
-            while (target_file[t] && t < 30) {
+            while (target_file[t] && t < (int)sizeof(root_target) - 2) {
                 root_target[t + 1] = target_file[t];
                 t++;
             }
             root_target[t + 1] = '\0';
-            if (fat16_find_file(root_target, &app_entry) == 0) {
+            if (vfs_find_file(root_target, &app_entry) == 0) {
                 found_in_root = 1;
             }
         }
@@ -162,7 +216,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
     }
 
     // Check if executable file is empty
-    if (app_entry.file_size == 0) {
+    if (app_entry.size == 0) {
         print_color_string("CykShell: executable is empty (0 bytes): ", VGA_RED);
         print_string(target_file);
         print_string("\n");
@@ -175,7 +229,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
     // Zero out the app memory region first (clean BSS, prevent stale data)
     memset(dest, 0, USER_APP_MAX_SIZE);
 
-    int bytes_read = fat16_read_file(&app_entry, dest, USER_APP_MAX_SIZE);
+    int bytes_read = vfs_read_at(&app_entry, 0, dest, USER_APP_MAX_SIZE);
     if (bytes_read <= 0) {
         print_color_string("CykShell: failed to load: ", VGA_RED);
         print_string(target_file);
@@ -253,42 +307,78 @@ int exec_user_command(const char* cmd_name, const char* args) {
     return 1;
 }
 
+int exec_shell_binary(void) {
+    vfs_file_t shell_entry;
+    const char* shell_path = "/BIN/SHELL.BIN";
+    if (vfs_find_file(shell_path, &shell_entry) != 0) {
+        shell_path = "/CYKOS/SHELL.BIN";
+        if (vfs_find_file(shell_path, &shell_entry) != 0) return 0;
+    }
+    if (shell_entry.size == 0 || shell_entry.size > USER_APP_MAX_SIZE) {
+        print_color_string("CykShell: invalid shell image size\n", VGA_RED);
+        return -1;
+    }
+
+    void* shell_base = (void*)0x100000;
+    memset(shell_base, 0, USER_APP_MAX_SIZE);
+    int bytes_read = vfs_read_at(&shell_entry, 0, shell_base, USER_APP_MAX_SIZE);
+    if (bytes_read <= 0) {
+        print_color_string("CykShell: failed to load standalone shell image\n", VGA_RED);
+        return -1;
+    }
+
+    unsigned char* image = (unsigned char*)shell_base;
+    if (image[0] == 0x7F && image[1] == 'E' && image[2] == 'L' && image[3] == 'F') {
+        print_color_string("CykShell: shell image must be a flat binary\n", VGA_RED);
+        return -1;
+    }
+
+    typedef int (*shell_main_fn)(int, char**);
+    ((shell_main_fn)shell_base)(0, (char**)0);
+    return 1;
+}
+
 void list_user_commands(void) {
-    fat16_entry_t cfg;
+    vfs_file_t cfg;
     const char* filename = USERCMDS_FILE;
-    if (fat16_find_file(USERCMDS_FILE, &cfg) != 0) {
-        if (fat16_find_file(USERCMDS_FALLBACK, &cfg) != 0) {
-            return; // No config present
+    if (vfs_find_file(USERCMDS_FILE, &cfg) != 0) {
+        if (vfs_find_file(USERCMDS_FALLBACK, &cfg) != 0) {
+            filename = USERCMDS_LEGACY;
+            if (vfs_find_file(filename, &cfg) != 0) {
+                filename = USERCMDS_OLD_FALLBACK;
+                if (vfs_find_file(filename, &cfg) != 0) return;
+            }
+        } else {
+            filename = USERCMDS_FALLBACK;
         }
-        filename = USERCMDS_FALLBACK;
     }
 
     char buf[1024];
     memset(buf, 0, sizeof(buf));
-    int bytes = fat16_read_file(&cfg, buf, sizeof(buf) - 1);
+    int bytes = vfs_read_at(&cfg, 0, buf, sizeof(buf) - 1);
     if (bytes <= 0) return;
 
-    print_string("\nExternal Commands (");
-    print_string(filename);
-    print_string("):\n");
+    shell_output_string("\nExternal Commands (");
+    shell_output_string(filename);
+    shell_output_string("):\n");
 
     const char* cursor = buf;
-    char alias[16];
-    char binary[16];
+    char alias[32];
+    char binary[USER_PATH_MAX];
 
     while ((cursor = next_token(cursor, alias, sizeof(alias))) != (void*)0) {
         cursor = next_token(cursor, binary, sizeof(binary));
         if (!cursor) break;
 
-        print_string("  ");
-        print_string(alias);
+        shell_output_string("  ");
+        shell_output_string(alias);
         int pad = (int)strlen(alias);
         while (pad < 12) {
-            print_char(' ');
+            shell_output_char(' ');
             pad++;
         }
-        print_string("- ");
-        print_string(binary);
-        print_string("\n");
+        shell_output_string("- ");
+        shell_output_string(binary);
+        shell_output_string("\n");
     }
 }

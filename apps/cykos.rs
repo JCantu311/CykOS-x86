@@ -11,7 +11,13 @@ pub const SYS_READ: u32       = 3;
 pub const SYS_WRITE: u32      = 4;
 pub const SYS_OPEN: u32       = 5;
 pub const SYS_CLOSE: u32      = 6;
+pub const SYS_UNLINK: u32     = 10;
+pub const SYS_CHDIR: u32      = 12;
+pub const SYS_LSEEK: u32      = 19;
+pub const SYS_MKDIR: u32      = 39;
+pub const SYS_RMDIR: u32      = 40;
 pub const SYS_BRK: u32        = 45;
+pub const SYS_SBRK: u32       = 112;
 pub const SYS_CLEAR: u32      = 100;
 pub const SYS_SET_CURSOR: u32 = 101;
 pub const SYS_GET_KEY: u32    = 102;
@@ -20,14 +26,25 @@ pub const SYS_SLEEP: u32      = 104;
 pub const SYS_FAT_READ: u32   = 105;
 pub const SYS_FAT_WRITE: u32  = 106;
 pub const SYS_FAT_DELETE: u32 = 107;
-pub const SYS_MKDIR: u32      = 108;
-pub const SYS_RMDIR: u32      = 109;
-pub const SYS_CHDIR: u32      = 110;
-pub const SYS_GETCWD: u32     = 111;
+pub const SYS_CYK_MKDIR: u32  = 108;
+pub const SYS_CYK_RMDIR: u32  = 109;
+pub const SYS_CYK_CHDIR: u32  = 110;
+pub const SYS_CYK_GETCWD: u32 = 111;
+pub const SYS_GETCWD: u32     = 183;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
 pub const FD_STDERR: u32 = 2;
+pub const O_RDONLY: u32 = 0;
+pub const O_WRONLY: u32 = 1;
+pub const O_RDWR: u32 = 2;
+pub const O_CREAT: u32 = 0x40;
+pub const O_EXCL: u32 = 0x80;
+pub const O_TRUNC: u32 = 0x200;
+pub const O_APPEND: u32 = 0x400;
+pub const SEEK_SET: u32 = 0;
+pub const SEEK_CUR: u32 = 1;
+pub const SEEK_END: u32 = 2;
 
 // =========================================================================
 // Navigation & Special Key Codes
@@ -130,6 +147,42 @@ pub fn print(s: &str) {
 pub fn println(s: &str) {
     print(s);
     putc(b'\n');
+}
+
+pub fn open(path: &str, flags: u32, mode: u32) -> Result<u32, i32> {
+    let mut path_buf = [0u8; 128];
+    if path.len() >= path_buf.len() { return Err(-1); }
+    path_buf[..path.len()].copy_from_slice(path.as_bytes());
+    let fd = unsafe {
+        syscall::syscall3(SYS_OPEN, path_buf.as_ptr() as u32, flags, mode) as i32
+    };
+    if fd >= 0 { Ok(fd as u32) } else { Err(fd) }
+}
+
+pub fn read(fd: u32, buffer: &mut [u8]) -> Result<usize, i32> {
+    let result = unsafe {
+        syscall::syscall3(SYS_READ, fd, buffer.as_mut_ptr() as u32, buffer.len() as u32) as i32
+    };
+    if result >= 0 { Ok(result as usize) } else { Err(result) }
+}
+
+pub fn write(fd: u32, buffer: &[u8]) -> Result<usize, i32> {
+    let result = unsafe {
+        syscall::syscall3(SYS_WRITE, fd, buffer.as_ptr() as u32, buffer.len() as u32) as i32
+    };
+    if result >= 0 { Ok(result as usize) } else { Err(result) }
+}
+
+pub fn close(fd: u32) -> Result<(), i32> {
+    let result = unsafe { syscall::syscall1(SYS_CLOSE, fd) as i32 };
+    if result == 0 { Ok(()) } else { Err(result) }
+}
+
+pub fn lseek(fd: u32, offset: i32, whence: u32) -> Result<u32, i32> {
+    let result = unsafe {
+        syscall::syscall3(SYS_LSEEK, fd, offset as u32, whence) as i32
+    };
+    if result >= 0 { Ok(result as u32) } else { Err(result) }
 }
 
 /// Print an error message to standard error (rendered in Red)
@@ -281,17 +334,17 @@ pub fn chdir(path: &str) -> Result<(), i32> {
     }
 }
 
-/// Get current working directory path string
+/// Get current working directory path string using POSIX/Linux i386 getcwd semantics.
 pub fn getcwd(buf: &mut [u8]) -> Result<usize, i32> {
-    let res = unsafe {
-        syscall::syscall2(SYS_GETCWD, buf.as_mut_ptr() as u32, buf.len() as u32) as i32
+    let result = unsafe {
+        syscall::syscall2(SYS_GETCWD, buf.as_mut_ptr() as u32, buf.len() as u32)
     };
-
-    if res >= 0 {
-        Ok(res as usize)
-    } else {
-        Err(res)
+    if result == 0 || result == u32::MAX {
+        return Err(-1);
     }
+    let mut length = 0;
+    while length < buf.len() && buf[length] != 0 { length += 1; }
+    Ok(length)
 }
 
 /// Exit the current program and return to the shell

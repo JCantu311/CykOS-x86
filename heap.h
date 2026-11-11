@@ -3,9 +3,9 @@
 
 #include "cykastd.h"
 
-// Heap base at 1MB (0x100000) - safe extended memory zone
-#define HEAP_START_ADDR  0x100000
-#define HEAP_MAX_ADDR    0x800000 // 8 MB ceiling (7 MB total heap)
+// Reserve 0x100000-0x130000 for the standalone Level 3 shell image.
+#define HEAP_START_ADDR  0x140000
+#define HEAP_MAX_ADDR    0x800000 // 8 MB ceiling
 
 void  heap_init(void);
 void* sbrk(int increment);

@@ -1,0 +1,3 @@
+# source path       output path          fixed load address
+keyboard.c         bin/cykeybrd.drv     0x40000
+diskdrv.c          bin/cykdisk.drv       0x44000

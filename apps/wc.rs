@@ -6,7 +6,7 @@ use core::panic::PanicInfo;
 extern "C" {
     fn print_string(s: *const u8);
     fn print_char(c: u8);
-    fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
+    fn vfs_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
 }
 
 static mut FILE_BUF: [u8; 65536] = [0; 65536];
@@ -44,7 +44,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             return 1;
         }
 
-        let bytes_read = fat16_read_file_by_name(filename, FILE_BUF.as_mut_ptr(), 65536);
+        let bytes_read = vfs_read_file_by_name(filename, FILE_BUF.as_mut_ptr(), 65536);
         if bytes_read < 0 {
             print_string(b"wc: cannot open file: \0".as_ptr());
             print_string(filename);

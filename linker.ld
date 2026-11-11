@@ -9,6 +9,7 @@ SECTIONS
     .boot_sector : {
         KEEP(*boot.o(.boot))
     }
+    ASSERT(SIZEOF(.boot_sector) <= 446, "Boot code overlaps the MBR partition table")
 
     /* Force the magic signature exactly at byte index 510 */
     . = 0x7C00 + 510;
@@ -62,6 +63,8 @@ SECTIONS
         . = ALIGN(4);
         __bss_end = .;
     }
+
+    ASSERT(_kernel_end <= 0x27E00, "Kernel exceeds the boot loader read window")
 
     /DISCARD/ : {
         *(.eh_frame*)

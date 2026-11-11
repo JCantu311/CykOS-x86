@@ -9,6 +9,11 @@
 #define SYS_WRITE         4   // Write to file descriptor or stdout (console)
 #define SYS_OPEN          5   // Open file on FAT16
 #define SYS_CLOSE         6   // Close file descriptor
+#define SYS_UNLINK        10  // POSIX unlink(path)
+#define SYS_CHDIR         12  // POSIX chdir(path)
+#define SYS_LSEEK         19  // POSIX lseek(fd, offset, whence)
+#define SYS_MKDIR         39  // POSIX mkdir(path, mode)
+#define SYS_RMDIR         40  // POSIX rmdir(path)
 #define SYS_BRK           45  // Dynamic memory expansion (heap management)
 #define SYS_CLEAR         100 // Clear screen
 #define SYS_SET_CURSOR    101 // Position text cursor (col, row)
@@ -18,10 +23,12 @@
 #define SYS_FAT_READ      105 // Convenience read file by name
 #define SYS_FAT_WRITE     106 // Convenience write file by name
 #define SYS_FAT_DELETE    107 // Delete file by name
-#define SYS_MKDIR         108 // Create directory (path)
-#define SYS_RMDIR         109 // Remove directory (path)
-#define SYS_CHDIR         110 // Change directory (path)
-#define SYS_GETCWD        111 // Get current working directory (buf, max)
+#define SYS_CYK_MKDIR     108 // Legacy CykOS mkdir(path)
+#define SYS_CYK_RMDIR     109 // Legacy CykOS rmdir(path)
+#define SYS_CYK_CHDIR     110 // Legacy CykOS chdir(path)
+#define SYS_CYK_GETCWD    111 // Legacy CykOS getcwd(buf, max), returns length
+#define SYS_SBRK          112 // CykOS sbrk(increment) extension
+#define SYS_GETCWD        183 // Linux i386 getcwd(buf, size), returns buf
 
 // File descriptor constants
 #define FD_STDIN          0
@@ -34,5 +41,6 @@ unsigned int syscall_pipe_end(void);
 unsigned int syscall_pipe_write(const char* data, unsigned int length);
 int syscall_pipe_read(char* data, unsigned int length);
 int syscall_pipe_active(void);
+int syscall_pipe_output_active(void);
 
 #endif // SYSCALL_H

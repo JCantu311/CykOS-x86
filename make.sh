@@ -33,6 +33,8 @@ elif command -v ld.lld &> /dev/null; then
     LD="ld.lld"
 elif command -v x86_64-linux-gnu-ld &> /dev/null; then
     LD="x86_64-linux-gnu-ld"
+elif command -v rustc &> /dev/null && [[ -x "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/gcc-ld/ld.lld" ]]; then
+    LD="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/gcc-ld/ld.lld"
 elif command -v x86_64-elf-ld &> /dev/null; then
     LD="x86_64-elf-ld"
 elif command -v ld &> /dev/null; then
@@ -49,6 +51,8 @@ nasm -f elf32 boot.s -o bin/boot.o
 $CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c ata.c -o bin/ata.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c fat16.c -o bin/fat16.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
+$CC -m32 -c fat32.c -o bin/fat32.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
+$CC -m32 -c vfs.c -o bin/vfs.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c modload.c -o bin/modload.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c usercmd.c -o bin/usercmd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
 $CC -m32 -c idt.c -o bin/idt.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
@@ -83,11 +87,10 @@ else
 fi
 
 # 6. Compile Level 2 Standalone Driver Modules
-$CC -m32 -c keyboard.c -o bin/keyboard.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$LD -m elf_i386 -T module.ld --no-dynamic-linker -no-pie bin/keyboard.o -o bin/cykeybrd.drv
+# Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
+$LD -m elf_i386 -T linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -124,6 +127,18 @@ key_syms = [s for s in ['print_string', 'print_char', 'fat16_read_file_by_name',
 print(f'  -> Exported {len(symbols)} kernel symbols. Key symbols found: {\", \".join(key_syms)}')
 " 2>/dev/null || true
 fi
+
+./drivers/build.sh "$CC" "$LD"
+
+# Link the standalone Level 3 shell against kernel symbols.
+python3 -c "
+with open('bin/kernel_syms.ld') as source, open('bin/kernel_syms_shell.ld', 'w') as target:
+    for line in source:
+        if not line.startswith('shell_main = '):
+            target.write(line)
+"
+$LD -m elf_i386 -T shell.ld --gc-sections -u main bin/kernel_syms_shell.ld bin/libshell.a -o bin/SHELL.BIN
+rm -f bin/kernel_syms_shell.ld
 
 # 9. Compile Level 4 Userland Applications (Rust)
 if command -v rustc &> /dev/null; then
@@ -239,10 +254,17 @@ else
     truncate -s 16777216 bin/os_image.bin 2>/dev/null || truncate -s 16m bin/os_image.bin
 fi
 
-# 11. Optional: Convert image to vdi for VirtualBox
-# if command -v VBoxManage &> /dev/null; then
-#     VBoxManage convertfromraw bin/os_image.bin bin/os_image.vdi --format VDI
-# fi
+# 11. Create disk formats for installed desktop hypervisors.
+if command -v VBoxManage &> /dev/null; then
+    VDI_TMP="bin/cykos.vdi.tmp.$$"
+    VBoxManage convertfromraw bin/os_image.bin "$VDI_TMP" --format VDI
+    mv -f "$VDI_TMP" bin/cykos.vdi
+fi
+if command -v qemu-img &> /dev/null; then
+    VMDK_TMP="bin/cykos.vmdk.tmp.$$"
+    qemu-img convert -f raw -O vmdk bin/os_image.bin "$VMDK_TMP"
+    mv -f "$VMDK_TMP" bin/cykos.vmdk
+fi
 
 echo "----------------------------------------"
-echo "Build successful! Created bin/os_image.bin with Kernel (L1), Drivers (L2), Shell (L3), and Apps (L4)."
+echo "Build successful! Created bin/os_image.bin plus available VirtualBox VDI and VMware VMDK images."

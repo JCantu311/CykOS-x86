@@ -168,6 +168,7 @@ const cyk_keyboard_driver_t cyk_keyboard_driver = {
         .name = "cykeyboard",
         .version = 0x00010000,
         .type = MODULE_TYPE_KEYBOARD,
+        .load_address = MODULE_LOAD_ADDRESS,
         .init = keyboard_init,
     },
     .get_scancode = keyboard_get_scancode,

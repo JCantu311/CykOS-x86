@@ -1,16 +1,28 @@
 #include "syscall.h"
 #include "idt.h"
 #include "cykastd.h"
-#include "fat16.h"
+#include "vfs.h"
 #include "heap.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
+#define SYS_FILE_IO_LIMIT (1024 * 1024)
+
+#define OPEN_ACCMODE 0x0003
+#define OPEN_WRONLY  0x0001
+#define OPEN_RDWR    0x0002
+#define OPEN_CREAT   0x0040
+#define OPEN_EXCL    0x0080
+#define OPEN_TRUNC   0x0200
+#define OPEN_APPEND  0x0400
+#define OPEN_LARGEFILE 0x8000
 
 typedef struct {
     int in_use;
-    fat16_entry_t entry;
+    vfs_file_t entry;
     unsigned int cursor;
+    unsigned int flags;
+    char path[128];
 } fd_table_t;
 
 static fd_table_t g_fds[MAX_FDS];
@@ -21,6 +33,27 @@ static char* g_pipe_output;
 static unsigned int g_pipe_output_capacity;
 static unsigned int g_pipe_output_len;
 static int g_pipe_active;
+
+static int syscall_absolute_path(const char* path, char output[128]) {
+    if (!path || !path[0]) return -1;
+    unsigned int length = strlen(path);
+    if (path[0] == '/' || path[0] == '\\') {
+        if (length >= 128) return -1;
+        memcpy(output, path, length + 1);
+        return 0;
+    }
+
+    char cwd[128];
+    int cwd_length = vfs_getcwd(cwd, sizeof(cwd));
+    if (cwd_length < 0) return -1;
+    unsigned int separator = cwd_length > 1 ? 1 : 0;
+    if ((unsigned int)cwd_length + separator + length >= 128) return -1;
+    memcpy(output, cwd, (unsigned int)cwd_length);
+    unsigned int offset = (unsigned int)cwd_length;
+    if (separator) output[offset++] = '/';
+    memcpy(output + offset, path, length + 1);
+    return 0;
+}
 
 void syscall_pipe_begin(const char* input, unsigned int input_len, char* output, unsigned int output_capacity) {
     g_pipe_input = input;
@@ -66,6 +99,10 @@ int syscall_pipe_active(void) {
     return g_pipe_active;
 }
 
+int syscall_pipe_output_active(void) {
+    return g_pipe_active && g_pipe_output != 0;
+}
+
 static void syscall_handler(registers_t* regs) {
     unsigned int syscall_num = regs->eax;
     unsigned int arg1 = regs->ebx;
@@ -108,8 +145,45 @@ static void syscall_handler(registers_t* regs) {
                     print_color_string(temp, VGA_RED);
                 }
                 regs->eax = (unsigned int)count;
+            } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
+                (g_fds[fd].flags & OPEN_ACCMODE) != 0) {
+                fd_table_t* file = &g_fds[fd];
+                if (file->flags & OPEN_APPEND) file->cursor = file->entry.size;
+                if (arg3 > SYS_FILE_IO_LIMIT || file->cursor > SYS_FILE_IO_LIMIT - arg3) {
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
+
+                unsigned int new_size = file->entry.size;
+                if (new_size < file->cursor + arg3) new_size = file->cursor + arg3;
+                if (new_size > SYS_FILE_IO_LIMIT) {
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
+                unsigned char* contents = (unsigned char*)malloc(new_size ? new_size : 1);
+                if (!contents) {
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
+                if (file->entry.size && vfs_read_at(&file->entry, 0, contents, file->entry.size) != (int)file->entry.size) {
+                    free(contents);
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
+                if (new_size > file->entry.size) {
+                    memset(contents + file->entry.size, 0, new_size - file->entry.size);
+                }
+                memcpy(contents + file->cursor, buf, arg3);
+                int result = vfs_write_file(file->path, contents, new_size);
+                free(contents);
+                if (result == 0 && vfs_find_file(file->path, &file->entry) == 0) {
+                    file->cursor += arg3;
+                    regs->eax = arg3;
+                } else {
+                    regs->eax = (unsigned int)-1;
+                }
             } else {
-                regs->eax = (unsigned int)-1; // Not supported on other fds yet
+                regs->eax = (unsigned int)-1;
             }
             break;
         }
@@ -141,8 +215,10 @@ static void syscall_handler(registers_t* regs) {
                     }
                     regs->eax = (unsigned int)read_bytes;
                 }
-            } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use) {
-                int bytes = fat16_read_file(&g_fds[fd].entry, buf, count);
+            } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
+                (g_fds[fd].flags & OPEN_ACCMODE) != OPEN_WRONLY) {
+                int bytes = vfs_read_at(&g_fds[fd].entry, g_fds[fd].cursor, buf, count);
+                if (bytes > 0) g_fds[fd].cursor += (unsigned int)bytes;
                 regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
             } else {
                 regs->eax = (unsigned int)-1;
@@ -151,9 +227,14 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_OPEN: {
-            // arg1 = filename
+            // Linux i386 open(path, flags, mode); this VFS currently supports read-only opens.
             const char* filename = (const char*)arg1;
-            if (!filename) {
+            unsigned int flags = arg2;
+            unsigned int supported_flags = OPEN_ACCMODE | OPEN_CREAT | OPEN_EXCL |
+                OPEN_TRUNC | OPEN_APPEND | OPEN_LARGEFILE;
+            char absolute_path[128];
+            if (!filename || (flags & OPEN_ACCMODE) == 3 || (flags & ~supported_flags) != 0 ||
+                syscall_absolute_path(filename, absolute_path) != 0) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
@@ -171,9 +252,30 @@ static void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            if (fat16_find_file(filename, &g_fds[found_fd].entry) == 0) {
+            int found = vfs_find_file(absolute_path, &g_fds[found_fd].entry) == 0;
+            if (!found && (flags & OPEN_CREAT)) {
+                if (vfs_write_file(absolute_path, 0, 0) != 0 ||
+                    vfs_find_file(absolute_path, &g_fds[found_fd].entry) != 0) {
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
+                found = 1;
+            } else if (found && (flags & OPEN_CREAT) && (flags & OPEN_EXCL)) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            if (found && (g_fds[found_fd].entry.attributes & 0x10)) found = 0;
+            if (found && (flags & OPEN_TRUNC)) {
+                if ((flags & OPEN_ACCMODE) == 0 || vfs_write_file(absolute_path, 0, 0) != 0 ||
+                    vfs_find_file(absolute_path, &g_fds[found_fd].entry) != 0) found = 0;
+            }
+            if (found) {
                 g_fds[found_fd].in_use = 1;
-                g_fds[found_fd].cursor = 0;
+                g_fds[found_fd].flags = flags;
+                g_fds[found_fd].cursor = (flags & OPEN_APPEND) ? g_fds[found_fd].entry.size : 0;
+                unsigned int path_length = strlen(absolute_path);
+                memcpy(g_fds[found_fd].path, absolute_path, path_length);
+                g_fds[found_fd].path[path_length] = '\0';
                 regs->eax = (unsigned int)found_fd;
             } else {
                 regs->eax = (unsigned int)-1; // File not found
@@ -186,6 +288,8 @@ static void syscall_handler(registers_t* regs) {
             int fd = (int)arg1;
             if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use) {
                 g_fds[fd].in_use = 0;
+                g_fds[fd].flags = 0;
+                g_fds[fd].path[0] = '\0';
                 regs->eax = 0;
             } else {
                 regs->eax = (unsigned int)-1;
@@ -194,9 +298,18 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_BRK: {
-            // arg1 = increment in bytes (if 0, returns current break)
-            int incr = (int)arg1;
-            void* res = sbrk(incr);
+            unsigned int current = (unsigned int)sbrk(0);
+            unsigned int requested = arg1;
+            if (requested >= HEAP_START_ADDR && requested <= HEAP_MAX_ADDR) {
+                int difference = (int)(requested - current);
+                if (sbrk(difference) != (void*)-1) current = (unsigned int)sbrk(0);
+            }
+            regs->eax = current;
+            break;
+        }
+
+        case SYS_SBRK: {
+            void* res = sbrk((int)arg1);
             regs->eax = (unsigned int)res;
             break;
         }
@@ -237,50 +350,94 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_FAT_READ: {
             // arg1 = filename, arg2 = buffer, arg3 = max_bytes
-            int res = fat16_read_file_by_name((const char*)arg1, (void*)arg2, arg3);
+            int res = vfs_read_file_by_name((const char*)arg1, (void*)arg2, arg3);
             regs->eax = (unsigned int)res;
             break;
         }
 
         case SYS_FAT_WRITE: {
             // arg1 = filename, arg2 = data, arg3 = size
-            int res = fat16_write_file((const char*)arg1, (const void*)arg2, arg3);
+            int res = vfs_write_file((const char*)arg1, (const void*)arg2, arg3);
             regs->eax = (unsigned int)res;
             break;
         }
 
         case SYS_FAT_DELETE: {
             // arg1 = filename
-            int res = fat16_delete_file((const char*)arg1);
+            int res = vfs_delete_file((const char*)arg1);
             regs->eax = (unsigned int)res;
             break;
         }
 
-        case SYS_MKDIR: {
+        case SYS_MKDIR:
+        case SYS_CYK_MKDIR: {
             // arg1 = path
-            int res = fat16_mkdir((const char*)arg1);
+            int res = vfs_mkdir((const char*)arg1);
             regs->eax = (unsigned int)res;
             break;
         }
 
-        case SYS_RMDIR: {
+        case SYS_RMDIR:
+        case SYS_CYK_RMDIR: {
             // arg1 = path
-            int res = fat16_rmdir((const char*)arg1);
+            int res = vfs_rmdir((const char*)arg1);
             regs->eax = (unsigned int)res;
             break;
         }
 
-        case SYS_CHDIR: {
+        case SYS_CHDIR:
+        case SYS_CYK_CHDIR: {
             // arg1 = path
-            int res = fat16_chdir((const char*)arg1);
+            int res = vfs_chdir((const char*)arg1);
+            regs->eax = (unsigned int)res;
+            break;
+        }
+
+        case SYS_CYK_GETCWD: {
+            // arg1 = buffer, arg2 = max_bytes
+            int res = vfs_getcwd((char*)arg1, (unsigned int)arg2);
             regs->eax = (unsigned int)res;
             break;
         }
 
         case SYS_GETCWD: {
-            // arg1 = buffer, arg2 = max_bytes
-            int res = fat16_getcwd((char*)arg1, (unsigned int)arg2);
-            regs->eax = (unsigned int)res;
+            int res = vfs_getcwd((char*)arg1, arg2);
+            regs->eax = res < 0 ? (unsigned int)-1 : arg1;
+            break;
+        }
+
+        case SYS_UNLINK: {
+            regs->eax = (unsigned int)vfs_delete_file((const char*)arg1);
+            break;
+        }
+
+        case SYS_LSEEK: {
+            int fd = (int)arg1;
+            int offset = (int)arg2;
+            unsigned int base;
+            if (fd < 3 || fd >= MAX_FDS || !g_fds[fd].in_use) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            if ((int)arg3 == 0) base = 0;
+            else if ((int)arg3 == 1) base = g_fds[fd].cursor;
+            else if ((int)arg3 == 2) base = g_fds[fd].entry.size;
+            else {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            unsigned int magnitude = 0U - (unsigned int)offset;
+            if (offset < 0 && magnitude > base) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            unsigned int next = offset < 0 ? base - magnitude : base + (unsigned int)offset;
+            if (next < base && offset >= 0) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            g_fds[fd].cursor = next;
+            regs->eax = next;
             break;
         }
 

@@ -1,7 +1,7 @@
 # CykOS User Commands Configuration File (USERCMDS.LST)
 # Format: <alias> <binary_filename>
 
-edit     EDIT.BIN
-vi       EDIT.BIN
-hello    HELLO.BIN
-sysdemo  SYSDEMO.BIN
+edit     /USR/BIN/EDIT.BIN
+vi       /USR/BIN/EDIT.BIN
+hello    /USR/BIN/HELLO.BIN
+sysdemo  /USR/BIN/SYSDEMO.BIN
