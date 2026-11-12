@@ -64,7 +64,7 @@ SECTIONS
         __bss_end = .;
     }
 
-    ASSERT(_kernel_end <= 0x27E00, "Kernel exceeds the boot loader read window")
+    ASSERT(__bss_end <= 0x47E00, "Kernel and BSS exceed the boot loader read window")
 
     /DISCARD/ : {
         *(.eh_frame*)

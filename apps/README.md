@@ -9,6 +9,8 @@ This directory provides the standalone tooling to compile, link, and package Rus
 - **External Linking**: Applications call kernel functions directly via `bin/kernel_syms.ld`. They are linked independently into flat binary files (`.BIN`) and never linked into the kernel ELF.
 - **Packaging**: The image builder places the shell in `/bin`, applications in `/usr/bin`, drivers and their manifest in `/boot`, aliases in `/etc`, and documentation in `/usr/share/doc`.
 
+Games live under `apps/games/` and are built like every other Rust userland app. Cykis is the bundled falling-block game; run it from CykShell with `cykis`.
+
 ## Command Line Arguments (`argc`, `argv`)
 
 The CykShell and command loader pass arguments using the standard C/Rust calling convention:
@@ -40,10 +42,10 @@ To build all apps and update the QEMU hard disk image:
 ./apps/build.sh
 ```
 
-To build a specific app (e.g. `edit.rs`):
+To build a specific app (e.g. `apps/games/cykis.rs`):
 
 ```bash
-./apps/build.sh edit.rs
+./apps/build.sh apps/games/cykis.rs
 ```
 
 ## Running in QEMU

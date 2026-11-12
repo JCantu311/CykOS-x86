@@ -38,9 +38,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     echo "Building driver: $source -> $output at $load_address"
     "$CC" -m32 -DMODULE_LOAD_ADDRESS="$load_address" -c "$source" -o "$object" \
         -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -fno-asynchronous-unwind-tables \
-        -fno-builtin -fno-stack-protector -Wall -Wextra
+        -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers
     python3 -c 'import pathlib,sys; source=pathlib.Path(sys.argv[1]); target=pathlib.Path(sys.argv[2]); target.write_text(source.read_text().replace("__MODULE_LINK_BASE__", sys.argv[3]))' \
-        module.ld "$linker_script" "$load_address"
+        src/drivers/module.ld "$linker_script" "$load_address"
     "$LD" -m elf_i386 -T "$linker_script" --no-dynamic-linker -no-pie \
         bin/kernel_syms.ld "$object" -o "$output"
     rm -f "$object" "$linker_script"

@@ -87,19 +87,18 @@ if [ -n "$1" ]; then
     name=$(basename "$target" .rs)
     build_rust_app "$target" "$name"
 else
-    # Build root edit.rs if present
-    if [ -f edit.rs ]; then
-        build_rust_app "edit.rs" "edit"
+    # Build the standalone editor from the organized user source tree.
+    if [ -f src/user/edit.rs ]; then
+        build_rust_app "src/user/edit.rs" "edit"
         cp -f "apps/bin/EDIT.BIN" "bin/EDIT.BIN" 2>/dev/null || true
     fi
 
-    # Build all apps/*.rs (excluding cykos.rs library)
-    for src in apps/*.rs; do
-        [ -e "$src" ] || continue
+    # Build all Rust apps below apps/ (excluding the SDK library).
+    while IFS= read -r src; do
         name=$(basename "$src" .rs)
         [ "$name" = "cykos" ] && continue
         build_rust_app "$src" "$name"
-    done
+    done < <(find apps -type f -name '*.rs' | sort)
 fi
 
 # 5. Inject newly built apps into the QEMU hard disk image

@@ -45,20 +45,15 @@ else
 fi
 
 # 3. Assemble unified module
-nasm -f elf32 boot.s -o bin/boot.o
+nasm -f elf32 src/boot/boot.s -o bin/boot.o
+
+COMMON_CFLAGS="-m32 -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers"
 
 # 4. Compile Level 1 Kernel components
-$CC -m32 -c cykastd.c -o bin/cykastd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c ata.c -o bin/ata.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c fat16.c -o bin/fat16.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c fat32.c -o bin/fat32.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c vfs.c -o bin/vfs.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c modload.c -o bin/modload.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c usercmd.c -o bin/usercmd.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c idt.c -o bin/idt.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c syscall.c -o bin/syscall.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c heap.c -o bin/heap.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
-$CC -m32 -c kernel.c -o bin/kernel.o -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra
+for source in src/kernel/*.c src/storage/*.c; do
+    name=$(basename "$source" .c)
+    "$CC" $COMMON_CFLAGS -c "$source" -o "bin/${name}.o"
+done
 
 # 5. Compile Level 3 CykShell (Rust)
 if command -v rustc &> /dev/null; then
@@ -70,15 +65,15 @@ if command -v rustc &> /dev/null; then
     fi
 
     # Compile with optimizations, disabled overflow panics, and staticlib bundling
-    if rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a 2>/dev/null; then
+    if rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib src/user/shell.rs -o bin/libshell.a 2>/dev/null; then
         echo "CykShell compiled successfully into bin/libshell.a."
         SHELL_LIB="bin/libshell.a"
-    elif rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --emit=obj shell.rs -o bin/shell.o 2>/dev/null; then
+    elif rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --emit=obj src/user/shell.rs -o bin/shell.o 2>/dev/null; then
         echo "CykShell compiled successfully into bin/shell.o."
         SHELL_LIB="bin/shell.o"
     else
         echo "Attempting compilation with verbose output..."
-        rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib shell.rs -o bin/libshell.a
+        rustc --target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort --crate-type=staticlib src/user/shell.rs -o bin/libshell.a
         SHELL_LIB="bin/libshell.a"
     fi
 else
@@ -90,7 +85,7 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -137,7 +132,7 @@ with open('bin/kernel_syms.ld') as source, open('bin/kernel_syms_shell.ld', 'w')
         if not line.startswith('shell_main = '):
             target.write(line)
 "
-$LD -m elf_i386 -T shell.ld --gc-sections -u main bin/kernel_syms_shell.ld bin/libshell.a -o bin/SHELL.BIN
+$LD -m elf_i386 -T src/user/shell.ld --gc-sections -u main bin/kernel_syms_shell.ld bin/libshell.a -o bin/SHELL.BIN
 rm -f bin/kernel_syms_shell.ld
 
 # 9. Compile Level 4 Userland Applications (Rust)
@@ -152,16 +147,16 @@ if command -v rustc &> /dev/null; then
         local input="$1"
         local output="$2"
         # Link with --gc-sections to keep binary lean
-        $LD -m elf_i386 -T user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output"
+        $LD -m elf_i386 -T src/user/user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output"
     }
 
     # Compile default editor (edit.rs)
-    if [ -f edit.rs ]; then
+    if [ -f src/user/edit.rs ]; then
         echo "  Compiling Level 4 Editor (edit.rs)..."
         rm -f bin/EDIT.BIN bin/libedit.a bin/edit.o
 
         # Strategy 1: Try --emit=obj (produces small binary, no libcore bloat)
-        if rustc $RUST_FLAGS --emit=obj edit.rs -o bin/edit.o; then
+        if rustc $RUST_FLAGS --emit=obj src/user/edit.rs -o bin/edit.o; then
             if link_user_app bin/edit.o bin/EDIT.BIN; then
                 echo "  -> Created Level 4 binary: bin/EDIT.BIN (from .o)"
                 rm -f bin/edit.o
@@ -173,7 +168,7 @@ if command -v rustc &> /dev/null; then
 
         # Strategy 2: Fall back to --crate-type=staticlib if .o approach failed
         if [ ! -f bin/EDIT.BIN ]; then
-            if rustc $RUST_FLAGS --crate-type=staticlib edit.rs -o bin/libedit.a; then
+            if rustc $RUST_FLAGS --crate-type=staticlib src/user/edit.rs -o bin/libedit.a; then
                 if link_user_app bin/libedit.a bin/EDIT.BIN; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN (from staticlib)"
                 else
@@ -198,8 +193,7 @@ if command -v rustc &> /dev/null; then
 
     # Compile any additional userland apps in apps/*.rs
     if [ -d apps ]; then
-        for app_src in apps/*.rs; do
-            [ -e "$app_src" ] || continue
+        while IFS= read -r app_src; do
             app_name=$(basename "$app_src" .rs)
             [ "$app_name" = "cykos" ] && continue
             app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]')
@@ -241,7 +235,7 @@ if command -v rustc &> /dev/null; then
                     echo "  -> WARNING: ${app_upper}.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
                 fi
             fi
-        done
+        done < <(find apps -type f -name '*.rs' | sort)
     fi
 fi
 
@@ -258,7 +252,12 @@ fi
 if command -v VBoxManage &> /dev/null; then
     VDI_TMP="bin/cykos.vdi.tmp.$$"
     VBoxManage convertfromraw bin/os_image.bin "$VDI_TMP" --format VDI
-    mv -f "$VDI_TMP" bin/cykos.vdi
+    if [ -f bin/cykos.vdi ]; then
+        VBoxManage clonemedium "$VDI_TMP" bin/cykos.vdi --existing
+        rm -f "$VDI_TMP"
+    else
+        mv -f "$VDI_TMP" bin/cykos.vdi
+    fi
 fi
 if command -v qemu-img &> /dev/null; then
     VMDK_TMP="bin/cykos.vmdk.tmp.$$"

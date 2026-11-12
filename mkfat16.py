@@ -276,7 +276,7 @@ if __name__ == "__main__":
     
     sample_files = {
         "USR/SHARE/DOC/README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
-        "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n",
+        "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n/BOOT/DRIVERS/CYSOUND.DRV\n",
     }
 
     # Load USERCMDS.LST if present on host, otherwise use default

@@ -38,10 +38,10 @@ _start:
     jz disk_error
 
     ; Load kernel from disk using INT 13h AH=42h (Extended LBA Read)
-    ; Read in 4 chunks of 64 sectors (32 KB per chunk) = 256 sectors (128 KB total)
-    ; Each chunk has offset 0x0000, advancing segment by 0x0800 (32 KB physical)
+    ; Read in 16 chunks of 32 sectors (16 KB per chunk) = 512 sectors (256 KB total)
+    ; Smaller EDD transfers work reliably across legacy BIOS implementations.
     ; This avoids real-mode 64KB segment overflow entirely.
-    mov byte [CHUNKS_LEFT], 4 ; 4 chunks * 64 sectors (128 KB)
+    mov byte [CHUNKS_LEFT], 16 ; 16 chunks * 32 sectors (256 KB)
 
 .load_chunk:
     mov byte [RETRIES], 3
@@ -60,10 +60,10 @@ _start:
     jmp disk_error
 
 .chunk_loaded:
-    ; Advance LBA by 64 sectors
-    add dword [dap_lba], 64
-    ; Advance Segment by 0x0800 (32 KB)
-    add word [dap_seg], 0x0800
+    ; Advance LBA by 32 sectors
+    add dword [dap_lba], 32
+    ; Advance segment by 0x0400 (16 KB)
+    add word [dap_seg], 0x0400
     dec byte [CHUNKS_LEFT]
     jnz .load_chunk
 
@@ -144,7 +144,7 @@ dap:
     db 0x10                 ; Packet size = 16 bytes
     db 0x00                 ; Reserved (0)
 dap_count:
-    dw 64                   ; 64 sectors per chunk (32 KB)
+    dw 32                   ; 32 sectors per chunk (16 KB)
 dap_offset:
     dw 0x0000               ; Offset (always 0)
 dap_seg:
@@ -176,14 +176,14 @@ init_32bit_protected:
     cld
     rep stosb
 
-    ; Enable SSE in CR0 and CR4
+    ; Enable the SSE state used by compiler-generated code.
     mov eax, cr0
-    and ax, 0xFFFB          ; Clear CR0.EM (bit 2) - disable FPU emulation
-    or ax, 0x0002           ; Set CR0.MP (bit 1) - monitor coprocessor
+    and ax, 0xFFFB          ; Clear CR0.EM (bit 2)
+    or ax, 0x0002           ; Set CR0.MP (bit 1)
     mov cr0, eax
 
     mov eax, cr4
-    or eax, (1 << 9) | (1 << 10) ; Set CR4.OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
+    or eax, (1 << 9) | (1 << 10) ; OSFXSR and OSXMMEXCPT
     mov cr4, eax
 
     call kernel_main        
