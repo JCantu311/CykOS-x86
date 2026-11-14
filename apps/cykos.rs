@@ -31,6 +31,8 @@ pub const SYS_CYK_RMDIR: u32  = 109;
 pub const SYS_CYK_CHDIR: u32  = 110;
 pub const SYS_CYK_GETCWD: u32 = 111;
 pub const SYS_GETCWD: u32     = 183;
+pub const SYS_SOUND_TONE: u32 = 184;
+pub const SYS_SOUND_CHIME: u32 = 185;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -352,6 +354,20 @@ pub fn exit(code: i32) -> ! {
     unsafe {
         syscall::syscall1(SYS_EXIT, code as u32);
         loop { core::arch::asm!("hlt"); }
+    }
+}
+
+/// Play a tone using the Level 2 sound driver (or PC speaker fallback)
+pub fn sound_tone(freq: u32, ms: u32) {
+    unsafe {
+        syscall::syscall2(SYS_SOUND_TONE, freq, ms);
+    }
+}
+
+/// Play the startup / alert chime using the Level 2 sound driver
+pub fn sound_chime() {
+    unsafe {
+        syscall::syscall0(SYS_SOUND_CHIME);
     }
 }
 

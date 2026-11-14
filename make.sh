@@ -239,6 +239,53 @@ if command -v rustc &> /dev/null; then
     fi
 fi
 
+# 9b. Compile POSIX C Standard Library (libc.a) & C Userland Applications
+echo "Compiling CykOS POSIX C Standard Library (libc)..."
+LIBC_CFLAGS="-m32 -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Ilibc/include"
+mkdir -p bin/libc_objs
+for libc_src in libc/src/*.c; do
+    [ -e "$libc_src" ] || continue
+    obj_name=$(basename "$libc_src" .c)
+    "$CC" $LIBC_CFLAGS -c "$libc_src" -o "bin/libc_objs/${obj_name}.o"
+done
+
+# Pack libc.a archive using ar (or llvm-ar)
+if command -v i686-elf-ar &> /dev/null; then
+    AR="i686-elf-ar"
+elif command -v x86_64-linux-gnu-ar &> /dev/null; then
+    AR="x86_64-linux-gnu-ar"
+elif command -v llvm-ar &> /dev/null; then
+    AR="llvm-ar"
+elif command -v ar &> /dev/null; then
+    AR="ar"
+else
+    AR="ar"
+fi
+
+$AR rcs bin/libc.a bin/libc_objs/*.o
+echo "  -> Created: bin/libc.a"
+
+# Compile any C userland applications in apps/*.c
+if [ -d apps ]; then
+    for c_app in apps/*.c; do
+        [ -e "$c_app" ] || continue
+        app_name=$(basename "$c_app" .c)
+        app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]')
+        echo "  Compiling C Userland App: $c_app..."
+        rm -f "bin/${app_upper}.BIN" "bin/${app_name}.o"
+
+        "$CC" $LIBC_CFLAGS -c "$c_app" -o "bin/${app_name}.o"
+        $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
+            bin/kernel_syms.ld "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+        rm -f "bin/${app_name}.o"
+
+        if [ -f "bin/${app_upper}.BIN" ]; then
+            sz=$(wc -c < "bin/${app_upper}.BIN")
+            echo "  -> Created C binary: bin/${app_upper}.BIN ($sz bytes)"
+        fi
+    done
+fi
+
 # 10. Format FAT16 partition and package Level 2 drivers, Level 4 apps & configuration
 if command -v python3 &> /dev/null; then
     python3 mkfat16.py bin/os_image.bin
