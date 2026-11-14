@@ -12,5 +12,6 @@ typedef unsigned int   dev_t;
 typedef unsigned int   ino_t;
 typedef unsigned int   nlink_t;
 typedef int            time_t;
+typedef unsigned int   intptr_t;
 
 #endif
