@@ -198,6 +198,8 @@ __asm__(
     "    pushl %esp\n"        // Pass pointer to registers_t as argument
     "    call fault_handler\n"
     "    addl $4, %esp\n"
+    "    movl 32(%esp), %eax\n" // Load updated eax from registers_t.eax (offset 32 from esp)
+    "    movl %eax, 28(%esp)\n" // Store into pusha eax slot (offset 28 from esp: 4 for popped eax + 7 regs)
     "    popl %eax\n"
     "    movw %ax, %ds\n"
     "    movw %ax, %es\n"

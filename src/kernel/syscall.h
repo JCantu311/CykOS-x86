@@ -23,12 +23,16 @@
 #define SYS_FAT_READ      105 // Convenience read file by name
 #define SYS_FAT_WRITE     106 // Convenience write file by name
 #define SYS_FAT_DELETE    107 // Delete file by name
-#define SYS_CYK_MKDIR     108 // Legacy CykOS mkdir(path)
-#define SYS_CYK_RMDIR     109 // Legacy CykOS rmdir(path)
-#define SYS_CYK_CHDIR     110 // Legacy CykOS chdir(path)
-#define SYS_CYK_GETCWD    111 // Legacy CykOS getcwd(buf, max), returns length
+#define SYS_STAT          108 // POSIX stat(path, statbuf)
+#define SYS_FSTAT         109 // POSIX fstat(fd, statbuf)
+#define SYS_CYK_MKDIR     118 // Legacy CykOS mkdir(path)
+#define SYS_CYK_RMDIR     119 // Legacy CykOS rmdir(path)
+#define SYS_CYK_CHDIR     120 // Legacy CykOS chdir(path)
+#define SYS_CYK_GETCWD    121 // Legacy CykOS getcwd(buf, max), returns length
 #define SYS_SBRK          112 // CykOS sbrk(increment) extension
 #define SYS_GETCWD        183 // Linux i386 getcwd(buf, size), returns buf
+#define SYS_SOUND_TONE    184 // CykOS sound_tone(freq, ms)
+#define SYS_SOUND_CHIME   185 // CykOS sound_chime()
 
 // File descriptor constants
 #define FD_STDIN          0

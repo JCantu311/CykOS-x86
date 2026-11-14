@@ -34,4 +34,11 @@ typedef struct {
     char (*get_char)(void);     // Blocking: wait for a printable ASCII keypress
 } cyk_keyboard_driver_t;
 
+// Level 2 Sound Driver Interface Table
+typedef struct {
+    cyk_module_header_t header;
+    void (*tone)(unsigned int frequency, unsigned int milliseconds);
+    void (*chime)(void);
+} cyk_sound_driver_t;
+
 #endif // MODULE_H

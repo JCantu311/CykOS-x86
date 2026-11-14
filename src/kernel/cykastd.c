@@ -237,8 +237,16 @@ void secwait(unsigned int seconds) {
         outb(0x61, (inb(0x61) & 0xFC) | 0x01);
 
         // Poll until Channel 2 output (bit 5 of port 0x61) goes HIGH (with timeout protection)
+        // Also poll channel 2 counter directly in case port 0x61 bit 5 reflection is absent in hypervisors
         unsigned int timeout = 2000000;
-        while (!(inb(0x61) & 0x20) && --timeout);
+        while (--timeout) {
+            if (inb(0x61) & 0x20) break;
+            outb(0x43, 0x80); // Latch counter 2
+            unsigned char low = inb(0x42);
+            unsigned char high = inb(0x42);
+            unsigned short count = (unsigned short)low | ((unsigned short)high << 8);
+            if (count < 100 || count > 59659) break;
+        }
     }
 }
 

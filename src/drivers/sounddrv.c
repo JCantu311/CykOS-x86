@@ -36,11 +36,15 @@ static int sound_init(void) {
 }
 
 __attribute__((section(".header"), used))
-const cyk_module_header_t cyk_sound_driver = {
-    .magic = CYKOS_MODULE_MAGIC,
-    .name = "cysound",
-    .version = 0x00010000,
-    .type = MODULE_TYPE_SOUND,
-    .load_address = MODULE_LOAD_ADDRESS,
-    .init = sound_init,
+const cyk_sound_driver_t cyk_sound_driver = {
+    .header = {
+        .magic = CYKOS_MODULE_MAGIC,
+        .name = "cysound",
+        .version = 0x00010000,
+        .type = MODULE_TYPE_SOUND,
+        .load_address = MODULE_LOAD_ADDRESS,
+        .init = sound_init,
+    },
+    .tone = sound_tone,
+    .chime = sound_chime,
 };

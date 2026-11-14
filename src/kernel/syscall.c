@@ -3,6 +3,7 @@
 #include "cykastd.h"
 #include "vfs.h"
 #include "heap.h"
+#include "modload.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
@@ -411,6 +412,57 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_STAT: {
+            const char* path = (const char*)arg1;
+            unsigned int* statbuf = (unsigned int*)arg2;
+            if (!path || !statbuf) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            vfs_file_t file;
+            if (vfs_find_file(path, &file) != 0) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            memset(statbuf, 0, 64);
+            unsigned int mode = 0644;
+            if (file.attributes & 0x10) {
+                mode = 0040755; // S_IFDIR | rwxr-xr-x
+            } else {
+                mode = 0100644; // S_IFREG | rw-r--r--
+            }
+            statbuf[1] = mode;
+            statbuf[2] = 1; // nlink
+            statbuf[4] = file.size; // size
+            regs->eax = 0;
+            break;
+        }
+
+        case SYS_FSTAT: {
+            int fd = (int)arg1;
+            unsigned int* statbuf = (unsigned int*)arg2;
+            if (!statbuf) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            if (fd >= 0 && fd <= 2) {
+                memset(statbuf, 0, 64);
+                statbuf[1] = 0020666; // S_IFCHR
+                regs->eax = 0;
+                break;
+            }
+            if (fd < 3 || fd >= MAX_FDS || !g_fds[fd].in_use) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            memset(statbuf, 0, 64);
+            statbuf[1] = 0100644; // S_IFREG
+            statbuf[2] = 1;
+            statbuf[4] = g_fds[fd].entry.size;
+            regs->eax = 0;
+            break;
+        }
+
         case SYS_LSEEK: {
             int fd = (int)arg1;
             int offset = (int)arg2;
@@ -438,6 +490,28 @@ static void syscall_handler(registers_t* regs) {
             }
             g_fds[fd].cursor = next;
             regs->eax = next;
+            break;
+        }
+
+        case SYS_SOUND_TONE: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->tone) {
+                snd->tone(arg1, arg2);
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_SOUND_CHIME: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->chime) {
+                snd->chime();
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
             break;
         }
 
