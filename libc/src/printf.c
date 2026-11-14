@@ -197,7 +197,6 @@ int vsprintf(char* str, const char* format, va_list ap) {
 }
 
 int vfprintf(FILE* stream, const char* format, va_list ap) {
-    out_target_t target = { .buf = NULL, .size = 0, .pos = 0, .stream = stream };
     char temp[1024];
     va_list ap_copy;
     va_copy(ap_copy, ap);
