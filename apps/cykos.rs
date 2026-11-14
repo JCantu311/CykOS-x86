@@ -33,6 +33,12 @@ pub const SYS_CYK_GETCWD: u32 = 111;
 pub const SYS_GETCWD: u32     = 183;
 pub const SYS_SOUND_TONE: u32 = 184;
 pub const SYS_SOUND_CHIME: u32 = 185;
+pub const SYS_MSLEEP: u32     = 186;
+pub const SYS_GFX_MODE: u32   = 187;
+pub const SYS_GFX_PUTPIXEL: u32 = 188;
+pub const SYS_GFX_RECT: u32   = 189;
+pub const SYS_GFX_CLEAR: u32  = 190;
+pub const SYS_GFX_FRAMEBUF: u32 = 191;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -216,6 +222,11 @@ pub fn sleep(seconds: u32) {
     unsafe { syscall::syscall1(SYS_SLEEP, seconds); }
 }
 
+/// Sleep for specified milliseconds
+pub fn msleep(milliseconds: u32) {
+    unsafe { syscall::syscall1(SYS_MSLEEP, milliseconds); }
+}
+
 /// Read a file from FAT16 by name into a buffer
 pub fn read_file(filename: &str, buf: &mut [u8]) -> Result<usize, i32> {
     let mut fname_buf = [0u8; 16];
@@ -358,17 +369,53 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// Play a tone using the Level 2 sound driver (or PC speaker fallback)
-pub fn sound_tone(freq: u32, ms: u32) {
+pub fn sound_tone(freq: u32, ms: u32) -> i32 {
     unsafe {
-        syscall::syscall2(SYS_SOUND_TONE, freq, ms);
+        syscall::syscall2(SYS_SOUND_TONE, freq, ms) as i32
     }
 }
 
 /// Play the startup / alert chime using the Level 2 sound driver
-pub fn sound_chime() {
+pub fn sound_chime() -> i32 {
     unsafe {
-        syscall::syscall0(SYS_SOUND_CHIME);
+        syscall::syscall0(SYS_SOUND_CHIME) as i32
     }
+}
+
+// =========================================================================
+// Graphics Display API (Mode 13h: 320x200 256-color)
+// =========================================================================
+
+/// Set display mode (0 = 80x25 text, 1 = 320x200 graphics)
+pub fn gfx_set_mode(mode: i32) -> i32 {
+    unsafe { syscall::syscall1(SYS_GFX_MODE, mode as u32) as i32 }
+}
+
+/// Get current display mode
+pub fn gfx_get_mode() -> i32 {
+    unsafe { syscall::syscall1(SYS_GFX_MODE, 0xFFFFFFFF) as i32 }
+}
+
+/// Plot a single pixel at (x, y) with VGA palette color (0..255)
+pub fn gfx_put_pixel(x: i32, y: i32, color: u8) {
+    unsafe { syscall::syscall3(SYS_GFX_PUTPIXEL, x as u32, y as u32, color as u32); }
+}
+
+/// Fill a rectangle at (x, y, w, h) with color
+pub fn gfx_fill_rect(x: i16, y: i16, w: i16, h: i16, color: u8) {
+    let arg1 = ((x as u32) << 16) | ((y as u16) as u32);
+    let arg2 = ((w as u32) << 16) | ((h as u16) as u32);
+    unsafe { syscall::syscall3(SYS_GFX_RECT, arg1, arg2, color as u32); }
+}
+
+/// Clear the graphics screen with color
+pub fn gfx_clear(color: u8) {
+    unsafe { syscall::syscall1(SYS_GFX_CLEAR, color as u32); }
+}
+
+/// Retrieve raw linear framebuffer pointer (0xA0000 in 320x200 mode)
+pub fn gfx_framebuffer() -> *mut u8 {
+    unsafe { syscall::syscall0(SYS_GFX_FRAMEBUF) as *mut u8 }
 }
 
 // =========================================================================

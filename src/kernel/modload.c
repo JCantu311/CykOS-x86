@@ -3,7 +3,7 @@
 #include "vfs.h"
 #include "cykastd.h"
 
-#define MAX_MODULES         4
+#define MAX_MODULES         8
 #define MODULE_SLOT_SIZE    0x4000    // 16KB per module
 #define MODULE_BASE_ADDR    0x40000   // Level 2 memory base
 
@@ -12,6 +12,7 @@ static unsigned char g_used_slots[MAX_MODULES];
 static int g_loaded_count = 0;
 static cyk_keyboard_driver_t* g_keyboard_driver = (void*)0;
 static cyk_sound_driver_t* g_sound_driver = (void*)0;
+static cyk_display_driver_t* g_display_driver = (void*)0;
 
 // Internal helper to trim whitespace and extract next word
 static const char* parse_next_token(const char* p, char* out_token, int max_len) {
@@ -47,6 +48,7 @@ int modload_load_all(void) {
     memset(g_used_slots, 0, sizeof(g_used_slots));
     g_keyboard_driver = (void*)0;
     g_sound_driver = (void*)0;
+    g_display_driver = (void*)0;
 
     print_string("[MODLOAD] Checking for /BOOT/MODULES.CFG...\n");
 
@@ -145,6 +147,8 @@ int modload_load_all(void) {
             g_keyboard_driver = (cyk_keyboard_driver_t*)header;
         } else if (header->type == MODULE_TYPE_SOUND) {
             g_sound_driver = (cyk_sound_driver_t*)header;
+        } else if (header->type == MODULE_TYPE_DISPLAY) {
+            g_display_driver = (cyk_display_driver_t*)header;
         }
 
         g_loaded_modules[g_loaded_count] = header;
@@ -164,6 +168,10 @@ cyk_keyboard_driver_t* modload_get_keyboard_driver(void) {
 
 cyk_sound_driver_t* modload_get_sound_driver(void) {
     return g_sound_driver;
+}
+
+cyk_display_driver_t* modload_get_display_driver(void) {
+    return g_display_driver;
 }
 
 cyk_module_header_t* modload_find_module(const char* name) {

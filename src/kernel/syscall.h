@@ -33,6 +33,12 @@
 #define SYS_GETCWD        183 // Linux i386 getcwd(buf, size), returns buf
 #define SYS_SOUND_TONE    184 // CykOS sound_tone(freq, ms)
 #define SYS_SOUND_CHIME   185 // CykOS sound_chime()
+#define SYS_MSLEEP        186 // CykOS msecwait(ms)
+#define SYS_GFX_MODE      187 // CykOS gfx set/get mode (arg1: -1 = get, 0 = text, 1 = 320x200 graphics)
+#define SYS_GFX_PUTPIXEL  188 // CykOS gfx put pixel (arg1 = x, arg2 = y, arg3 = color)
+#define SYS_GFX_RECT      189 // CykOS gfx fill rect (arg1 = packed (x<<16)|y, arg2 = packed (w<<16)|h, arg3 = color)
+#define SYS_GFX_CLEAR     190 // CykOS gfx clear screen (arg1 = color)
+#define SYS_GFX_FRAMEBUF  191 // CykOS gfx get framebuffer pointer (returns 0xA0000 in graphics mode)
 
 // File descriptor constants
 #define FD_STDIN          0

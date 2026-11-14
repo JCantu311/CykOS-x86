@@ -1,7 +1,37 @@
 #include "cykastd.h"
 #include "modload.h"
+#include "vfs.h"
 
 #define CONSOLE_COLOR VGA_WHITE
+
+#define BOOT_LOG_CAPACITY 2048
+static char g_boot_log_buf[BOOT_LOG_CAPACITY];
+static unsigned int g_boot_log_len = 0;
+static int g_boot_log_enabled = 1;
+
+void bootlog_append_char(char c) {
+    if (!g_boot_log_enabled) return;
+    if (g_boot_log_len + 1 < BOOT_LOG_CAPACITY) {
+        g_boot_log_buf[g_boot_log_len++] = c;
+    }
+}
+
+void bootlog_append_string(const char* str) {
+    if (!str || !g_boot_log_enabled) return;
+    while (*str) {
+        bootlog_append_char(*str++);
+    }
+}
+
+void bootlog_disable(void) {
+    g_boot_log_enabled = 0;
+}
+
+void bootlog_flush(const char* filepath) {
+    if (!filepath || g_boot_log_len == 0) return;
+    g_boot_log_buf[g_boot_log_len] = '\0';
+    vfs_write_file(filepath, g_boot_log_buf, g_boot_log_len);
+}
 
 static int cursor_x = 0;
 static int cursor_y = 0;
@@ -75,6 +105,7 @@ static void scroll_screen(void) {
 }
 
 void print_char(char c) {
+    bootlog_append_char(c);
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
 
     if (c == '\n') {
@@ -113,6 +144,7 @@ void print_string(const char* str) {
 
 void print_color_string(const char* str, unsigned char txt_color) {
     if (!str) return;
+    bootlog_append_string(str);
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short full_char = (unsigned short)txt_color << 8;
     const char* p = str;
@@ -217,37 +249,22 @@ void rust_begin_unwind(void) {
     }
 }
 
-void secwait(unsigned int seconds) {
-    // PIT Channel 2 polling-based delay (no interrupts needed)
-    // PIT oscillator: 1,193,182 Hz
-    // Count = 59659 ticks per round ≈ 50ms, so 20 rounds ≈ 1 second
-    unsigned int total_rounds = seconds * 20;
-
-    for (unsigned int i = 0; i < total_rounds; i++) {
-        // Disable Channel 2 gate to reset timer, keep speaker off
-        outb(0x61, inb(0x61) & 0xFC);
-
-        // Program PIT Channel 2: mode 0, access lobyte/hibyte, binary count
-        outb(0x43, 0xB0);
-        // Load count value 59659 (0xE90B) for ~50ms intervals
-        outb(0x42, 0x0B);  // Low byte
-        outb(0x42, 0xE9);  // High byte
-
-        // Enable gate (bit 0) to start countdown, speaker remains off
-        outb(0x61, (inb(0x61) & 0xFC) | 0x01);
-
-        // Poll until Channel 2 output (bit 5 of port 0x61) goes HIGH (with timeout protection)
-        // Also poll channel 2 counter directly in case port 0x61 bit 5 reflection is absent in hypervisors
-        unsigned int timeout = 2000000;
-        while (--timeout) {
-            if (inb(0x61) & 0x20) break;
-            outb(0x43, 0x80); // Latch counter 2
-            unsigned char low = inb(0x42);
-            unsigned char high = inb(0x42);
-            unsigned short count = (unsigned short)low | ((unsigned short)high << 8);
-            if (count < 100 || count > 59659) break;
+void msecwait(unsigned int milliseconds) {
+    if (milliseconds == 0) return;
+    // Calibrated delay:
+    // Each inb(0x80) on modern QEMU takes ~0.1 - 0.2 microseconds,
+    // and compiler loop overhead is minimal.
+    // 5,000 inb(0x80) reads reliably approximates 1-2 milliseconds across hypervisors
+    // without resetting or stopping PIT Channel 2 on Port 0x61.
+    for (unsigned int i = 0; i < milliseconds; i++) {
+        for (unsigned int j = 0; j < 5000; j++) {
+            asm volatile("inb $0x80, %%al" : : : "eax");
         }
     }
+}
+
+void secwait(unsigned int seconds) {
+    msecwait(seconds * 1000);
 }
 
 unsigned char inb(unsigned short port) {
@@ -270,6 +287,16 @@ unsigned short inw(unsigned short port) {
 // Write a 16-bit word to an I/O port
 void outw(unsigned short port, unsigned short data) {
     asm volatile("outw %0, %1" :: "a"(data), "Nd"(port));
+}
+
+unsigned int inl(unsigned short port) {
+    unsigned int result;
+    asm volatile("inl %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+void outl(unsigned short port, unsigned int data) {
+    asm volatile("outl %0, %1" :: "a"(data), "Nd"(port));
 }
 
 // Keyboard Hardware Interface Functions (Delegates to loaded Level 2 Keyboard Driver)
@@ -305,6 +332,7 @@ static const char fallback_scancode_normal[128] = {
 };
 
 static int g_fallback_extended = 0;
+static int g_fallback_ctrl = 0;
 
 char scancode_to_ascii(unsigned char scancode) {
     cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
@@ -319,10 +347,18 @@ char scancode_to_ascii(unsigned char scancode) {
         return 0;
     }
     if (scancode & 0x80) {
+        unsigned char released = scancode & 0x7F;
+        if (released == 0x1D) {
+            g_fallback_ctrl = 0;
+        }
         g_fallback_extended = 0;
         return 0; // Key release
     }
     g_fallback_extended = 0;
+    if (scancode == 0x1D) {
+        g_fallback_ctrl = 1;
+        return 0;
+    }
     switch (scancode) {
         case 0x48: return KEY_UP;
         case 0x50: return KEY_DOWN;
@@ -337,6 +373,9 @@ char scancode_to_ascii(unsigned char scancode) {
         default: break;
     }
     if (scancode < 128) {
+        if (g_fallback_ctrl && scancode == 0x2E) {
+            return 0x03; // Ctrl+C
+        }
         return fallback_scancode_normal[scancode];
     }
     return 0;

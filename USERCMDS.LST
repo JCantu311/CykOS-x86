@@ -6,3 +6,7 @@ vi       /USR/BIN/EDIT.BIN
 hello    /USR/BIN/HELLO.BIN
 sysdemo  /USR/BIN/SYSDEMO.BIN
 posixtest /USR/BIN/POSIXTEST.BIN
+cykis    /USR/BIN/CYKIS.BIN
+tetris   /USR/BIN/CYKIS.BIN
+soundtest /USR/BIN/SOUNDTEST.BIN
+gfxdemo  /USR/BIN/GFXDEMO.BIN

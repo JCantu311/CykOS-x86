@@ -41,4 +41,16 @@ typedef struct {
     void (*chime)(void);
 } cyk_sound_driver_t;
 
+// Level 2 Display / Graphics Driver Interface Table
+typedef struct {
+    cyk_module_header_t header;
+    int (*set_mode)(int mode); // 0 = 80x25 text, 1 = 320x200 256-color graphics
+    int (*get_mode)(void);     // Returns current mode (0 or 1)
+    void (*put_pixel)(int x, int y, unsigned char color);
+    void (*fill_rect)(int x, int y, int w, int h, unsigned char color);
+    void (*clear)(unsigned char color);
+    void (*draw_bitmap)(int x, int y, int w, int h, const unsigned char* data);
+    unsigned char* (*get_framebuffer)(void);
+} cyk_display_driver_t;
+
 #endif // MODULE_H

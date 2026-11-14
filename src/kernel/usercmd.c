@@ -2,6 +2,7 @@
 #include "vfs.h"
 #include "cykastd.h"
 #include "syscall.h"
+#include "modload.h"
 
 #define USERCMDS_FILE     "/ETC/USERCMDS.LST"
 #define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
@@ -12,6 +13,10 @@
 #define USER_APP_BASE     0x50000   // Conventional user application memory base
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
 #define USER_PATH_MAX     64
+
+static volatile int g_usercmd_active = 0;
+static unsigned int g_usercmd_saved_esp = 0;
+static unsigned int g_usercmd_saved_ebp = 0;
 
 // Internal helper to convert character to uppercase
 static char uc(char c) {
@@ -293,18 +298,55 @@ int exec_user_command(const char* cmd_name, const char* args) {
     }
     s_argv[argc] = (void*)0; // NULL termination
 
-    if (!syscall_pipe_active()) {
-        print_string("[CykShell] Launching ");
-        print_string(target_file);
-        print_string("...\n");
-    }
+    // Prepare execution context frame for SYS_EXIT / Ctrl+C jump
+    volatile int app_ret = 0;
+    static unsigned int saved_esp;
+    static unsigned int saved_ebp;
+
+    g_usercmd_active = 1;
+
+    asm volatile(
+        "movl %%esp, %0\n"
+        "movl %%ebp, %1\n"
+        : "=m"(saved_esp), "=m"(saved_ebp)
+    );
+    g_usercmd_saved_esp = saved_esp;
+    g_usercmd_saved_ebp = saved_ebp;
 
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
     app_main_fn entry = (app_main_fn)dest;
-    entry(argc, s_argv);
+    app_ret = entry(argc, s_argv);
+
+    asm volatile("usercmd_return_label:\n");
+    g_usercmd_active = 0;
+    (void)app_ret;
 
     return 1;
+}
+
+void usercmd_terminate(int exit_code) {
+    if (!g_usercmd_active) return;
+    g_usercmd_active = 0;
+    (void)exit_code;
+
+    // If a graphics mode was left active, reset back to text mode (Mode 03h)
+    cyk_display_driver_t* dpy = modload_get_display_driver();
+    if (dpy && dpy->get_mode && dpy->get_mode() != 0) {
+        dpy->set_mode(0);
+    }
+
+    asm volatile(
+        "movl %0, %%esp\n"
+        "movl %1, %%ebp\n"
+        "jmp usercmd_return_label\n"
+        :
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+    );
+}
+
+int usercmd_is_running(void) {
+    return g_usercmd_active;
 }
 
 int exec_shell_binary(void) {

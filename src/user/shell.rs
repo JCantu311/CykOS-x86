@@ -693,37 +693,61 @@ fn cmd_pwd(_args: &[u8]) {
 // Built-in Command: ls (Linux-style compact directory listing)
 // =========================================================================
 
+static mut LS_COL_OFFSET: usize = 0;
+
 extern "C" fn ls_entry_callback(name_ptr: *const u8, _size: u32, is_dir: u8) {
     if name_ptr.is_null() {
         return;
     }
 
     unsafe {
+        let mut name_len = 0;
+        while *name_ptr.add(name_len) != 0 && name_len < 13 {
+            name_len += 1;
+        }
+
+        // Each entry occupies its display width (name + 1 for trailing '/' if dir) + 2 spaces padding
+        let entry_width = name_len + (if is_dir != 0 { 1 } else { 0 });
+        let total_needed = entry_width + 2;
+
+        // If printing this entry would exceed screen width (80 columns), wrap to new line
+        if LS_COL_OFFSET > 0 && LS_COL_OFFSET + total_needed > 80 {
+            print_char(b'\n');
+            LS_COL_OFFSET = 0;
+        }
+
         if is_dir != 0 {
             // Print directory name in green with trailing /
-            let mut len = 0;
-            while *name_ptr.add(len) != 0 && len < 13 {
-                let pair = [*name_ptr.add(len), 0];
+            let mut i = 0;
+            while i < name_len {
+                let pair = [*name_ptr.add(i), 0];
                 print_color_string(pair.as_ptr(), 0x0A);
-                len += 1;
+                i += 1;
             }
             let slash = [b'/', 0];
             print_color_string(slash.as_ptr(), 0x0A);
         } else {
-            let mut len = 0;
-            while *name_ptr.add(len) != 0 && len < 13 {
-                print_char(*name_ptr.add(len));
-                len += 1;
+            let mut i = 0;
+            while i < name_len {
+                print_char(*name_ptr.add(i));
+                i += 1;
             }
         }
-        print_char(b'\n');
+
+        // Add 2 spaces between columns
+        print_char(b' ');
+        print_char(b' ');
+        LS_COL_OFFSET += total_needed;
     }
 }
 
 fn cmd_ls(_args: &[u8]) {
     unsafe {
+        LS_COL_OFFSET = 0;
         if vfs_list_directory(core::ptr::null(), ls_entry_callback) < 0 {
             puts(b"ls: directory read failed\n");
+        } else if LS_COL_OFFSET > 0 {
+            print_char(b'\n');
         }
     }
 }
@@ -1028,6 +1052,102 @@ fn cmd_less(args: &[u8]) {
     unsafe { clear_screen(); }
 }
 
+// =========================================================================
+// Built-in Command: cat (Concatenate and print files / standard input)
+// =========================================================================
+
+fn cmd_cat(args: &[u8]) {
+    let trimmed = trim_slice(args);
+
+    if trimmed.is_empty() {
+        // Read from pipe if active, otherwise interactive stdin until Ctrl+C or Ctrl+D (EOF / 0x04)
+        unsafe {
+            let bytes_read = syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768);
+            if bytes_read > 0 {
+                let total = bytes_read as usize;
+                for i in 0..total {
+                    print_char(SHELL_FILE_BUF[i]);
+                }
+                return;
+            }
+
+            // Interactive mode: read characters from keyboard and echo them
+            loop {
+                let c = get_char();
+                if c == 0x03 || c == 0x04 { // Ctrl+C or Ctrl+D (EOF)
+                    if c == 0x03 {
+                        puts(b"^C\n");
+                    }
+                    break;
+                }
+                print_char(c);
+            }
+        }
+        return;
+    }
+
+    // Split args into multiple filenames separated by space
+    let mut offset = 0;
+    while offset < trimmed.len() {
+        while offset < trimmed.len() && (trimmed[offset] == b' ' || trimmed[offset] == b'\t') {
+            offset += 1;
+        }
+        if offset >= trimmed.len() {
+            break;
+        }
+
+        let start = offset;
+        while offset < trimmed.len() && trimmed[offset] != b' ' && trimmed[offset] != b'\t' {
+            offset += 1;
+        }
+        let file_arg = &trimmed[start..offset];
+
+        if bytes_eq(file_arg, b"-") {
+            // Read from standard input / pipe
+            unsafe {
+                let bytes_read = syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768);
+                if bytes_read > 0 {
+                    let total = bytes_read as usize;
+                    for i in 0..total {
+                        print_char(SHELL_FILE_BUF[i]);
+                    }
+                } else {
+                    loop {
+                        let c = get_char();
+                        if c == 0x03 || c == 0x04 {
+                            if c == 0x03 { puts(b"^C\n"); }
+                            break;
+                        }
+                        print_char(c);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let mut fname_buf = [0u8; 64];
+        let len = if file_arg.len() < 63 { file_arg.len() } else { 63 };
+        for i in 0..len {
+            fname_buf[i] = file_arg[i];
+        }
+        fname_buf[len] = 0;
+
+        unsafe {
+            let bytes_read = vfs_read_file_by_name(fname_buf.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
+            if bytes_read < 0 {
+                puts(b"cat: ");
+                puts(file_arg);
+                puts(b": No such file or directory\n");
+            } else {
+                let total = bytes_read as usize;
+                for i in 0..total {
+                    print_char(SHELL_FILE_BUF[i]);
+                }
+            }
+        }
+    }
+}
+
 // Built-in Command: help
 fn cmd_help(_args: &[u8]) {
     puts(b"\nAvailable CykShell Commands:\n");
@@ -1254,6 +1374,16 @@ pub static COMMANDS: &[Command] = &[
         name: b"LESS",
         description: b"",
         handler: cmd_less,
+    },
+    Command {
+        name: b"cat",
+        description: b"Concatenate and print files (e.g. cat file.txt)",
+        handler: cmd_cat,
+    },
+    Command {
+        name: b"CAT",
+        description: b"",
+        handler: cmd_cat,
     },
     // Future user applications or additional built-ins can be registered here!
 ];
@@ -1526,6 +1656,9 @@ const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"pwd",
     b"ls",
     b"less",
+    b"cat",
+    b"soundtest",
+    b"gfxdemo",
 ];
 
 #[no_mangle]
@@ -1561,7 +1694,12 @@ pub extern "C" fn shell_main() -> ! {
         loop {
             let c = unsafe { get_char() };
 
-            if c == b'\n' || c == b'\r' {
+            if c == 0x03 { // Ctrl+C
+                puts(b"^C\n");
+                line_len = 0;
+                cursor_pos = 0;
+                break;
+            } else if c == b'\n' || c == b'\r' {
                 unsafe { print_char(b'\n'); }
                 break;
             } else if c == KEY_LEFT {

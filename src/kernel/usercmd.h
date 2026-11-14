@@ -25,4 +25,8 @@ int exec_shell_binary(void);
  */
 void list_user_commands(void);
 
+// Userland execution context helpers for SYS_EXIT and Ctrl+C abort
+void usercmd_terminate(int exit_code);
+int usercmd_is_running(void);
+
 #endif // USERCMD_H

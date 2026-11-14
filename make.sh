@@ -50,6 +50,7 @@ nasm -f elf32 src/boot/boot.s -o bin/boot.o
 COMMON_CFLAGS="-m32 -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers"
 
 # 4. Compile Level 1 Kernel components
+echo "Compiling Level 1 Kernel components..."
 for source in src/kernel/*.c src/storage/*.c; do
     name=$(basename "$source" .c)
     "$CC" $COMMON_CFLAGS -c "$source" -o "bin/${name}.o"

@@ -17,6 +17,7 @@ static inline void kbd_outb(unsigned short port, unsigned char data) {
 
 // Internal modifier states
 static int g_shift_state = 0;
+static int g_ctrl_state = 0;
 static int g_caps_lock = 0;
 static int g_extended = 0;
 
@@ -85,6 +86,9 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
         if (released == 0x2A || released == 0x36) { // Left or Right Shift release
             g_shift_state = 0;
         }
+        if (released == 0x1D) { // Left or Right Ctrl release
+            g_ctrl_state = 0;
+        }
         g_extended = 0;
         return 0;
     }
@@ -94,6 +98,11 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
 
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift press
         g_shift_state = 1;
+        return 0;
+    }
+
+    if (scancode == 0x1D) { // Left or Right Ctrl press
+        g_ctrl_state = 1;
         return 0;
     }
 
@@ -119,6 +128,12 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
 
     if (scancode >= 128) {
         return 0;
+    }
+
+    if (g_ctrl_state) {
+        if (scancode == 0x2E) { // 'c' / 'C'
+            return 0x03;        // ETX (Ctrl+C)
+        }
     }
 
     char normal_c = scancode_normal[scancode];
@@ -154,6 +169,7 @@ static int keyboard_init(void) {
 
     // 2. Reset internal states
     g_shift_state = 0;
+    g_ctrl_state = 0;
     g_caps_lock = 0;
     g_extended = 0;
 

@@ -12,6 +12,9 @@ cyk_keyboard_driver_t* modload_get_keyboard_driver(void);
 // Retrieve registered Level 2 sound driver (returns NULL if not loaded)
 cyk_sound_driver_t* modload_get_sound_driver(void);
 
+// Retrieve registered Level 2 display driver (returns NULL if not loaded)
+cyk_display_driver_t* modload_get_display_driver(void);
+
 // Retrieve a loaded module by its registered name
 cyk_module_header_t* modload_find_module(const char* name);
 

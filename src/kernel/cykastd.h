@@ -35,8 +35,11 @@ unsigned char inb(unsigned short port);
 void outb(unsigned short port, unsigned char data);
 unsigned short inw(unsigned short port);
 void outw(unsigned short port, unsigned short data);
+unsigned int inl(unsigned short port);
+void outl(unsigned short port, unsigned int data);
 
 void secwait(unsigned int seconds);
+void msecwait(unsigned int milliseconds);
 
 // Navigation & Special Key Codes (0x80 - 0x89)
 #define KEY_UP       ((char)0x80)
@@ -61,5 +64,11 @@ void* malloc(size_t size);
 void  free(void* ptr);
 void* realloc(void* ptr, size_t size);
 void* calloc(size_t num, size_t size);
+
+// Boot Logging System
+void bootlog_append_char(char c);
+void bootlog_append_string(const char* str);
+void bootlog_flush(const char* filepath);
+void bootlog_disable(void);
 
 #endif // CYKASTD_H

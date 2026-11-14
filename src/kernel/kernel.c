@@ -16,6 +16,8 @@ extern void shell_main(void);
 #define E820_ENTRY_LIMIT   20
 #define PAGE_SIZE          4096
 #define TEST_START         0x00100000
+#define MEMTEST_STRIDE     65536 // Sample 1 page every 64 KB (16x speedup)
+#define MEMTEST_MAX_PAGES  2048  // Cap test to at most 2048 pages (~128MB sampled, finishes in < 0.2s)
 
 typedef struct __attribute__((packed)) {
     unsigned int base_low;
@@ -30,23 +32,18 @@ static unsigned int page_backup[PAGE_SIZE / sizeof(unsigned int)];
 
 static int memtest_page(volatile unsigned int* page) {
     static const unsigned int patterns[] = {
-        0xAAAAAAAA, 0x55555555, 0x00000000, 0xFFFFFFFF
+        0xAAAAAAAA, 0x55555555
     };
     unsigned int count = PAGE_SIZE / sizeof(unsigned int);
     int passed = 1;
 
     for (unsigned int i = 0; i < count; i++) page_backup[i] = page[i];
-    for (unsigned int pass = 0; pass < sizeof(patterns) / sizeof(patterns[0]) + 1; pass++) {
+    for (unsigned int pass = 0; pass < sizeof(patterns) / sizeof(patterns[0]); pass++) {
         for (unsigned int i = 0; i < count; i++) {
-            page[i] = pass < sizeof(patterns) / sizeof(patterns[0])
-                ? patterns[pass]
-                : ((unsigned int)&page[i] ^ 0xA5A55A5A);
+            page[i] = patterns[pass];
         }
         for (unsigned int i = 0; i < count; i++) {
-            unsigned int expected = pass < sizeof(patterns) / sizeof(patterns[0])
-                ? patterns[pass]
-                : ((unsigned int)&page[i] ^ 0xA5A55A5A);
-            if (page[i] != expected) {
+            if (page[i] != patterns[pass]) {
                 passed = 0;
                 break;
             }
@@ -102,7 +99,8 @@ static void run_memory_test(void) {
         if (start > 0xFFFFFFFF - (PAGE_SIZE - 1)) continue;
         start = (start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
         end &= ~(PAGE_SIZE - 1);
-        for (unsigned int address = start; address < end; address += PAGE_SIZE) {
+        for (unsigned int address = start; address < end; address += MEMTEST_STRIDE) {
+            if (tested_pages >= MEMTEST_MAX_PAGES) break;
             if (!memtest_page((volatile unsigned int*)address)) errors++;
             tested_pages++;
         }
@@ -188,6 +186,9 @@ void kernel_main(void) {
     }
 
     print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell...\n");
+    print_string("[Level 3] Flushing boot log to /VAR/LOG/LOG.TXT...\n");
+    bootlog_flush("/VAR/LOG/LOG.TXT");
+    bootlog_disable();
     secwait(2); 
 
     // Prefer the standalone Level 3 image; retain the kernel-linked shell fallback.

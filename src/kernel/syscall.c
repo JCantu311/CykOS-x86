@@ -4,6 +4,7 @@
 #include "vfs.h"
 #include "heap.h"
 #include "modload.h"
+#include "usercmd.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
@@ -117,6 +118,9 @@ static void syscall_handler(registers_t* regs) {
             // arg1 = exit code
             // Return exit code in eax
             regs->eax = arg1;
+            if (usercmd_is_running()) {
+                usercmd_terminate((int)arg1);
+            }
             break;
         }
 
@@ -208,13 +212,23 @@ static void syscall_handler(registers_t* regs) {
                     size_t read_bytes = 0;
                     while (read_bytes < count) {
                         char c = get_char();
+                        if (c == 0x03) { // Ctrl+C
+                            print_string("^C\n");
+                            if (usercmd_is_running()) {
+                                usercmd_terminate(130);
+                            }
+                            regs->eax = (unsigned int)-1;
+                            break;
+                        }
                         buf[read_bytes++] = c;
                         print_char(c); // Echo character
                         if (c == '\n' || c == '\r') {
                             break;
                         }
                     }
-                    regs->eax = (unsigned int)read_bytes;
+                    if (regs->eax != (unsigned int)-1) {
+                        regs->eax = (unsigned int)read_bytes;
+                    }
                 }
             } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
                 (g_fds[fd].flags & OPEN_ACCMODE) != OPEN_WRONLY) {
@@ -334,6 +348,12 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_GET_KEY: {
             char c = get_char();
+            if (c == 0x03) { // Ctrl+C
+                print_string("^C\n");
+                if (usercmd_is_running()) {
+                    usercmd_terminate(130);
+                }
+            }
             regs->eax = (unsigned char)c;
             break;
         }
@@ -345,6 +365,12 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_SLEEP: {
             secwait(arg1);
+            regs->eax = 0;
+            break;
+        }
+
+        case SYS_MSLEEP: {
+            msecwait(arg1);
             regs->eax = 0;
             break;
         }
@@ -498,6 +524,17 @@ static void syscall_handler(registers_t* regs) {
             if (snd && snd->tone) {
                 snd->tone(arg1, arg2);
                 regs->eax = 0;
+            } else if (arg1 > 0 && arg2 > 0) {
+                // Kernel fallback PC speaker driver
+                unsigned int divisor = 1193182U / arg1;
+                if (divisor == 0 || divisor > 0xFFFF) divisor = 0xFFFF;
+                outb(0x43, 0xB6);
+                outb(0x42, (unsigned char)(divisor & 0xFF));
+                outb(0x42, (unsigned char)(divisor >> 8));
+                outb(0x61, (unsigned char)(inb(0x61) | 0x03));
+                msecwait(arg2);
+                outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
+                regs->eax = 0;
             } else {
                 regs->eax = (unsigned int)-1;
             }
@@ -510,7 +547,82 @@ static void syscall_handler(registers_t* regs) {
                 snd->chime();
                 regs->eax = 0;
             } else {
+                // Kernel fallback chime: 784 Hz (180ms) then 988 Hz (240ms)
+                unsigned int d1 = 1193182U / 784;
+                outb(0x43, 0xB6);
+                outb(0x42, (unsigned char)(d1 & 0xFF));
+                outb(0x42, (unsigned char)(d1 >> 8));
+                outb(0x61, (unsigned char)(inb(0x61) | 0x03));
+                msecwait(180);
+                outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
+                msecwait(60);
+                unsigned int d2 = 1193182U / 988;
+                outb(0x43, 0xB6);
+                outb(0x42, (unsigned char)(d2 & 0xFF));
+                outb(0x42, (unsigned char)(d2 >> 8));
+                outb(0x61, (unsigned char)(inb(0x61) | 0x03));
+                msecwait(240);
+                outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
+                regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_GFX_MODE: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (!dpy) {
                 regs->eax = (unsigned int)-1;
+            } else if ((int)arg1 == -1) {
+                regs->eax = (unsigned int)dpy->get_mode();
+            } else {
+                regs->eax = (unsigned int)dpy->set_mode((int)arg1);
+            }
+            break;
+        }
+
+        case SYS_GFX_PUTPIXEL: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->put_pixel) {
+                dpy->put_pixel((int)arg1, (int)arg2, (unsigned char)arg3);
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_GFX_RECT: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->fill_rect) {
+                int x = (int)((short)(arg1 >> 16));
+                int y = (int)((short)(arg1 & 0xFFFF));
+                int w = (int)((short)(arg2 >> 16));
+                int h = (int)((short)(arg2 & 0xFFFF));
+                dpy->fill_rect(x, y, w, h, (unsigned char)arg3);
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_GFX_CLEAR: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->clear) {
+                dpy->clear((unsigned char)arg1);
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_GFX_FRAMEBUF: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->get_framebuffer) {
+                regs->eax = (unsigned int)dpy->get_framebuffer();
+            } else {
+                regs->eax = 0;
             }
             break;
         }
