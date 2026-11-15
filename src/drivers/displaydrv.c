@@ -19,17 +19,9 @@
 #define MODE_320_WIDTH      320
 #define MODE_320_HEIGHT     200
 #define MODE_320_BYTES      (MODE_320_WIDTH * MODE_320_HEIGHT)
-#define VBE_MODE_INFO       ((volatile unsigned char*)0x7200)
-#define VBE_FB_ADDR         ((volatile unsigned char*)0x7228)
-
-extern int vbe_set_display_mode(int mode);
 
 static int g_current_mode;
 static int g_cached_set_reset = -1;
-static volatile unsigned char* g_linear_framebuffer;
-static unsigned int g_linear_pitch;
-static unsigned int g_linear_width;
-static unsigned int g_linear_height;
 static const unsigned char g_vga_palette[16][3] = {
     {0,0,0}, {0,0,170}, {0,170,0}, {0,170,170},
     {170,0,0}, {170,0,170}, {170,85,0}, {170,170,170},
@@ -191,9 +183,20 @@ static unsigned char rgb_to_332(unsigned char r, unsigned char g, unsigned char 
     return (unsigned char)((r & 0xE0) | ((g >> 3) & 0x1C) | (b >> 6));
 }
 
+static void set_vga16_palette(void) {
+    outb(0x3C8, 0);
+    for (unsigned int index = 0; index < 16; index++) {
+        outb(0x3C9, (unsigned char)(((unsigned int)g_vga_palette[index][0] * 63u + 127u) / 255u));
+        outb(0x3C9, (unsigned char)(((unsigned int)g_vga_palette[index][1] * 63u + 127u) / 255u));
+        outb(0x3C9, (unsigned char)(((unsigned int)g_vga_palette[index][2] * 63u + 127u) / 255u));
+    }
+}
+
 static int gfx_set_palette(unsigned int first, unsigned int count, const unsigned char* rgb8) {
-    if ((g_current_mode != 1 && g_current_mode != 2) || !rgb8 ||
-        count == 0 || first >= 256 || count > 256 - first) return -1;
+    unsigned int palette_size = g_current_mode == 1 ? 16 :
+                                g_current_mode == 2 ? 256 : 0;
+    if (!palette_size || !rgb8 || count == 0 || first >= palette_size ||
+        count > palette_size - first) return -1;
     outb(0x3C8, (unsigned char)first);
     for (unsigned int i = 0; i < count * 3; i++)
         outb(0x3C9, (unsigned char)(((unsigned int)rgb8[i] * 63u + 127u) / 255u));
@@ -245,7 +248,7 @@ static void bitmap_pixel_rgb(const unsigned char* p, unsigned int format,
 
 static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
     int bytes_per_pixel;
-    if ((g_current_mode != 1 && g_current_mode != 2 && g_current_mode != 3) ||
+    if ((g_current_mode != 1 && g_current_mode != 2) ||
         !bitmap || !bitmap->pixels ||
         bitmap->width == 0 || bitmap->height == 0 ||
         bitmap->width > 4096 || bitmap->height > 4096) return -1;
@@ -256,10 +259,8 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
 
     for (unsigned int row = 0; row < bitmap->height; row++) {
         int dst_y = y + (int)row;
-        int target_width = g_current_mode == 3 ? MODE_640_WIDTH :
-                           g_current_mode == 1 ? (int)g_linear_width : MODE_320_WIDTH;
-        int target_height = g_current_mode == 3 ? MODE_640_HEIGHT :
-                            g_current_mode == 1 ? (int)g_linear_height : MODE_320_HEIGHT;
+        int target_width = g_current_mode == 1 ? MODE_640_WIDTH : MODE_320_WIDTH;
+        int target_height = g_current_mode == 1 ? MODE_640_HEIGHT : MODE_320_HEIGHT;
         if (dst_y < 0 || dst_y >= target_height) continue;
         const unsigned char* src = bitmap->pixels + row * bitmap->stride;
         for (unsigned int col = 0; col < bitmap->width; col++) {
@@ -279,15 +280,13 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
                     src[col * bytes_per_pixel + 3] != 255) {
                     unsigned char alpha = src[col * bytes_per_pixel + 3];
                     unsigned char destination[3];
-                    if (g_current_mode == 3) {
+                    if (g_current_mode == 1) {
                         unsigned char old = planar_get_pixel(dst_x, dst_y);
                         destination[0] = g_vga_palette[old][0];
                         destination[1] = g_vga_palette[old][1];
                         destination[2] = g_vga_palette[old][2];
                     } else {
-                        unsigned char old = g_current_mode == 1
-                            ? g_linear_framebuffer[dst_y * g_linear_pitch + dst_x]
-                            : VGA_GFX_ADDR[dst_y * MODE_320_WIDTH + dst_x];
+                        unsigned char old = VGA_GFX_ADDR[dst_y * MODE_320_WIDTH + dst_x];
                         destination[0] = (unsigned char)(((old >> 5) & 7) * 255 / 7);
                         destination[1] = (unsigned char)(((old >> 2) & 7) * 255 / 7);
                         destination[2] = (unsigned char)((old & 3) * 255 / 3);
@@ -296,10 +295,9 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
                     g = blend_channel(src[col * bytes_per_pixel + 1], destination[1], alpha);
                     b = blend_channel(src[col * bytes_per_pixel + 2], destination[2], alpha);
                 }
-                color = g_current_mode == 3 ? rgb_to_vga16(r, g, b) : rgb_to_332(r, g, b);
+                color = g_current_mode == 1 ? rgb_to_vga16(r, g, b) : rgb_to_332(r, g, b);
             }
-            if (g_current_mode == 3) planar_put_pixel(dst_x, dst_y, color);
-            else if (g_current_mode == 1) g_linear_framebuffer[dst_y * g_linear_pitch + dst_x] = color;
+            if (g_current_mode == 1) planar_put_pixel(dst_x, dst_y, color);
             else VGA_GFX_ADDR[dst_y * MODE_320_WIDTH + dst_x] = color;
         }
     }
@@ -321,8 +319,6 @@ static void gfx_draw_bitmap(int x, int y, int w, int h, const unsigned char* dat
 
 static void gfx_clear(unsigned char color) {
     if (g_current_mode == 1) {
-        memset((void*)g_linear_framebuffer, color, g_linear_pitch * g_linear_height);
-    } else if (g_current_mode == 3) {
         planar_set_reset(color);
         outb(VGA_GC_INDEX, 0x08);
         outb(VGA_GC_DATA, 0xFF);
@@ -339,50 +335,29 @@ static void gfx_clear(unsigned char color) {
 }
 
 static int gfx_set_mode(int mode) {
-    if (mode == 1) {
-        if (vbe_set_display_mode(1)) {
-            unsigned int fb = *(volatile unsigned int*)VBE_FB_ADDR;
-            unsigned int pitch = *(volatile unsigned short*)(VBE_MODE_INFO + 16);
-            unsigned int width = *(volatile unsigned short*)(VBE_MODE_INFO + 18);
-            unsigned int height = *(volatile unsigned short*)(VBE_MODE_INFO + 20);
-            if (fb && pitch >= width && width == MODE_640_WIDTH && height == MODE_640_HEIGHT) {
-                g_linear_framebuffer = (volatile unsigned char*)fb;
-                g_linear_pitch = pitch;
-                g_linear_width = width;
-                g_linear_height = height;
-                g_current_mode = 1;
-                set_rgb332_palette();
-                gfx_clear(0);
-                return 0;
-            }
-        }
+    if (mode == 1 || mode == 3) {
+        // Standard VGA mode 12h: 640x480, 16 colors, four planar bitplanes.
         write_vga_registers(g_mode12_regs);
-        g_current_mode = 3;
-        g_linear_framebuffer = (volatile unsigned char*)0;
+        set_vga16_palette();
+        g_current_mode = 1;
         gfx_clear(0);
-        return -2;
+        return 0;
     }
     if (mode == 2) {
-        (void)vbe_set_display_mode(2);
+        // Standard VGA mode 13h: 320x200, 256 indexed colors.
         write_vga_registers(g_mode13_regs);
         g_current_mode = 2;
         set_rgb332_palette();
         gfx_clear(0);
         return 0;
     }
-    if (mode == 3) {
-        (void)vbe_set_display_mode(1);
-        write_vga_registers(g_mode12_regs);
-        g_current_mode = 3;
-        g_linear_framebuffer = (volatile unsigned char*)0;
-        gfx_clear(0);
-        return 0;
-    }
     if (mode == 0) {
-        (void)vbe_set_display_mode(0);
+        // Restore VGA text mode using the standard register set directly.
+        // This path is also used by the Ctrl+C abort trampoline, so it must
+        // not enter firmware code while unwinding an application.
         write_vga_registers(g_mode3_regs);
+        set_vga16_palette();
         g_current_mode = 0;
-        g_linear_framebuffer = (volatile unsigned char*)0;
         clear_screen();
         enable_hardware_cursor();
         return 0;
@@ -394,10 +369,6 @@ static int gfx_get_mode(void) { return g_current_mode; }
 
 static void gfx_put_pixel(int x, int y, unsigned char color) {
     if (g_current_mode == 1) {
-        if (x >= 0 && (unsigned int)x < g_linear_width &&
-            y >= 0 && (unsigned int)y < g_linear_height)
-            g_linear_framebuffer[(unsigned int)y * g_linear_pitch + (unsigned int)x] = color;
-    } else if (g_current_mode == 3) {
         if (x >= 0 && x < MODE_640_WIDTH && y >= 0 && y < MODE_640_HEIGHT)
             planar_put_pixel(x, y, color);
     } else if (g_current_mode == 2 && x >= 0 && x < MODE_320_WIDTH && y >= 0 && y < MODE_320_HEIGHT) {
@@ -407,16 +378,6 @@ static void gfx_put_pixel(int x, int y, unsigned char color) {
 
 static void gfx_fill_rect(int x, int y, int w, int h, unsigned char color) {
     if (g_current_mode == 1) {
-        if (x < 0) { w += x; x = 0; }
-        if (y < 0) { h += y; y = 0; }
-        if (x + w > (int)g_linear_width) w = (int)g_linear_width - x;
-        if (y + h > (int)g_linear_height) h = (int)g_linear_height - y;
-        if (w > 0 && h > 0)
-            for (int row = 0; row < h; row++)
-                memset((void*)&g_linear_framebuffer[(y + row) * g_linear_pitch + x], color, (unsigned int)w);
-        return;
-    }
-    if (g_current_mode == 3) {
         planar_fill_rect(x, y, w, h, color);
         return;
     }
@@ -431,27 +392,19 @@ static void gfx_fill_rect(int x, int y, int w, int h, unsigned char color) {
 }
 
 static unsigned char* gfx_get_framebuffer(void) {
-    if (g_current_mode == 1) return (unsigned char*)g_linear_framebuffer;
     return g_current_mode == 2 ? (unsigned char*)VGA_GFX_ADDR : (unsigned char*)0;
 }
 
 static int gfx_get_info(cyk_display_info_t* info) {
     if (!info) return -1;
-    if (g_current_mode == 1) {
-        info->width = g_linear_width;
-        info->height = g_linear_height;
-        info->pitch = g_linear_pitch;
-        info->bits_per_pixel = 8;
-        info->pixel_format = CYK_PIXEL_INDEX8;
-        info->framebuffer = (unsigned char*)g_linear_framebuffer;
-    } else if (g_current_mode == 2) {
+    if (g_current_mode == 2) {
         info->width = MODE_320_WIDTH;
         info->height = MODE_320_HEIGHT;
         info->pitch = MODE_320_WIDTH;
         info->bits_per_pixel = 8;
         info->pixel_format = CYK_PIXEL_INDEX8;
         info->framebuffer = (unsigned char*)VGA_GFX_ADDR;
-    } else if (g_current_mode == 3) {
+    } else if (g_current_mode == 1) {
         info->width = MODE_640_WIDTH;
         info->height = MODE_640_HEIGHT;
         info->pitch = MODE_640_PITCH;
@@ -472,7 +425,6 @@ static int gfx_get_info(cyk_display_info_t* info) {
 static int gfx_init(void) {
     g_current_mode = 0;
     g_cached_set_reset = -1;
-    g_linear_framebuffer = (volatile unsigned char*)0;
     return 0;
 }
 

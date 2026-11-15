@@ -287,9 +287,12 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
     print(f"[mkfat16] Injected {len(files_to_add)} file(s). Total image size: {TOTAL_SIZE_MB}MB.")
 
 if __name__ == "__main__":
-    target_img = sys.argv[1] if len(sys.argv) > 1 else "bin/os_image.bin"
+    target_img = sys.argv[1] if len(sys.argv) > 1 else "bin/images/os_image.bin"
     
+    with open(os.path.join("bin", "KERNEL.BIN"), "rb") as kernel_file:
+        kernel_bytes = kernel_file.read()
     sample_files = {
+        "KERNEL.BIN": kernel_bytes,
         "USR/SHARE/DOC/README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
         "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n/BOOT/DRIVERS/CYSOUND.DRV\n/BOOT/DRIVERS/CYHDA.DRV\n/BOOT/DRIVERS/CYDISPLAY.DRV\n",
     }
@@ -316,7 +319,7 @@ if __name__ == "__main__":
                 if os.path.isfile(fpath):
                     target_name = fname.upper()
                     # Skip disk image and build artifacts
-                    if target_name in ["OS_IMAGE.BIN", "CYKOS_BIN.BIN", "KERNEL.MAP", "KERNEL_SYMS.LD", "KERNEL.ELF"]:
+                    if target_name in ["OS_IMAGE.BIN", "CYKOS_BIN.BIN", "KERNEL.BIN", "KERNEL.MAP", "KERNEL_SYMS.LD", "KERNEL.ELF", "STAGE2.BIN", "MBR.BIN"]:
                         continue
                     ext = os.path.splitext(fname)[1].upper()
                     if ext in [".BIN", ".COM", ".DRV"]:

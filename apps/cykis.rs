@@ -29,8 +29,8 @@ static PIECES: [[u16; 4]; 7] = [
     [0xC600, 0x2640, 0x0C60, 0x4C80],
 ];
 
-// RGB332 palette indices: cyan, blue, orange, yellow, green, magenta, red.
-static PIECE_COLORS: [u8; 7] = [31, 3, 236, 252, 28, 227, 224];
+// Standard VGA palette indices: cyan, blue, brown, yellow, green, magenta, red.
+static PIECE_COLORS: [u8; 7] = [11, 1, 6, 14, 2, 13, 4];
 static mut RNG_STATE: u32 = 0x12345678;
 
 fn rand_piece() -> usize {
@@ -355,7 +355,7 @@ fn drop_piece(game: &mut GameState, hard: bool) -> bool {
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
     if gfx_set_mode(GFX_MODE_640X480) != 0 {
         gfx_set_mode(GFX_MODE_TEXT);
-        println("CYKIS: display driver unavailable.");
+        println("CYKIS: VGA 640x480 mode unavailable.");
         return -1;
     }
 

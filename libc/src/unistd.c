@@ -20,6 +20,13 @@
 #define SYS_FSTAT     109
 #define SYS_SBRK      112
 #define SYS_GETCWD    183
+#define SYS_GETUID    24
+#define SYS_GETGID    47
+#define SYS_SETUID    23
+#define SYS_SETGID    46
+#define SYS_CHMOD     15
+#define SYS_ACCESS    33
+#define SYS_CHOWN     182
 
 ssize_t read(int fd, void* buf, size_t count) {
     int ret = __syscall3(SYS_READ, fd, (int)buf, (int)count);
@@ -133,6 +140,41 @@ int fstat(int fd, struct stat* buf) {
         errno = EBADF;
         return -1;
     }
+    return 0;
+}
+
+uid_t getuid(void) { return (uid_t)__syscall0(SYS_GETUID); }
+uid_t geteuid(void) { return getuid(); }
+gid_t getgid(void) { return (gid_t)__syscall0(SYS_GETGID); }
+gid_t getegid(void) { return getgid(); }
+
+int setuid(uid_t uid) {
+    int ret = __syscall1(SYS_SETUID, (int)uid);
+    if (ret < 0) { errno = EPERM; return -1; }
+    return 0;
+}
+
+int setgid(gid_t gid) {
+    int ret = __syscall1(SYS_SETGID, (int)gid);
+    if (ret < 0) { errno = EPERM; return -1; }
+    return 0;
+}
+
+int chmod(const char* path, mode_t mode) {
+    int ret = __syscall2(SYS_CHMOD, (int)path, (int)mode);
+    if (ret < 0) { errno = EPERM; return -1; }
+    return 0;
+}
+
+int chown(const char* path, uid_t owner, gid_t group) {
+    int ret = __syscall3(SYS_CHOWN, (int)path, (int)owner, (int)group);
+    if (ret < 0) { errno = EPERM; return -1; }
+    return 0;
+}
+
+int access(const char* path, int mode) {
+    int ret = __syscall2(SYS_ACCESS, (int)path, mode);
+    if (ret < 0) { errno = EACCES; return -1; }
     return 0;
 }
 

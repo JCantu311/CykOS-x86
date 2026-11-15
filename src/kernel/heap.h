@@ -3,8 +3,9 @@
 
 #include "cykastd.h"
 
-// Reserve 0x100000-0x130000 for the standalone Level 3 shell image.
-#define HEAP_START_ADDR  0x140000
+// Shell: 0x100000-0x130000; app arena: 0x180000-0x1B0000;
+// app stack: 0x1D0000-0x1F0000; kernel heap starts at 0x200000.
+#define HEAP_START_ADDR  0x200000
 #define HEAP_MAX_ADDR    0x800000 // 8 MB ceiling
 
 void  heap_init(void);

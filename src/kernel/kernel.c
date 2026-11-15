@@ -7,6 +7,7 @@
 #include "syscall.h"
 #include "heap.h"
 #include "usercmd.h"
+#include "permissions.h"
 
 // Level 3 CykShell Entry Point (implemented in shell.rs)
 extern void shell_main(void);
@@ -156,6 +157,7 @@ void kernel_main(void) {
 
     print_string("\n[Level 1] Initializing root filesystem through VFS...\n");
     if (vfs_mount_root() == 0) {
+        permissions_init();
         print_string("VFS mounted root with ");
         print_string(vfs_current_driver());
         print_string(".\n");

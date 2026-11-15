@@ -80,7 +80,7 @@ case "$MODE" in
 
         if [[ $FOUND_AUDIO -eq 1 ]]; then
             echo "[run.sh] QEMU audio: ${AUDIO_OPTS[*]}"
-            exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+            exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
         fi
 
         echo "[run.sh] Warning: No PC speaker device/audio backend combination works with this QEMU build."
@@ -93,10 +93,10 @@ case "$MODE" in
             # shellcheck disable=SC2086
             AUDIO_OPTS=(${CYKOS_QEMU_AUDIO})
             echo "[run.sh] Using override: ${AUDIO_OPTS[*]}"
-            exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+            exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
         fi
 
-        exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0
+        exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0
         ;;
     virtualbox)
         if [[ $# -ne 2 ]] || ! command -v VBoxManage &> /dev/null; then

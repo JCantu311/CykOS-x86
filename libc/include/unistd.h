@@ -34,5 +34,11 @@ void* sbrk(intptr_t increment);
 int brk(void* addr);
 unsigned int sleep(unsigned int seconds);
 int isatty(int fd);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+int setuid(uid_t uid);
+int setgid(gid_t gid);
 
 #endif

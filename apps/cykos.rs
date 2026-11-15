@@ -440,9 +440,9 @@ pub const SOUND_CAP_ALL: u32    = 0xFF;
 // =========================================================================
 
 pub const GFX_MODE_TEXT: i32 = 0;
-pub const GFX_MODE_640X480: i32 = 1;
+pub const GFX_MODE_640X480: i32 = 1; // Standard VGA mode 12h, 16 colors
 pub const GFX_MODE_320X200: i32 = 2;
-pub const GFX_MODE_640X480_VGA16: i32 = 3;
+pub const GFX_MODE_640X480_VGA16: i32 = 1; // Backward-compatible alias
 
 pub const GFX_PIXEL_TEXT16: u32 = 0;
 pub const GFX_PIXEL_INDEX8: u32 = 1;
@@ -473,8 +473,8 @@ struct GfxBitmap {
     pixels: *const u8,
 }
 
-/// Set display mode (0 = text, 1 = VBE 640x480x256, 2 = 320x200x256,
-/// 3 = VGA 640x480x16). Mode 1 returns an error if VBE LFB is unavailable.
+/// Set display mode (0 = text, 1 = VGA 640x480x16, 2 = VGA 320x200x256).
+/// Mode 3 remains accepted by older kernels as an alias for VGA mode 1.
 pub fn gfx_set_mode(mode: i32) -> i32 {
     unsafe { syscall::syscall1(SYS_GFX_MODE, mode as u32) as i32 }
 }
@@ -528,7 +528,7 @@ pub fn gfx_draw_bitmap(x: i16, y: i16, width: u32, height: u32,
     }
 }
 
-/// Replace a range of RGB8 entries in the 256-color VGA/VBE DAC palette.
+/// Replace palette entries in VGA mode 1 (16 colors) or mode 2 (256 colors).
 pub fn gfx_set_palette(first: u16, entries: &[[u8; 3]]) -> i32 {
     if entries.is_empty() || first >= 256 || entries.len() > 256 - first as usize {
         return -1;

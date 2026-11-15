@@ -52,6 +52,8 @@ fi
 
 # 3. Assemble unified module
 nasm -f elf32 src/boot/boot.s -o bin/boot.o
+nasm -f bin src/boot/mbr.asm -o bin/mbr.bin
+nasm -f bin src/boot/stage2.asm -o bin/stage2.bin
 
 COMMON_CFLAGS="-m32 -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers"
 
@@ -92,7 +94,7 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -109,7 +111,7 @@ with open('bin/kernel.map') as f:
         if m:
             val = int(m.group(1), 16)
             name = m.group(2)
-            if 0x7E00 <= val < 0x40000 and name not in symbols:
+            if 0x10000 <= val < 0x90000 and name not in symbols:
                 symbols[name] = f'0x{val:08x}'
             continue
         # Format 2: ld.lld (00007e00 ... symbol_name)
@@ -118,7 +120,7 @@ with open('bin/kernel.map') as f:
             if re.match(r'^[0-9a-fA-F]{4,16}$', parts[0]) and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', parts[-1]):
                 val = int(parts[0], 16)
                 name = parts[-1]
-                if 0x7E00 <= val < 0x40000 and name not in symbols:
+                if 0x10000 <= val < 0x90000 and name not in symbols:
                     symbols[name] = f'0x{val:08x}'
 
 with open('bin/kernel_syms.ld', 'w') as out:
@@ -148,14 +150,36 @@ if command -v rustc &> /dev/null; then
 
     RUST_FLAGS="--target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=pic -C panic=abort"
 
-    # Helper: link a Rust userland app from either .o or .a into a dynamic ELF
-    # Usage: link_user_app <obj_or_archive> <output.BIN>
+    app_link_mode() {
+        local app_upper="$1"
+        local fallback="${2:-static}"
+        local manifest_mode=""
+        if [ -f APP_LINKING.LST ]; then
+            manifest_mode=$(awk -v app="$app_upper" 'toupper($1) == app { print tolower($2); exit }' APP_LINKING.LST)
+        fi
+        local mode="${CYKOS_LINK_MODE:-${manifest_mode:-$fallback}}"
+        if [ "$mode" != "dynamic" ] && [ "$mode" != "static" ]; then
+            echo "Error: invalid link mode '$mode' for $app_upper (use dynamic or static)." >&2
+            return 1
+        fi
+        printf '%s' "$mode"
+    }
+
+    # Link as ET_DYN for runtime imports or ET_EXEC for a fully linked image.
     link_user_app() {
         local input="$1"
         local output="$2"
-        # Emit a position-independent ELF shared object. The kernel resolves
-        # undefined API imports when it loads the application.
-        $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s "$input" -o "$output"
+        local app_upper="$3"
+        local mode
+        mode=$(app_link_mode "$app_upper" static) || return 1
+        if [ "$mode" = "static" ]; then
+            $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker \
+                -u main bin/kernel_syms.ld "$input" -o "$output"
+        else
+            $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \
+                -e main -s "$input" -o "$output"
+        fi
+        echo "  -> $app_upper link mode: $mode"
     }
 
     # Compile default editor (edit.rs)
@@ -165,7 +189,7 @@ if command -v rustc &> /dev/null; then
 
         # Strategy 1: Try --emit=obj (produces small binary, no libcore bloat)
         if rustc $RUST_FLAGS --emit=obj src/user/edit.rs -o bin/edit.o; then
-            if link_user_app bin/edit.o bin/EDIT.BIN; then
+            if link_user_app bin/edit.o bin/EDIT.BIN EDIT; then
                 echo "  -> Created Level 4 binary: bin/EDIT.BIN (from .o)"
                 rm -f bin/edit.o
             else
@@ -177,7 +201,7 @@ if command -v rustc &> /dev/null; then
         # Strategy 2: Fall back to --crate-type=staticlib if .o approach failed
         if [ ! -f bin/EDIT.BIN ]; then
             if rustc $RUST_FLAGS --crate-type=staticlib src/user/edit.rs -o bin/libedit.a; then
-                if link_user_app bin/libedit.a bin/EDIT.BIN; then
+                if link_user_app bin/libedit.a bin/EDIT.BIN EDIT; then
                     echo "  -> Created Level 4 binary: bin/EDIT.BIN (from staticlib)"
                 else
                     echo "  -> ERROR: Failed to link EDIT.BIN from staticlib!" >&2
@@ -212,7 +236,7 @@ if command -v rustc &> /dev/null; then
 
             # Strategy 1: Try --emit=obj first
             if rustc $RUST_FLAGS --emit=obj "$app_src" -o "bin/${app_name}.o" 2>/dev/null; then
-                if link_user_app "bin/${app_name}.o" "bin/${app_upper}.BIN" 2>/dev/null; then
+                if link_user_app "bin/${app_name}.o" "bin/${app_upper}.BIN" "$app_upper" 2>/dev/null; then
                     echo "  -> Created: bin/${app_upper}.BIN (from .o)"
                     rm -f "bin/${app_name}.o"
                 else
@@ -223,7 +247,7 @@ if command -v rustc &> /dev/null; then
             # Strategy 2: Fall back to staticlib
             if [ ! -f "bin/${app_upper}.BIN" ]; then
                 if rustc $RUST_FLAGS --crate-type=staticlib "$app_src" -o "bin/lib${app_name}.a" 2>/dev/null; then
-                    if link_user_app "bin/lib${app_name}.a" "bin/${app_upper}.BIN" 2>/dev/null; then
+                    if link_user_app "bin/lib${app_name}.a" "bin/${app_upper}.BIN" "$app_upper" 2>/dev/null; then
                         echo "  -> Created: bin/${app_upper}.BIN (from staticlib)"
                     else
                         echo "  -> ERROR: Failed to link ${app_upper}.BIN!" >&2
@@ -249,7 +273,7 @@ fi
 
 # 9b. Compile POSIX C Standard Library (libc.a) & C Userland Applications
 echo "Compiling CykOS POSIX C Standard Library (libc)..."
-LIBC_CFLAGS="-m32 -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Ilibc/include"
+LIBC_CFLAGS="-m32 -ffreestanding -O2 -nostdlib -fPIC -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Ilibc/include"
 mkdir -p bin/libc_objs
 for libc_src in libc/src/*.c; do
     [ -e "$libc_src" ] || continue
@@ -279,12 +303,19 @@ if [ -d apps ]; then
         [ -e "$c_app" ] || continue
         app_name=$(basename "$c_app" .c)
         app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]')
+        app_mode=$(app_link_mode "$app_upper" static)
         echo "  Compiling C Userland App: $c_app..."
         rm -f "bin/${app_upper}.BIN" "bin/${app_name}.o"
 
         "$CC" $LIBC_CFLAGS -c "$c_app" -o "bin/${app_name}.o"
-        $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
-            bin/kernel_syms.ld "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+        if [ "$app_mode" = "dynamic" ]; then
+            $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \
+                -e _start -u _start "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+        else
+            $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
+                bin/kernel_syms.ld "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+        fi
+        echo "  -> $app_upper link mode: $app_mode"
         rm -f "bin/${app_name}.o"
 
         if [ -f "bin/${app_upper}.BIN" ]; then
@@ -345,30 +376,33 @@ if [ -d bin/DRIVERS ]; then
 fi
 
 # 10. Format FAT16 partition and package Level 2 drivers, Level 4 apps & configuration
+mkdir -p bin/images
 if command -v python3 &> /dev/null; then
-    python3 mkfat16.py bin/os_image.bin
+    python3 mkfat16.py bin/images/os_image.bin
+    python3 install_bios.py bin/images/os_image.bin
 elif command -v python &> /dev/null; then
-    python mkfat16.py bin/os_image.bin
+    python mkfat16.py bin/images/os_image.bin
+    python install_bios.py bin/images/os_image.bin
 else
-    truncate -s 16777216 bin/os_image.bin 2>/dev/null || truncate -s 16m bin/os_image.bin
+    truncate -s 16777216 bin/images/os_image.bin 2>/dev/null || truncate -s 16m bin/images/os_image.bin
 fi
 
-# 11. Create disk formats for installed desktop hypervisors.
+# 11. Publish raw IMG and convert to desktop hypervisor formats when supported.
+cp bin/images/os_image.bin bin/images/cykos.img
 if command -v VBoxManage &> /dev/null; then
-    VDI_TMP="bin/cykos.vdi.tmp.$$"
-    VBoxManage convertfromraw bin/os_image.bin "$VDI_TMP" --format VDI
-    if [ -f bin/cykos.vdi ]; then
-        VBoxManage clonemedium "$VDI_TMP" bin/cykos.vdi --existing
-        rm -f "$VDI_TMP"
-    else
-        mv -f "$VDI_TMP" bin/cykos.vdi
+    VBoxManage convertfromraw bin/images/os_image.bin bin/images/cykos.vdi --format VDI
+    if ! command -v qemu-img &> /dev/null; then
+        VBoxManage convertfromraw bin/images/os_image.bin bin/images/cykos.vmdk --format VMDK
+        VBoxManage convertfromraw bin/images/os_image.bin bin/images/cykos.vhd --format VHD
     fi
 fi
 if command -v qemu-img &> /dev/null; then
-    VMDK_TMP="bin/cykos.vmdk.tmp.$$"
-    qemu-img convert -f raw -O vmdk bin/os_image.bin "$VMDK_TMP"
-    mv -f "$VMDK_TMP" bin/cykos.vmdk
+    qemu-img convert -f raw -O vmdk bin/images/os_image.bin bin/images/cykos.vmdk
+    qemu-img convert -f raw -O vpc bin/images/os_image.bin bin/images/cykos.vhd
+    if ! command -v VBoxManage &> /dev/null; then
+        qemu-img convert -f raw -O vdi bin/images/os_image.bin bin/images/cykos.vdi
+    fi
 fi
 
 echo "----------------------------------------"
-echo "Build successful! Created bin/os_image.bin plus available VirtualBox VDI and VMware VMDK images."
+echo "Build successful! Disk images are in bin/images (raw BIN, IMG, and available VDI, VMDK, VHD)."

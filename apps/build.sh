@@ -37,12 +37,29 @@ if command -v rustup &> /dev/null; then
     rustup target add i686-unknown-linux-gnu 2>/dev/null || true
 fi
 
-# 3. Build a single Rust userland application as a dynamic ELF object.
+# 3. Build a Rust application according to APP_LINKING.LST (or environment).
+app_link_mode() {
+    local upper_name="$1"
+    local fallback="${2:-static}"
+    local manifest_mode=""
+    if [ -f APP_LINKING.LST ]; then
+        manifest_mode=$(awk -v app="$upper_name" 'toupper($1) == app { print tolower($2); exit }' APP_LINKING.LST)
+    fi
+    local mode="${CYKOS_LINK_MODE:-${manifest_mode:-$fallback}}"
+    if [ "$mode" != "dynamic" ] && [ "$mode" != "static" ]; then
+        echo "Error: invalid link mode '$mode' for $upper_name (use dynamic or static)." >&2
+        return 1
+    fi
+    printf '%s' "$mode"
+}
+
 build_rust_app() {
     local src="$1"
     local name="$2"
     local upper_name=$(echo "$name" | tr '[:lower:]' '[:upper:]')
     local out_bin="apps/bin/${upper_name}.BIN"
+    local mode
+    mode=$(app_link_mode "$upper_name")
 
     echo "Compiling Rust App: $src -> $out_bin"
 
@@ -53,11 +70,16 @@ build_rust_app() {
         -C target-feature=-sse,-sse2 \
         --emit=obj "$src" -o "apps/bin/${name}.o"
 
-    $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s \
-        "apps/bin/${name}.o" -o "$out_bin"
+    if [ "$mode" = "static" ]; then
+        $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker \
+            -u main bin/kernel_syms.ld "apps/bin/${name}.o" -o "$out_bin"
+    else
+        $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s \
+            "apps/bin/${name}.o" -o "$out_bin"
+    fi
 
     rm -f "apps/bin/${name}.o"
-    echo "  [OK] Built $out_bin"
+    echo "  [OK] Built $out_bin ($mode)"
 }
 
 # 4. If a specific target file is passed as an argument, build only that
@@ -81,12 +103,14 @@ else
 fi
 
 # 5. Inject newly built apps into the QEMU hard disk image
-if [ -f bin/os_image.bin ]; then
-    echo "Updating FAT16 filesystem on bin/os_image.bin..."
+if [ -f bin/images/os_image.bin ]; then
+    echo "Updating FAT16 filesystem on bin/images/os_image.bin..."
     if command -v python3 &> /dev/null; then
-        python3 mkfat16.py bin/os_image.bin
+        python3 mkfat16.py bin/images/os_image.bin
+        python3 install_bios.py bin/images/os_image.bin
     elif command -v python &> /dev/null; then
-        python mkfat16.py bin/os_image.bin
+        python mkfat16.py bin/images/os_image.bin
+        python install_bios.py bin/images/os_image.bin
     fi
 fi
 

@@ -1,0 +1,7 @@
+# Per-application link mode: APP_NAME dynamic|static
+# Unlisted applications default to static; change any row to dynamic to use ET_DYN imports.
+EDIT static
+CYKIS static
+GFXDEMO static
+SYSDEMO static
+SOUNDTEST static

@@ -135,7 +135,7 @@ void fault_handler(registers_t* regs) {
     // Recover from faults in a loaded app instead of disabling all interrupts
     // and trapping the machine on the kernel panic screen.
     if (usercmd_is_running()) {
-        usercmd_abort_from_exception(regs->int_no);
+        usercmd_abort_from_exception(regs->int_no, regs->eip, regs->err_code);
     }
 
     // Unhandled CPU Exception: Display Blue Screen / Crash Dump

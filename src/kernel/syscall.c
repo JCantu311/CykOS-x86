@@ -5,12 +5,14 @@
 #include "heap.h"
 #include "modload.h"
 #include "usercmd.h"
+#include "permissions.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
 #define SYS_FILE_IO_LIMIT (1024 * 1024)
 
 #define OPEN_ACCMODE 0x0003
+#define OPEN_RDONLY  0x0000
 #define OPEN_WRONLY  0x0001
 #define OPEN_RDWR    0x0002
 #define OPEN_CREAT   0x0040
@@ -153,6 +155,10 @@ static void syscall_handler(registers_t* regs) {
             } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
                 (g_fds[fd].flags & OPEN_ACCMODE) != 0) {
                 fd_table_t* file = &g_fds[fd];
+                if (permissions_check(file->path, CYK_PERMISSION_WRITE) != 0) {
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
                 if (file->flags & OPEN_APPEND) file->cursor = file->entry.size;
                 if (arg3 > SYS_FILE_IO_LIMIT || file->cursor > SYS_FILE_IO_LIMIT - arg3) {
                     regs->eax = (unsigned int)-1;
@@ -210,6 +216,7 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
                 } else {
                     size_t read_bytes = 0;
+                    asm volatile("sti" ::: "memory");
                     while (read_bytes < count) {
                         char c = get_char();
                         if (c == 0x03) { // Ctrl+C
@@ -226,6 +233,7 @@ static void syscall_handler(registers_t* regs) {
                             break;
                         }
                     }
+                    asm volatile("cli" ::: "memory");
                     if (regs->eax != (unsigned int)-1) {
                         regs->eax = (unsigned int)read_bytes;
                     }
@@ -274,12 +282,17 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = (unsigned int)-1;
                     break;
                 }
+                (void)permissions_create(absolute_path, arg3, 0);
                 found = 1;
             } else if (found && (flags & OPEN_CREAT) && (flags & OPEN_EXCL)) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
             if (found && (g_fds[found_fd].entry.attributes & 0x10)) found = 0;
+            if (found && permissions_check(absolute_path,
+                (flags & OPEN_ACCMODE) == OPEN_RDONLY ? CYK_PERMISSION_READ :
+                (flags & OPEN_ACCMODE) == OPEN_WRONLY ? CYK_PERMISSION_WRITE :
+                CYK_PERMISSION_READ | CYK_PERMISSION_WRITE) != 0) found = 0;
             if (found && (flags & OPEN_TRUNC)) {
                 if ((flags & OPEN_ACCMODE) == 0 || vfs_write_file(absolute_path, 0, 0) != 0 ||
                     vfs_find_file(absolute_path, &g_fds[found_fd].entry) != 0) found = 0;
@@ -347,7 +360,9 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_GET_KEY: {
+            asm volatile("sti" ::: "memory");
             char c = get_char();
+            asm volatile("cli" ::: "memory");
             if (c == 0x03) { // Ctrl+C
                 print_string("^C\n");
                 if (usercmd_is_running()) {
@@ -372,34 +387,48 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_SLEEP: {
+            asm volatile("sti" ::: "memory");
             secwait(arg1);
+            asm volatile("cli" ::: "memory");
             regs->eax = 0;
             break;
         }
 
         case SYS_MSLEEP: {
+            asm volatile("sti" ::: "memory");
             msecwait(arg1);
+            asm volatile("cli" ::: "memory");
             regs->eax = 0;
             break;
         }
 
         case SYS_FAT_READ: {
             // arg1 = filename, arg2 = buffer, arg3 = max_bytes
-            int res = vfs_read_file_by_name((const char*)arg1, (void*)arg2, arg3);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                permissions_check(absolute_path, CYK_PERMISSION_READ) == 0
+                ? vfs_read_file_by_name(absolute_path, (void*)arg2, arg3) : -1;
             regs->eax = (unsigned int)res;
             break;
         }
 
         case SYS_FAT_WRITE: {
             // arg1 = filename, arg2 = data, arg3 = size
-            int res = vfs_write_file((const char*)arg1, (const void*)arg2, arg3);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                (permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0 ||
+                 vfs_find_file(absolute_path, &(vfs_file_t){0}) != 0)
+                ? vfs_write_file(absolute_path, (const void*)arg2, arg3) : -1;
             regs->eax = (unsigned int)res;
             break;
         }
 
         case SYS_FAT_DELETE: {
             // arg1 = filename
-            int res = vfs_delete_file((const char*)arg1);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+                ? vfs_delete_file(absolute_path) : -1;
             regs->eax = (unsigned int)res;
             break;
         }
@@ -407,7 +436,10 @@ static void syscall_handler(registers_t* regs) {
         case SYS_MKDIR:
         case SYS_CYK_MKDIR: {
             // arg1 = path
-            int res = vfs_mkdir((const char*)arg1);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0
+                ? vfs_mkdir(absolute_path) : -1;
+            if (res == 0) (void)permissions_create(absolute_path, arg2, 1);
             regs->eax = (unsigned int)res;
             break;
         }
@@ -423,7 +455,10 @@ static void syscall_handler(registers_t* regs) {
         case SYS_CHDIR:
         case SYS_CYK_CHDIR: {
             // arg1 = path
-            int res = vfs_chdir((const char*)arg1);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                permissions_check(absolute_path, CYK_PERMISSION_EXEC) == 0
+                ? vfs_chdir(absolute_path) : -1;
             regs->eax = (unsigned int)res;
             break;
         }
@@ -442,14 +477,18 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_UNLINK: {
-            regs->eax = (unsigned int)vfs_delete_file((const char*)arg1);
+            char absolute_path[128];
+            regs->eax = (unsigned int)(syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+                ? vfs_delete_file(absolute_path) : -1);
             break;
         }
 
         case SYS_STAT: {
-            const char* path = (const char*)arg1;
+            char absolute_path[128];
+            const char* path = absolute_path;
             unsigned int* statbuf = (unsigned int*)arg2;
-            if (!path || !statbuf) {
+            if (!statbuf || syscall_absolute_path((const char*)arg1, absolute_path) != 0) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
@@ -458,19 +497,48 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
-            memset(statbuf, 0, 64);
-            unsigned int mode = 0644;
-            if (file.attributes & 0x10) {
-                mode = 0040755; // S_IFDIR | rwxr-xr-x
-            } else {
-                mode = 0100644; // S_IFREG | rw-r--r--
+            memset(statbuf, 0, 13 * sizeof(unsigned int));
+            unsigned int mode = 0, uid = 0, gid = 0;
+            if (permissions_get(path, &mode, &uid, &gid) != 0) {
+                regs->eax = (unsigned int)-1;
+                break;
             }
-            statbuf[1] = mode;
-            statbuf[2] = 1; // nlink
-            statbuf[4] = file.size; // size
+            statbuf[1] = file.first_cluster;
+            statbuf[2] = mode;
+            statbuf[3] = 1;
+            statbuf[4] = uid;
+            statbuf[5] = gid;
+            statbuf[7] = file.size;
+            statbuf[8] = 512;
+            statbuf[9] = (file.size + 511) / 512;
             regs->eax = 0;
             break;
         }
+
+        case SYS_CHMOD:
+        case SYS_CHOWN:
+        case SYS_ACCESS: {
+            char absolute_path[128];
+            if (syscall_absolute_path((const char*)arg1, absolute_path) != 0) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            if (syscall_num == SYS_CHMOD) regs->eax = (unsigned int)permissions_chmod(absolute_path, arg2);
+            else if (syscall_num == SYS_CHOWN) regs->eax = (unsigned int)permissions_chown(absolute_path, arg2, arg3);
+            else {
+                unsigned int requested = 0;
+                if (arg2 & 4) requested |= CYK_PERMISSION_READ;
+                if (arg2 & 2) requested |= CYK_PERMISSION_WRITE;
+                if (arg2 & 1) requested |= CYK_PERMISSION_EXEC;
+                regs->eax = (unsigned int)permissions_check(absolute_path, requested);
+            }
+            break;
+        }
+
+        case SYS_GETUID: regs->eax = permissions_uid(); break;
+        case SYS_GETGID: regs->eax = permissions_gid(); break;
+        case SYS_SETUID: regs->eax = (unsigned int)permissions_set_uid(arg1); break;
+        case SYS_SETGID: regs->eax = (unsigned int)permissions_set_gid(arg1); break;
 
         case SYS_FSTAT: {
             int fd = (int)arg1;
@@ -480,8 +548,8 @@ static void syscall_handler(registers_t* regs) {
                 break;
             }
             if (fd >= 0 && fd <= 2) {
-                memset(statbuf, 0, 64);
-                statbuf[1] = 0020666; // S_IFCHR
+                memset(statbuf, 0, 13 * sizeof(unsigned int));
+                statbuf[2] = 0020666; // S_IFCHR
                 regs->eax = 0;
                 break;
             }
@@ -489,10 +557,20 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
-            memset(statbuf, 0, 64);
-            statbuf[1] = 0100644; // S_IFREG
-            statbuf[2] = 1;
-            statbuf[4] = g_fds[fd].entry.size;
+            memset(statbuf, 0, 13 * sizeof(unsigned int));
+            unsigned int mode = 0, uid = 0, gid = 0;
+            if (permissions_get(g_fds[fd].path, &mode, &uid, &gid) != 0) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            statbuf[1] = g_fds[fd].entry.first_cluster;
+            statbuf[2] = mode;
+            statbuf[3] = 1;
+            statbuf[4] = uid;
+            statbuf[5] = gid;
+            statbuf[7] = g_fds[fd].entry.size;
+            statbuf[8] = 512;
+            statbuf[9] = (g_fds[fd].entry.size + 511) / 512;
             regs->eax = 0;
             break;
         }

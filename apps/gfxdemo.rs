@@ -1,4 +1,4 @@
-//! 640x480 indexed graphics and standardized bitmap API demonstration.
+//! 640x480 VGA planar graphics and standardized bitmap API demonstration.
 
 #![no_std]
 #![no_main]
@@ -13,7 +13,7 @@ use cykos::*;
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
     if gfx_set_mode(GFX_MODE_640X480) != 0 {
         gfx_set_mode(GFX_MODE_TEXT);
-        println("Error: 640x480 graphics mode unavailable.");
+        println("Error: VGA 640x480 mode unavailable.");
         return -1;
     }
 
@@ -62,8 +62,8 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
     }
     let _ = gfx_draw_bitmap(510, 48, 48, 48, 48 * 4, GFX_BITMAP_RGBA32, &scaled_rgba);
 
-    // RGB332 palette samples exercise its full range of 256 indexed colors.
-    let colors = [0, 3, 7, 28, 31, 35, 63, 96, 128, 160, 192, 224, 227, 236, 252, 255];
+    // Show the standard 16-color VGA palette.
+    let colors = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     for (slot, &color) in colors.iter().enumerate() {
         gfx_fill_rect(32 + slot as i16 * 28, 60, 24, 18, color);
     }
@@ -74,15 +74,16 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
 
     // Moving bitmap-like sprite, drawn with the same generic rectangle path.
     let mut previous_x = 0i16;
-    for frame in 0..90i16 {
+    // Keep the screen up long enough to inspect; Q or Escape exits early.
+    for frame in 0..250i16 {
         if let Some(key) = try_read_char() {
             if key == 0x1B || key == b'q' || key == b'Q' || key == 0x03 { break; }
         }
-        let x = 40 + frame * 6;
+        let x = 40 + (frame % 90) * 6;
         if frame > 0 { gfx_fill_rect(previous_x, 330, 30, 30, 1); }
         gfx_fill_rect(x, 330, 30, 30, (frame as u8 % 15) + 1);
         previous_x = x;
-        msleep(25);
+        msleep(20);
     }
 
     gfx_set_mode(GFX_MODE_TEXT);

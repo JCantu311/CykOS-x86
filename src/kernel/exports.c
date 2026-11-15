@@ -1,5 +1,7 @@
 #include "cykastd.h"
 #include "exports.h"
+#include "fat16.h"
+#include "vfs.h"
 
 typedef struct {
     const char* name;
@@ -34,6 +36,10 @@ static const kernel_export_t g_kernel_exports[] = {
     KERNEL_EXPORT(get_scancode),
     KERNEL_EXPORT(scancode_to_ascii),
     KERNEL_EXPORT(get_char),
+    KERNEL_EXPORT(fat16_read_file_by_name),
+    KERNEL_EXPORT(fat16_write_file),
+    KERNEL_EXPORT(vfs_read_file_by_name),
+    KERNEL_EXPORT(vfs_write_file),
 };
 
 int kernel_export_resolve(const char* name, unsigned int* address) {

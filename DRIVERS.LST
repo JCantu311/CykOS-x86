@@ -1,5 +1,5 @@
-src/drivers/keyboard.c  bin/cykeybrd.drv  0x48000
-src/drivers/pcsounddrv.c bin/cysound.drv   0x50000
-# src/drivers/hdasound.c   bin/cyhda.drv     0x54000
-src/drivers/diskdrv.c   bin/cykdisk.drv   0x4C000
-src/drivers/displaydrv.c bin/cydisplay.drv 0x58000
+src/drivers/keyboard.c  bin/cykeybrd.drv  0x90000
+src/drivers/pcsounddrv.c bin/cysound.drv   0x94000
+# src/drivers/hdasound.c   bin/cyhda.drv     0xA0000
+src/drivers/diskdrv.c   bin/cykdisk.drv   0x98000
+src/drivers/displaydrv.c bin/cydisplay.drv 0x9C000

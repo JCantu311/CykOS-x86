@@ -5,6 +5,7 @@
 
 struct stat {
     dev_t     st_dev;     /* ID of device containing file */
+    ino_t     st_ino;     /* File serial number */
     uid_t     st_uid;     /* User ID of owner */
     mode_t    st_mode;    /* File type and mode */
     nlink_t   st_nlink;   /* Number of hard links */
@@ -49,9 +50,7 @@ int stat(const char* path, struct stat* buf);
 int fstat(int fd, struct stat* buf);
 int mkdir(const char* pathname, mode_t mode);
 int chmod(const char* path, mode_t mode);
-int fchmod(int fd, mode_t mode);
 int chown(const char* path, uid_t owner, gid_t group);
-int fchown(int fd, uid_t owner, gid_t group);
 int access(const char* path, int mode);
 
 #define F_OK 0

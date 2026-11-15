@@ -9,7 +9,7 @@
  *
  * If the alias is found (or if an executable matching cmd_name exists directly
  * on disk, e.g. /USR/BIN/FOO.BIN), loads the binary from disk into application RAM
- * (0x68000) and executes it as a flat 32-bit function.
+ * (0x180000) and executes it as a flat 32-bit function.
  *
  * @param cmd_name  Null-terminated command name the user typed
  * @param args      Null-terminated argument string (may be empty)
@@ -28,7 +28,9 @@ void list_user_commands(void);
 // Userland execution context helpers for SYS_EXIT and Ctrl+C abort
 void usercmd_terminate(int exit_code);
 __attribute__((noreturn)) void usercmd_abort_from_irq(void);
-__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector);
+__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
+                                                             unsigned int eip,
+                                                             unsigned int error_code);
 int usercmd_is_running(void);
 
 #endif // USERCMD_H

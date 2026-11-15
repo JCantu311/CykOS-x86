@@ -11,12 +11,17 @@
 #define USERCMDS_OLD_FALLBACK "/CYKOS/USERCMDS.TXT"
 #define USER_BIN_DIR      "/USR/BIN/"
 #define LEGACY_BIN_DIR    "/CYKOS/"
-#define USER_APP_BASE     0x68000   // Immediately after the 8 reserved 16 KiB module slots
+#define USER_APP_BASE     0x180000  // RAM arena above the BIOS/VGA memory hole
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
+#define USER_APP_STACK_TOP 0x1F0000 // Separate 128 KB stack below the kernel heap
 #define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
 
+#define USERCMD_STRINGIFY_INNER(value) #value
+#define USERCMD_STRINGIFY(value) USERCMD_STRINGIFY_INNER(value)
+
 #define ELF_ET_DYN        3
+#define ELF_ET_EXEC       2
 #define ELF_EM_386        3
 #define ELF_PT_LOAD       1
 #define ELF_PT_DYNAMIC    2
@@ -245,9 +250,89 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     return 0;
 }
 
+/* Load a fully linked ET_EXEC image at the application's fixed address range. */
+static int load_static_elf32(const unsigned char* file, unsigned int file_size,
+                             unsigned char* load_area, unsigned int* entry_out) {
+    const elf32_ehdr_t* eh = (const elf32_ehdr_t*)file;
+    if (file_size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' ||
+        eh->ident[2] != 'L' || eh->ident[3] != 'F' || eh->ident[4] != 1 ||
+        eh->ident[5] != 1 || eh->type != ELF_ET_EXEC || eh->machine != ELF_EM_386 ||
+        eh->version != 1 || eh->ehsize != sizeof(*eh) ||
+        eh->phentsize != sizeof(elf32_phdr_t) || eh->phnum == 0 || eh->phnum > 32 ||
+        eh->phoff > file_size || eh->phnum > (file_size - eh->phoff) / eh->phentsize) return -1;
+
+    const elf32_phdr_t* ph = (const elf32_phdr_t*)(file + eh->phoff);
+    unsigned int min_vaddr = 0xFFFFFFFFu;
+    unsigned int max_vaddr = 0;
+    int has_load = 0;
+    int has_dynamic = 0;
+    int entry_executable = 0;
+    for (unsigned int i = 0; i < eh->phnum; i++) {
+        if (ph[i].type == ELF_PT_DYNAMIC) has_dynamic = 1;
+        if (ph[i].type != ELF_PT_LOAD) continue;
+        if (ph[i].filesz > ph[i].memsz || ph[i].offset > file_size ||
+            ph[i].filesz > file_size - ph[i].offset ||
+            ph[i].vaddr > 0xFFFFFFFFu - ph[i].memsz) return -1;
+        if (!ph[i].memsz) continue;
+        has_load = 1;
+        if (ph[i].vaddr < min_vaddr) min_vaddr = ph[i].vaddr;
+        if (ph[i].vaddr + ph[i].memsz > max_vaddr) max_vaddr = ph[i].vaddr + ph[i].memsz;
+        if ((ph[i].flags & ELF_PF_X) && eh->entry >= ph[i].vaddr &&
+            eh->entry < ph[i].vaddr + ph[i].memsz) entry_executable = 1;
+    }
+    if (!has_load || has_dynamic || !entry_executable || min_vaddr > USER_APP_BASE ||
+        max_vaddr <= min_vaddr || max_vaddr - min_vaddr > USER_APP_MAX_SIZE) return -1;
+
+    unsigned int load_base = (unsigned int)load_area;
+    if (load_base < min_vaddr) return -1;
+    unsigned int load_bias = load_base - min_vaddr;
+    if (load_bias > 0xFFFFFFFFu - max_vaddr ||
+        load_bias + max_vaddr > load_base + USER_APP_MAX_SIZE) return -1;
+
+    memset(load_area, 0, USER_APP_MAX_SIZE);
+    for (unsigned int i = 0; i < eh->phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD || !ph[i].memsz) continue;
+        memcpy((void*)(load_bias + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
+    }
+    *entry_out = load_bias + eh->entry;
+    return 0;
+}
+
 static volatile int g_usercmd_active = 0;
 static unsigned int g_usercmd_saved_esp = 0;
 static unsigned int g_usercmd_saved_ebp = 0;
+static volatile unsigned int g_usercmd_app_saved_esp = 0;
+static volatile unsigned int g_usercmd_app_entry = 0;
+static volatile unsigned int g_usercmd_app_argc = 0;
+static volatile unsigned int g_usercmd_app_argv = 0;
+
+/*
+ * Applications and their syscalls currently execute at ring 0, so they need
+ * a private stack even before full privilege separation exists. Keeping the
+ * stack below the heap prevents large Rust stack frames from consuming the
+ * kernel/shell stack. The app arena ends at 0x1B0000; this stack has 128 KB.
+ */
+static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
+                                     char** argv) {
+    int result;
+    g_usercmd_app_entry = (unsigned int)entry;
+    g_usercmd_app_argc = (unsigned int)argc;
+    g_usercmd_app_argv = (unsigned int)argv;
+    asm volatile(
+        "movl %%esp, g_usercmd_app_saved_esp\n"
+        "movl $" USERCMD_STRINGIFY(USER_APP_STACK_TOP) ", %%esp\n"
+        "andl $-16, %%esp\n"
+        "subl $8, %%esp\n"
+        "pushl g_usercmd_app_argv\n"
+        "pushl g_usercmd_app_argc\n"
+        "call *g_usercmd_app_entry\n"
+        "movl g_usercmd_app_saved_esp, %%esp\n"
+        : "=a"(result)
+        :
+        : "ecx", "edx", "memory", "cc"
+    );
+    return result;
+}
 
 // Internal helper to convert character to uppercase
 static char uc(char c) {
@@ -509,8 +594,14 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     if (app_entry.size >= 4 && staged_image[0] == 0x7F && staged_image[1] == 'E' &&
         staged_image[2] == 'L' && staged_image[3] == 'F') {
-        if (load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest,
-                               &entry_address) != 0) {
+        unsigned short elf_type = app_entry.size >= sizeof(elf32_ehdr_t)
+            ? ((const elf32_ehdr_t*)staged_image)->type : 0;
+        int load_result = elf_type == ELF_ET_DYN
+            ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
+            : elf_type == ELF_ET_EXEC
+                ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
+                : -1;
+        if (load_result != 0) {
             free(staged_image);
             staged_image = (unsigned char*)0;
             g_usercmd_active = 0;
@@ -585,7 +676,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
     app_main_fn entry = (app_main_fn)entry_address;
-    app_ret = entry(argc, s_argv);
+    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv);
 
     asm volatile("usercmd_return_label:\n");
     g_usercmd_active = 0;
@@ -643,15 +734,30 @@ __attribute__((noreturn)) void usercmd_abort_from_irq(void) {
     __builtin_unreachable();
 }
 
-__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector) {
+static void usercmd_print_hex(unsigned int value) {
+    static const char digits[] = "0123456789ABCDEF";
+    char output[11] = "0x00000000";
+    for (unsigned int i = 0; i < 8; i++)
+        output[2 + i] = digits[(value >> ((7 - i) * 4)) & 0xF];
+    print_string(output);
+}
+
+__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
+                                                             unsigned int eip,
+                                                             unsigned int error_code) {
     if (!g_usercmd_active) {
         for (;;) asm volatile("cli; hlt");
     }
     g_usercmd_active = 0;
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
-    (void)vector;
-    print_color_string("Application stopped after a CPU exception; returned to shell.\n", VGA_RED);
+    print_color_string("Application stopped after CPU exception: vector ", VGA_RED);
+    usercmd_print_hex(vector);
+    print_string(", EIP ");
+    usercmd_print_hex(eip);
+    print_string(", error ");
+    usercmd_print_hex(error_code);
+    print_string("; returned to shell.\n");
     asm volatile(
         "movl %0, %%esp\n"
         "movl %1, %%ebp\n"

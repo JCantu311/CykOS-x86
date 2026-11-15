@@ -5,7 +5,7 @@
 
 #define MAX_MODULES 8
 #define MODULE_SLOT_SIZE 0x4000
-#define MODULE_BASE_ADDR 0x48000
+#define MODULE_BASE_ADDR 0x90000
 
 static cyk_module_header_t* g_loaded_modules[MAX_MODULES];
 static unsigned char g_used_slots[MAX_MODULES];

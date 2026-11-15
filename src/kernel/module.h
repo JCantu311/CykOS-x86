@@ -12,7 +12,7 @@
 #define MODULE_TYPE_SOUND     0x04
 
 #ifndef MODULE_LOAD_ADDRESS
-#define MODULE_LOAD_ADDRESS   0x40000
+#define MODULE_LOAD_ADDRESS   0x90000
 #endif
 
 // Generic Level 2 Module Header (Must reside at byte offset 0 of every .drv module)
@@ -100,8 +100,8 @@ typedef struct {
 // Level 2 Display / Graphics Driver Interface Table
 typedef struct {
     cyk_module_header_t header;
-    int (*set_mode)(int mode); // 0=text, 1=VBE 640x480x8, 2=legacy 320x200x8, 3=VGA 640x480x4 fallback
-    int (*get_mode)(void);     // Returns active mode (0, 1, 2, or 3)
+    int (*set_mode)(int mode); // 0=text, 1=VGA 640x480x16, 2=VGA 320x200x256; 3 aliases 1
+    int (*get_mode)(void);     // Returns active mode (0, 1, or 2)
     void (*put_pixel)(int x, int y, unsigned char color);
     void (*fill_rect)(int x, int y, int w, int h, unsigned char color);
     void (*clear)(unsigned char color);

@@ -1,24 +1,10 @@
-ENTRY(_start)
+ENTRY(init_32bit_protected)
 OUTPUT_FORMAT("binary")
 
 SECTIONS
 {
-    /* Sector 1: Explicit MBR Boundary */
-    . = 0x7C00;
-
-    .boot_sector : {
-        KEEP(*boot.o(.boot))
-    }
-    ASSERT(SIZEOF(.boot_sector) <= 446, "Boot code overlaps the MBR partition table")
-
-    /* Force the magic signature exactly at byte index 510 */
-    . = 0x7C00 + 510;
-    .mbr_sig : {
-        SHORT(0xAA55)
-    }
-
-    /* Sector 2+: The Kernel Arena (Contiguous with MBR at 0x7E00, VMA == LMA) */
-    . = 0x7E00;
+    /* The independent BIOS loader places this kernel file at 0x10000. */
+    . = 0x10000;
     _kernel_start = .;
 
     .text : {
@@ -64,9 +50,14 @@ SECTIONS
         __bss_end = .;
     }
 
-    ASSERT(__bss_end <= 0x47E00, "Kernel and BSS exceed the boot loader read window")
+    ASSERT(_kernel_end <= 0x90000, "Kernel image overlaps the driver arena")
+    ASSERT(__bss_end <= 0x90000, "Kernel and BSS overlap the driver arena")
+    ASSERT(init_32bit_protected == _kernel_start,
+        "Kernel file must begin with the protected-mode entry")
 
     /DISCARD/ : {
+        *(.boot)
+        *(.gcc_except_table*)
         *(.eh_frame*)
         *(.note*)
         *(.comment)

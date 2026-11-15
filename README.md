@@ -3,13 +3,13 @@ The Beginning of my Operating System Development
 
 ## Build and run
 
-Build the bootable raw disk and, when the conversion tools are installed, VirtualBox and VMware disk images:
+Build the bootable raw disk and, when conversion tools are installed, virtual disk images:
 
 ```sh
 ./make.sh
 ```
 
-The build produces `bin/os_image.bin`, `bin/cykos.vdi` (with `VBoxManage`), and `bin/cykos.vmdk` (with `qemu-img`). The boot loader uses BIOS EDD LBA reads and E820 memory discovery. The kernel's ATA driver currently supports legacy IDE/ATA PIO, not AHCI or NVMe.
+The build places images under `bin/images`: `os_image.bin` and `cykos.img` are raw images; VDI, VMDK, and VHD are generated when `VBoxManage` or `qemu-img` is installed. The BIOS boot loader reads the FAT16 `KERNEL.BIN` file. The kernel's ATA driver currently supports legacy IDE/ATA PIO, not AHCI or NVMe.
 
 For VirtualBox or VMware, create a 32-bit x86 virtual machine with BIOS/Legacy boot enabled and attach the generated disk as an IDE drive. Do not attach it through AHCI/NVMe unless those drivers are added. Start a configured VM with:
 
@@ -40,7 +40,7 @@ Add one source/output/load-address row to `DRIVERS.LST`, then run `./drivers/bui
 
 ## Application Linking
 
-Rust applications are built as position-independent ELF32 shared objects. The kernel's ELF loader maps their load segments at launch, applies i386 REL relocations, and resolves undefined symbols from the explicit kernel export table in `src/kernel/exports.c`. Applications therefore no longer need kernel function addresses baked into their binaries. The loader supports kernel imports and app-local relocations; dependent shared libraries (`DT_NEEDED`) are not supported yet. Older flat binaries continue to load at the legacy app base.
+Applications can use dynamic or static linking. Set each program's mode in `APP_LINKING.LST` (`APP_NAME dynamic|static`); bundled apps default to static, and `CYKOS_LINK_MODE=static|dynamic` can override the manifest for a build. The kernel identifies ELF `ET_DYN` and `ET_EXEC` files from their headers; existing flat static binaries remain supported. Dynamic ELF32 applications use i386 REL relocations and kernel imports from `src/kernel/exports.c`. Dependent shared libraries (`DT_NEEDED`) are not supported yet. Static Rust apps are linked against `bin/kernel_syms.ld` and emitted as `ET_EXEC`.
 
 ## Sound
 
@@ -109,8 +109,8 @@ CykOS runs in 32-bit protected mode on x64 hardware; audio programming uses lega
 
 ## Graphics
 
-The generic display driver supports text mode (0), VBE 640x480 256-color indexed mode (1), legacy VGA 320x200 256-color indexed mode (2), and VGA 640x480 16-color planar fallback mode (3). Mode 1 uses standard VESA VBE mode 101h with a linear framebuffer and RGB332 DAC palette. If VBE mode 101h with an LFB is unavailable, requesting mode 1 selects the 16-color fallback and returns `-2`; applications can query the active mode with `gfx_get_info` and `gfx_get_mode`. Set mode 3 directly to request the fallback intentionally.
+The generic display driver uses standard VGA modes only: text mode (0), 640x480 16-color planar mode 12h (1), and 320x200 256-color mode 13h (2). Mode 3 remains accepted as an alias for mode 1 for compatibility. The 640x480 mode uses the VGA planar aperture and exposes no linear framebuffer; the 320x200 mode exposes an 8-bit indexed framebuffer.
 
-`gfx_get_info` reports the active dimensions, byte pitch, pixel format, and framebuffer pointer. `gfx_framebuffer` returns a pointer for modes 1 and 2. Mode 1 starts with an RGB332 DAC palette; `gfx_set_palette` replaces any palette range using RGB8 triples, so applications can install their own palette and draw a 640x480 8-bit indexed framebuffer without depending on a game-specific interface.
+`gfx_get_info` reports the active dimensions, byte pitch, pixel format, and framebuffer pointer. `gfx_framebuffer` returns a pointer for mode 2; mode 1 is planar and has no linear framebuffer. `gfx_set_palette` can replace 16 VGA palette entries in mode 1 or all 256 DAC entries in mode 2 using RGB8 triples.
 
 Bitmap drawing accepts pitched `INDEX8`, `RGB332`, `RGB24`, and `RGBA32` data. `INDEX8` uses `0xFF` as transparent; `RGBA32` uses a zero alpha as transparent and blends partial alpha with the destination. Rows are top-to-bottom, pixels left-to-right, and stride is measured in bytes. The graphics syscalls for mode control, display information, bitmap drawing, and palette updates are 187 and 196–199.

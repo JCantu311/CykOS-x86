@@ -38,7 +38,7 @@
 #define SYS_SOUND_STOP    194 // CykOS sound_stop()
 #define SYS_SOUND_GET_CAPS 195 // CykOS sound_get_caps()
 #define SYS_MSLEEP        186 // CykOS msecwait(ms)
-#define SYS_GFX_MODE      187 // CykOS gfx mode: 0=text, 1=VBE 640x480x8, 2=320x200x256, 3=640x480x16-planar
+#define SYS_GFX_MODE      187 // CykOS gfx mode: 0=text, 1=VGA 640x480x16, 2=VGA 320x200x256
 #define SYS_GFX_PUTPIXEL  188 // CykOS gfx put pixel (arg1 = x, arg2 = y, arg3 = color)
 #define SYS_GFX_RECT      189 // CykOS gfx fill rect (arg1 = packed (x<<16)|y, arg2 = packed (w<<16)|h, arg3 = color)
 #define SYS_GFX_CLEAR     190 // CykOS gfx clear screen (arg1 = color)
@@ -47,6 +47,13 @@
 #define SYS_GFX_BITMAP    197 // arg1 = packed signed x/y, arg2 = cyk_bitmap_t*
 #define SYS_TRY_GET_KEY   198 // non-blocking translated keyboard input; -1 if none
 #define SYS_GFX_PALETTE   199 // arg1 = packed first/count, arg2 = RGB8 triples
+#define SYS_CHMOD         15
+#define SYS_CHOWN         182
+#define SYS_ACCESS        33
+#define SYS_GETUID        24
+#define SYS_GETGID        47
+#define SYS_SETUID        23
+#define SYS_SETGID        46
 
 // File descriptor constants
 #define FD_STDIN          0
