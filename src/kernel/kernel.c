@@ -16,6 +16,8 @@ extern void shell_main(void);
 #define E820_ENTRY_LIMIT   20
 #define PAGE_SIZE          4096
 #define TEST_START         0x00100000
+#define KERNEL_STACK_BOTTOM 0x00130000
+#define KERNEL_STACK_TOP    0x00140000
 #define MEMTEST_STRIDE     65536 // Sample 1 page every 64 KB (16x speedup)
 #define MEMTEST_MAX_PAGES  2048  // Cap test to at most 2048 pages (~128MB sampled, finishes in < 0.2s)
 
@@ -101,6 +103,8 @@ static void run_memory_test(void) {
         end &= ~(PAGE_SIZE - 1);
         for (unsigned int address = start; address < end; address += MEMTEST_STRIDE) {
             if (tested_pages >= MEMTEST_MAX_PAGES) break;
+            // The boot stack is live while this test runs; preserve its pages.
+            if (address >= KERNEL_STACK_BOTTOM && address < KERNEL_STACK_TOP) continue;
             if (!memtest_page((volatile unsigned int*)address)) errors++;
             tested_pages++;
         }
@@ -158,16 +162,15 @@ void kernel_main(void) {
 
         print_string("[Level 1] Verifying File Read [/USR/SHARE/DOC/README.TXT]...\n");
         vfs_file_t readme_file;
-        if (vfs_find_file("/USR/SHARE/DOC/README.TXT", &readme_file) == 0 ||
-            vfs_find_file("/CYKOS/README.TXT", &readme_file) == 0) {
+        if (vfs_find_file("/USR/SHARE/DOC/README.TXT", &readme_file) == 0) {
             char file_buf[128];
             int read_bytes = vfs_read_at(&readme_file, 0, file_buf, sizeof(file_buf) - 1);
             if (read_bytes > 0) {
                 file_buf[read_bytes] = '\0';
-                print_color_string(" -> Content: ", VGA_GREEN);
                 print_string(file_buf);
+                print_string("\n");
             } else {
-                print_color_string(" -> Read failed!\n", VGA_RED);
+                print_color_string(" -> Error: README.TXT is empty!\n", VGA_RED);
             }
         } else {
             print_color_string(" -> README.TXT not found on disk!\n", VGA_RED);

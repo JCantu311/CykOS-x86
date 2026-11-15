@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+# Clean stale build artifacts to prevent build inconsistencies.
+# Clean build is the default: removes all object files, drivers, disk images,
+# and symbol exports so every build starts from a known-clean state.
+echo "Cleaning stale build artifacts..."
+rm -rf bin
+
 mkdir -p bin
 
 HOST_OS=$(uname -s)
@@ -86,7 +92,7 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/heap.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/os_image.bin
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -140,15 +146,16 @@ rm -f bin/kernel_syms_shell.ld
 if command -v rustc &> /dev/null; then
     echo "Compiling Level 4 Userland Applications..."
 
-    RUST_FLAGS="--target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=static -C panic=abort"
+    RUST_FLAGS="--target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=pic -C panic=abort"
 
-    # Helper: link a Rust userland app from either .o or .a into a flat binary
+    # Helper: link a Rust userland app from either .o or .a into a dynamic ELF
     # Usage: link_user_app <obj_or_archive> <output.BIN>
     link_user_app() {
         local input="$1"
         local output="$2"
-        # Link with --gc-sections to keep binary lean
-        $LD -m elf_i386 -T src/user/user.ld --gc-sections -u main bin/kernel_syms.ld "$input" -o "$output"
+        # Emit a position-independent ELF shared object. The kernel resolves
+        # undefined API imports when it loads the application.
+        $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s "$input" -o "$output"
     }
 
     # Compile default editor (edit.rs)
@@ -186,8 +193,8 @@ if command -v rustc &> /dev/null; then
         if [ -f bin/EDIT.BIN ]; then
             sz=$(wc -c < bin/EDIT.BIN)
             echo "  -> EDIT.BIN size: $sz bytes"
-            if [ "$sz" -gt 196608 ]; then
-                echo "  -> WARNING: EDIT.BIN ($sz bytes) exceeds USER_APP_MAX_SIZE (196608)!" >&2
+            if [ "$sz" -gt 524288 ]; then
+                echo "  -> WARNING: EDIT.BIN ($sz bytes) exceeds USER_APP_FILE_MAX (524288)!" >&2
             fi
         fi
     fi
@@ -285,6 +292,56 @@ if [ -d apps ]; then
             echo "  -> Created C binary: bin/${app_upper}.BIN ($sz bytes)"
         fi
     done
+fi
+
+# 9c. Build MODULES.CFG from DRIVERS.LST manifest
+echo "Building MODULES.CFG from DRIVERS.LST manifest..."
+if [ -f "DRIVERS.LST" ]; then
+    echo "  -> Generating MODULES.CFG from DRIVERS.LST..."
+    # Shell-based parsing of DRIVERS.LST
+    # Format: each line is "source output load_address"
+    # Extract driver output filenames and generate MODULES.CFG entries
+    printf "# CykOS Boot-Time Kernel Module List\n" > bin/MODULES.CFG
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip comments and empty lines
+        [ -z "$line" ] && continue
+        echo "$line" | grep -q '^#' && continue
+        # Extract the output filename (second field: the .drv file path)
+        driver_file=$(echo "$line" | awk '{print $2}')
+        [ -z "$driver_file" ] && continue
+        # Extract just the filename (remove any directory path keeping only the .drv name)
+        driver_filename="${driver_file##*/}"
+        # Convert .drv extension to .DRV uppercase
+        driver_file_upper="${driver_filename%.drv}.DRV"
+        driver_file_upper=$(echo "$driver_file_upper" | tr '[:lower:]' '[:upper:]')
+        printf "/BOOT/DRIVERS/%s\n" "$driver_file_upper" >> bin/MODULES.CFG
+    done < DRIVERS.LST
+else
+    echo "  -> WARNING: DRIVERS.LST not found, generating default MODULES.CFG..."
+    cat > bin/MODULES.CFG << 'MODULES_EOF'
+# CykOS Boot-Time Kernel Module List
+/BOOT/DRIVERS/CYKEYBRD.DRV
+/BOOT/DRIVERS/CYKDISK.DRV
+/BOOT/DRIVERS/CYSOUND.DRV
+/BOOT/DRIVERS/CYHDA.DRV
+/BOOT/DRIVERS/CYDISPLAY.DRV
+MODULES_EOF
+fi
+
+# Ensure BOOT/DRIVERS directory exists in the image
+# (mkfat16.py will handle injection, but we verify drivers exist)
+if [ -d bin/DRIVERS ]; then
+    echo "  -> Verifying driver files for MODULES.CFG..."
+    while IFS= read -r driver_line; do
+        # Skip comments and empty lines
+        [ -z "$driver_line" ] && continue
+        echo "$driver_line" | grep -q '^#' && continue
+        driver_file=$(echo "$driver_line" | xargs)
+        driver_filename="${driver_file##*/}"
+        if [ ! -f "bin/DRIVERS/${driver_filename}" ]; then
+            echo "  -> WARNING: Driver ${driver_filename} not found in bin/DRIVERS/"
+        fi
+    done < bin/MODULES.CFG
 fi
 
 # 10. Format FAT16 partition and package Level 2 drivers, Level 4 apps & configuration

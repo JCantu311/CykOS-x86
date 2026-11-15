@@ -33,12 +33,20 @@ pub const SYS_CYK_GETCWD: u32 = 111;
 pub const SYS_GETCWD: u32     = 183;
 pub const SYS_SOUND_TONE: u32 = 184;
 pub const SYS_SOUND_CHIME: u32 = 185;
+pub const SYS_SOUND_SET_VOLUME: u32 = 192;
+pub const SYS_SOUND_PLAY_SAMPLE: u32 = 193;
+pub const SYS_SOUND_STOP: u32 = 194;
+pub const SYS_SOUND_GET_CAPS: u32 = 195;
 pub const SYS_MSLEEP: u32     = 186;
 pub const SYS_GFX_MODE: u32   = 187;
 pub const SYS_GFX_PUTPIXEL: u32 = 188;
 pub const SYS_GFX_RECT: u32   = 189;
 pub const SYS_GFX_CLEAR: u32  = 190;
 pub const SYS_GFX_FRAMEBUF: u32 = 191;
+pub const SYS_GFX_INFO: u32 = 196;
+pub const SYS_GFX_BITMAP: u32 = 197;
+pub const SYS_TRY_GET_KEY: u32 = 198;
+pub const SYS_GFX_PALETTE: u32 = 199;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -212,9 +220,15 @@ pub fn read_char() -> u8 {
     unsafe { syscall::syscall0(SYS_GET_KEY) as u8 }
 }
 
+/// Poll for a translated character without blocking the caller.
+pub fn try_read_char() -> Option<u8> {
+    let result = unsafe { syscall::syscall0(SYS_TRY_GET_KEY) as i32 };
+    if result < 0 { None } else { Some(result as u8) }
+}
+
 /// Check if a keystroke is pending
 pub fn key_available() -> bool {
-    unsafe { syscall::syscall0(SYS_HAS_KEY) != 0 }
+    unsafe { syscall::syscall0(SYS_HAS_KEY) as i32 > 0 }
 }
 
 /// Sleep for specified seconds
@@ -382,11 +396,85 @@ pub fn sound_chime() -> i32 {
     }
 }
 
+/// Set audio volume (0-100). Returns 0 on success, -1 if unsupported.
+pub fn sound_set_volume(volume: u32) -> i32 {
+    unsafe {
+        syscall::syscall1(SYS_SOUND_SET_VOLUME, volume) as i32
+    }
+}
+
+/// Play a digitized audio sample. `data` points to raw PCM bytes, `len` is
+/// the byte count, `freq_hz` is the sample rate. Returns 0 on success,
+/// -1 if the driver does not support sample playback.
+pub fn sound_play_sample(data: *const u8, len: u32, freq_hz: u32) -> i32 {
+    unsafe {
+        syscall::syscall3(SYS_SOUND_PLAY_SAMPLE, data as u32, len, freq_hz) as i32
+    }
+}
+
+/// Stop all audio output. Returns 0 on success.
+pub fn sound_stop() -> i32 {
+    unsafe {
+        syscall::syscall0(SYS_SOUND_STOP) as i32
+    }
+}
+
+/// Query sound driver capabilities. Returns a bitmask of SOUND_CAP_* flags.
+pub fn sound_get_caps() -> u32 {
+    unsafe {
+        syscall::syscall0(SYS_SOUND_GET_CAPS)
+    }
+}
+
+// Sound capability flags (matching C module.h)
+pub const SOUND_CAP_NONE: u32   = 0x00;
+pub const SOUND_CAP_TONE: u32   = 0x01;
+pub const SOUND_CAP_CHIME: u32  = 0x02;
+pub const SOUND_CAP_SAMPLE: u32 = 0x04;
+pub const SOUND_CAP_MUSIC: u32  = 0x08;
+pub const SOUND_CAP_VOLUME: u32 = 0x10;
+pub const SOUND_CAP_ALL: u32    = 0xFF;
+
 // =========================================================================
-// Graphics Display API (Mode 13h: 320x200 256-color)
+// Graphics Display API
 // =========================================================================
 
-/// Set display mode (0 = 80x25 text, 1 = 320x200 graphics)
+pub const GFX_MODE_TEXT: i32 = 0;
+pub const GFX_MODE_640X480: i32 = 1;
+pub const GFX_MODE_320X200: i32 = 2;
+pub const GFX_MODE_640X480_VGA16: i32 = 3;
+
+pub const GFX_PIXEL_TEXT16: u32 = 0;
+pub const GFX_PIXEL_INDEX8: u32 = 1;
+pub const GFX_PIXEL_VGA_PLANAR4: u32 = 2;
+
+pub const GFX_BITMAP_INDEX8: u32 = 1;
+pub const GFX_BITMAP_RGB332: u32 = 2;
+pub const GFX_BITMAP_RGB24: u32 = 3;
+pub const GFX_BITMAP_RGBA32: u32 = 4;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GfxInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bits_per_pixel: u32,
+    pub pixel_format: u32,
+    pub framebuffer: *mut u8,
+}
+
+#[repr(C)]
+struct GfxBitmap {
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    pixels: *const u8,
+}
+
+/// Set display mode (0 = text, 1 = VBE 640x480x256, 2 = 320x200x256,
+/// 3 = VGA 640x480x16). Mode 1 returns an error if VBE LFB is unavailable.
 pub fn gfx_set_mode(mode: i32) -> i32 {
     unsafe { syscall::syscall1(SYS_GFX_MODE, mode as u32) as i32 }
 }
@@ -396,7 +484,7 @@ pub fn gfx_get_mode() -> i32 {
     unsafe { syscall::syscall1(SYS_GFX_MODE, 0xFFFFFFFF) as i32 }
 }
 
-/// Plot a single pixel at (x, y) with VGA palette color (0..255)
+/// Plot a pixel using the active display palette index.
 pub fn gfx_put_pixel(x: i32, y: i32, color: u8) {
     unsafe { syscall::syscall3(SYS_GFX_PUTPIXEL, x as u32, y as u32, color as u32); }
 }
@@ -413,9 +501,42 @@ pub fn gfx_clear(color: u8) {
     unsafe { syscall::syscall1(SYS_GFX_CLEAR, color as u32); }
 }
 
-/// Retrieve raw linear framebuffer pointer (0xA0000 in 320x200 mode)
+/// Retrieve the active linear framebuffer pointer when the current mode provides one.
 pub fn gfx_framebuffer() -> *mut u8 {
     unsafe { syscall::syscall0(SYS_GFX_FRAMEBUF) as *mut u8 }
+}
+
+/// Query the active display geometry and pixel layout.
+pub fn gfx_get_info(info: &mut GfxInfo) -> i32 {
+    unsafe { syscall::syscall1(SYS_GFX_INFO, info as *mut GfxInfo as u32) as i32 }
+}
+
+/// Draw a pitched INDEX8, RGB332, RGB24, or RGBA32 bitmap. INDEX8 pixels are
+/// passed through in indexed modes; RGB formats are quantized to the active palette.
+pub fn gfx_draw_bitmap(x: i16, y: i16, width: u32, height: u32,
+                       stride: u32, format: u32, pixels: &[u8]) -> i32 {
+    let bitmap = GfxBitmap {
+        width,
+        height,
+        stride,
+        format,
+        pixels: pixels.as_ptr(),
+    };
+    let packed_xy = ((x as u16 as u32) << 16) | (y as u16 as u32);
+    unsafe {
+        syscall::syscall2(SYS_GFX_BITMAP, packed_xy, &bitmap as *const GfxBitmap as u32) as i32
+    }
+}
+
+/// Replace a range of RGB8 entries in the 256-color VGA/VBE DAC palette.
+pub fn gfx_set_palette(first: u16, entries: &[[u8; 3]]) -> i32 {
+    if entries.is_empty() || first >= 256 || entries.len() > 256 - first as usize {
+        return -1;
+    }
+    let packed = ((first as u32) << 16) | entries.len() as u32;
+    unsafe {
+        syscall::syscall2(SYS_GFX_PALETTE, packed, entries.as_ptr() as u32) as i32
+    }
 }
 
 // =========================================================================

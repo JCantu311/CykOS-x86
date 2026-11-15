@@ -2,8 +2,8 @@
 set -e
 
 # CykOS Rust Userland Application Build & Packaging Tool
-# Builds standalone #![no_std] Rust apps, links them against kernel symbols,
-# and updates the FAT16 filesystem image for QEMU.
+# Builds standalone #![no_std] Rust apps as position-independent ELF objects.
+# Kernel API imports are resolved by the runtime loader.
 
 cd "$(dirname "$0")/.."
 
@@ -37,25 +37,7 @@ if command -v rustup &> /dev/null; then
     rustup target add i686-unknown-linux-gnu 2>/dev/null || true
 fi
 
-# 3. Ensure Kernel Symbol Table exists for external linking
-if [ ! -f bin/kernel_syms.ld ]; then
-    if [ -f bin/kernel.map ]; then
-        python3 -c "
-import re
-with open('bin/kernel.map') as f, open('bin/kernel_syms.ld', 'w') as out:
-    for line in f:
-        m = re.match(r'^\s+(0x[0-9a-fA-F]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$', line)
-        if m:
-            out.write(f'{m.group(2)} = {m.group(1)};\n')
-" 2>/dev/null || true
-    fi
-fi
-
-if [ ! -f bin/kernel_syms.ld ]; then
-    echo "Warning: bin/kernel_syms.ld not found. Run ./make.sh first to build the kernel."
-fi
-
-# Function to compile a single Rust userland application
+# 3. Build a single Rust userland application as a dynamic ELF object.
 build_rust_app() {
     local src="$1"
     local name="$2"
@@ -66,16 +48,13 @@ build_rust_app() {
 
     rustc --target i686-unknown-linux-gnu -O \
         -C overflow-checks=no \
-        -C relocation-model=static \
+        -C relocation-model=pic \
         -C panic=abort \
         -C target-feature=-sse,-sse2 \
         --emit=obj "$src" -o "apps/bin/${name}.o"
 
-    if [ -f bin/kernel_syms.ld ]; then
-        $LD -m elf_i386 -T apps/apps.ld bin/kernel_syms.ld "apps/bin/${name}.o" -o "$out_bin"
-    else
-        $LD -m elf_i386 -T apps/apps.ld "apps/bin/${name}.o" -o "$out_bin"
-    fi
+    $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s \
+        "apps/bin/${name}.o" -o "$out_bin"
 
     rm -f "apps/bin/${name}.o"
     echo "  [OK] Built $out_bin"

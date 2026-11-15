@@ -3,6 +3,7 @@
 #include "cykastd.h"
 #include "syscall.h"
 #include "modload.h"
+#include "exports.h"
 
 #define USERCMDS_FILE     "/ETC/USERCMDS.LST"
 #define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
@@ -10,9 +11,239 @@
 #define USERCMDS_OLD_FALLBACK "/CYKOS/USERCMDS.TXT"
 #define USER_BIN_DIR      "/USR/BIN/"
 #define LEGACY_BIN_DIR    "/CYKOS/"
-#define USER_APP_BASE     0x50000   // Conventional user application memory base
+#define USER_APP_BASE     0x68000   // Immediately after the 8 reserved 16 KiB module slots
 #define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
+#define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
+
+#define ELF_ET_DYN        3
+#define ELF_EM_386        3
+#define ELF_PT_LOAD       1
+#define ELF_PT_DYNAMIC    2
+#define ELF_PF_X          1
+#define ELF_DT_NULL       0
+#define ELF_DT_NEEDED     1
+#define ELF_DT_HASH       4
+#define ELF_DT_STRTAB     5
+#define ELF_DT_SYMTAB     6
+#define ELF_DT_STRSZ      10
+#define ELF_DT_SYMENT     11
+#define ELF_DT_REL        17
+#define ELF_DT_RELSZ      18
+#define ELF_DT_RELENT     19
+#define ELF_DT_PLTREL     20
+#define ELF_DT_JMPREL     23
+#define ELF_DT_PLTRELSZ   2
+#define ELF_SHN_UNDEF     0
+#define ELF_SHN_ABS       0xFFF1
+#define ELF_STB_WEAK      2
+#define ELF_R_386_NONE    0
+#define ELF_R_386_32      1
+#define ELF_R_386_PC32    2
+#define ELF_R_386_GLOB_DAT 6
+#define ELF_R_386_JMP_SLOT 7
+#define ELF_R_386_RELATIVE 8
+
+typedef struct __attribute__((packed)) {
+    unsigned char ident[16];
+    unsigned short type;
+    unsigned short machine;
+    unsigned int version;
+    unsigned int entry;
+    unsigned int phoff;
+    unsigned int shoff;
+    unsigned int flags;
+    unsigned short ehsize;
+    unsigned short phentsize;
+    unsigned short phnum;
+    unsigned short shentsize;
+    unsigned short shnum;
+    unsigned short shstrndx;
+} elf32_ehdr_t;
+
+typedef struct __attribute__((packed)) {
+    unsigned int type;
+    unsigned int offset;
+    unsigned int vaddr;
+    unsigned int paddr;
+    unsigned int filesz;
+    unsigned int memsz;
+    unsigned int flags;
+    unsigned int align;
+} elf32_phdr_t;
+
+typedef struct __attribute__((packed)) {
+    unsigned int tag;
+    unsigned int value;
+} elf32_dyn_t;
+
+typedef struct __attribute__((packed)) {
+    unsigned int offset;
+    unsigned int info;
+} elf32_rel_t;
+
+typedef struct __attribute__((packed)) {
+    unsigned int name;
+    unsigned int value;
+    unsigned int size;
+    unsigned char info;
+    unsigned char other;
+    unsigned short shndx;
+} elf32_sym_t;
+
+static int image_range(unsigned int vaddr, unsigned int length,
+                       unsigned int min_vaddr, unsigned int max_vaddr) {
+    return vaddr >= min_vaddr && vaddr <= max_vaddr && length <= max_vaddr - vaddr;
+}
+
+static int resolve_elf_relocations(unsigned int load_bias,
+                                   unsigned int min_vaddr, unsigned int max_vaddr,
+                                   unsigned int rel_vaddr, unsigned int rel_size,
+                                   unsigned int rel_entry_size,
+                                   unsigned int sym_vaddr, unsigned int sym_count,
+                                   unsigned int str_vaddr, unsigned int str_size) {
+    if (rel_size == 0) return 0;
+    if (rel_entry_size != sizeof(elf32_rel_t) || rel_size % rel_entry_size != 0 ||
+        !image_range(rel_vaddr, rel_size, min_vaddr, max_vaddr)) return -1;
+
+    elf32_rel_t* rels = (elf32_rel_t*)(load_bias + rel_vaddr);
+    elf32_sym_t* symbols = (elf32_sym_t*)(load_bias + sym_vaddr);
+    const char* strings = (const char*)(load_bias + str_vaddr);
+    unsigned int count = rel_size / rel_entry_size;
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int type = rels[i].info & 0xFF;
+        unsigned int symbol_index = rels[i].info >> 8;
+        if (type == ELF_R_386_NONE) continue;
+        if (!image_range(rels[i].offset, sizeof(unsigned int), min_vaddr, max_vaddr)) return -1;
+        unsigned int* place = (unsigned int*)(load_bias + rels[i].offset);
+        if (type == ELF_R_386_RELATIVE) {
+            *place += load_bias;
+            continue;
+        }
+        if (type != ELF_R_386_32 && type != ELF_R_386_PC32 &&
+            type != ELF_R_386_GLOB_DAT && type != ELF_R_386_JMP_SLOT) return -1;
+        if (symbol_index >= sym_count) return -1;
+
+        elf32_sym_t* symbol = &symbols[symbol_index];
+        unsigned int symbol_address;
+        if (symbol->shndx == ELF_SHN_UNDEF) {
+            if (symbol->name >= str_size) return -1;
+            unsigned int remain = str_size - symbol->name;
+            unsigned int n = 0;
+            while (n < remain && strings[symbol->name + n]) n++;
+            if (n == remain) return -1;
+            if (kernel_export_resolve(strings + symbol->name, &symbol_address) != 0) {
+                if ((symbol->info >> 4) == ELF_STB_WEAK) symbol_address = 0;
+                else return -1;
+            }
+        } else if (symbol->shndx == ELF_SHN_ABS) {
+            symbol_address = symbol->value;
+        } else {
+            if (symbol->value < min_vaddr || symbol->value >= max_vaddr) return -1;
+            symbol_address = load_bias + symbol->value;
+        }
+
+        if (type == ELF_R_386_32) *place += symbol_address;
+        else if (type == ELF_R_386_PC32) *place += symbol_address - (unsigned int)place;
+        else *place = symbol_address;
+    }
+    return 0;
+}
+
+static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
+                              unsigned char* load_area, unsigned int* entry_out) {
+    const elf32_ehdr_t* eh = (const elf32_ehdr_t*)file;
+    if (file_size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' ||
+        eh->ident[2] != 'L' || eh->ident[3] != 'F' || eh->ident[4] != 1 ||
+        eh->ident[5] != 1 || eh->type != ELF_ET_DYN || eh->machine != ELF_EM_386 ||
+        eh->phentsize != sizeof(elf32_phdr_t) || eh->phnum == 0 || eh->phnum > 32 ||
+        eh->phoff > file_size || eh->phnum > (file_size - eh->phoff) / eh->phentsize) return -1;
+
+    const elf32_phdr_t* ph = (const elf32_phdr_t*)(file + eh->phoff);
+    unsigned int min_vaddr = 0xFFFFFFFFu;
+    unsigned int max_vaddr = 0;
+    unsigned int dynamic_vaddr = 0;
+    unsigned int dynamic_size = 0;
+    int executable_segment = 0;
+    for (unsigned int i = 0; i < eh->phnum; i++) {
+        if (ph[i].type == ELF_PT_DYNAMIC) {
+            dynamic_vaddr = ph[i].vaddr;
+            dynamic_size = ph[i].memsz;
+        }
+        if (ph[i].type != ELF_PT_LOAD) continue;
+        if (ph[i].filesz > ph[i].memsz || ph[i].offset > file_size ||
+            ph[i].filesz > file_size - ph[i].offset ||
+            ph[i].vaddr > 0xFFFFFFFFu - ph[i].memsz) return -1;
+        if (ph[i].vaddr < min_vaddr) min_vaddr = ph[i].vaddr;
+        if (ph[i].vaddr + ph[i].memsz > max_vaddr) max_vaddr = ph[i].vaddr + ph[i].memsz;
+        if (ph[i].flags & ELF_PF_X) executable_segment = 1;
+    }
+    if (min_vaddr == 0xFFFFFFFFu || max_vaddr <= min_vaddr ||
+        min_vaddr > USER_APP_BASE || max_vaddr - min_vaddr > USER_APP_MAX_SIZE ||
+        !executable_segment || !dynamic_vaddr || !dynamic_size ||
+        !image_range(dynamic_vaddr, dynamic_size, min_vaddr, max_vaddr)) return -1;
+
+    unsigned int load_base = (unsigned int)load_area;
+    if (load_base < min_vaddr) return -1;
+    unsigned int load_bias = load_base - min_vaddr;
+    if (load_bias > 0xFFFFFFFFu - max_vaddr ||
+        load_bias + max_vaddr > load_base + USER_APP_MAX_SIZE) return -1;
+
+    memset(load_area, 0, USER_APP_MAX_SIZE);
+    for (unsigned int i = 0; i < eh->phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD) continue;
+        memcpy((void*)(load_bias + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
+    }
+
+    unsigned int hash_vaddr = 0, sym_vaddr = 0, str_vaddr = 0;
+    unsigned int str_size = 0, sym_entry_size = 0;
+    unsigned int rel_vaddr = 0, rel_size = 0, rel_entry_size = sizeof(elf32_rel_t);
+    unsigned int plt_rel_vaddr = 0, plt_rel_size = 0, plt_rel_type = 0;
+    elf32_dyn_t* dyn = (elf32_dyn_t*)(load_bias + dynamic_vaddr);
+    unsigned int dynamic_entries = dynamic_size / sizeof(elf32_dyn_t);
+    int saw_null = 0;
+    for (unsigned int i = 0; i < dynamic_entries; i++) {
+        switch (dyn[i].tag) {
+            case ELF_DT_NULL: saw_null = 1; i = dynamic_entries; break;
+            case ELF_DT_NEEDED: return -1; // No dependent shared libraries yet.
+            case ELF_DT_HASH: hash_vaddr = dyn[i].value; break;
+            case ELF_DT_SYMTAB: sym_vaddr = dyn[i].value; break;
+            case ELF_DT_STRTAB: str_vaddr = dyn[i].value; break;
+            case ELF_DT_STRSZ: str_size = dyn[i].value; break;
+            case ELF_DT_SYMENT: sym_entry_size = dyn[i].value; break;
+            case ELF_DT_REL: rel_vaddr = dyn[i].value; break;
+            case ELF_DT_RELSZ: rel_size = dyn[i].value; break;
+            case ELF_DT_RELENT: rel_entry_size = dyn[i].value; break;
+            case ELF_DT_JMPREL: plt_rel_vaddr = dyn[i].value; break;
+            case ELF_DT_PLTRELSZ: plt_rel_size = dyn[i].value; break;
+            case ELF_DT_PLTREL: plt_rel_type = dyn[i].value; break;
+            default: break;
+        }
+    }
+    if (!saw_null || !hash_vaddr || !sym_vaddr || !str_vaddr || !str_size ||
+        sym_entry_size != sizeof(elf32_sym_t) ||
+        !image_range(hash_vaddr, 8, min_vaddr, max_vaddr) ||
+        !image_range(sym_vaddr, sizeof(elf32_sym_t), min_vaddr, max_vaddr) ||
+        !image_range(str_vaddr, str_size, min_vaddr, max_vaddr)) return -1;
+
+    unsigned int* hash = (unsigned int*)(load_bias + hash_vaddr);
+    unsigned int symbol_count = hash[1];
+    if (symbol_count == 0 || sym_vaddr > max_vaddr ||
+        symbol_count > (max_vaddr - sym_vaddr) / sizeof(elf32_sym_t) ||
+        !image_range(sym_vaddr, symbol_count * sizeof(elf32_sym_t), min_vaddr, max_vaddr)) return -1;
+    if (plt_rel_size && (plt_rel_type != ELF_DT_REL || !plt_rel_vaddr)) return -1;
+
+    if (resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, rel_vaddr, rel_size,
+                                rel_entry_size, sym_vaddr, symbol_count,
+                                str_vaddr, str_size) != 0 ||
+        resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, plt_rel_vaddr, plt_rel_size,
+                                sizeof(elf32_rel_t), sym_vaddr, symbol_count,
+                                str_vaddr, str_size) != 0) return -1;
+
+    if (!image_range(eh->entry, 1, min_vaddr, max_vaddr)) return -1;
+    *entry_out = load_bias + eh->entry;
+    return 0;
+}
 
 static volatile int g_usercmd_active = 0;
 static unsigned int g_usercmd_saved_esp = 0;
@@ -127,6 +358,25 @@ static void shell_output_char(char ch) {
 
 int exec_user_command(const char* cmd_name, const char* args) {
     if (!cmd_name || cmd_name[0] == '\0') return 0;
+    volatile int app_ret = 0;
+    unsigned char* staged_image = (unsigned char*)0;
+    void* dest = (void*)USER_APP_BASE;
+    unsigned int entry_address = USER_APP_BASE;
+
+    // Cover command lookup and disk loading too. Ctrl+C abandons this function
+    // through usercmd_return_label, so capture its stable frame before work.
+    asm volatile(
+        "pushfl\n"
+        "cli\n"
+        "leal 4(%%esp), %%eax\n"
+        "movl %%eax, %0\n"
+        "movl %%ebp, %1\n"
+        "movl $1, %2\n"
+        "popfl\n"
+        : "=m"(g_usercmd_saved_esp), "=m"(g_usercmd_saved_ebp), "=m"(g_usercmd_active)
+        :
+        : "eax", "memory"
+    );
 
     char target_file[USER_PATH_MAX];
     target_file[0] = '\0';
@@ -187,6 +437,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
                     } else if (vfs_find_file(legacy_target, &probe) == 0) {
                         memcpy(target_file, legacy_target, strlen(legacy_target) + 1);
                     } else {
+                        g_usercmd_active = 0;
                         return 0;
                     }
                 }
@@ -213,6 +464,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
             }
         }
         if (!found_in_root) {
+            g_usercmd_active = 0;
             print_color_string("CykShell: executable not found: ", VGA_RED);
             print_string(target_file);
             print_string("\n");
@@ -222,34 +474,66 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Check if executable file is empty
     if (app_entry.size == 0) {
+        g_usercmd_active = 0;
         print_color_string("CykShell: executable is empty (0 bytes): ", VGA_RED);
         print_string(target_file);
         print_string("\n");
         return 1;
     }
+    if (app_entry.size > USER_APP_FILE_MAX) {
+        g_usercmd_active = 0;
+        print_color_string("CykShell: executable file is too large: ", VGA_RED);
+        print_string(target_file);
+        print_string("\n");
+        return 1;
+    }
 
-    // Load binary into application memory
-    void* dest = (void*)USER_APP_BASE;
-
-    // Zero out the app memory region first (clean BSS, prevent stale data)
-    memset(dest, 0, USER_APP_MAX_SIZE);
-
-    int bytes_read = vfs_read_at(&app_entry, 0, dest, USER_APP_MAX_SIZE);
-    if (bytes_read <= 0) {
+    staged_image = (unsigned char*)malloc(app_entry.size);
+    if (!staged_image) {
+        g_usercmd_active = 0;
+        print_color_string("CykShell: not enough memory to load: ", VGA_RED);
+        print_string(target_file);
+        print_string("\n");
+        return 1;
+    }
+    int bytes_read = vfs_read_at(&app_entry, 0, staged_image, app_entry.size);
+    if (bytes_read != (int)app_entry.size) {
+        free(staged_image);
+        staged_image = (unsigned char*)0;
+        g_usercmd_active = 0;
         print_color_string("CykShell: failed to load: ", VGA_RED);
         print_string(target_file);
         print_string("\n");
         return 1;
     }
 
-    // Check for ELF header (common mistake: binary is ELF not flat)
-    unsigned char* dbg = (unsigned char*)dest;
-    if (dbg[0] == 0x7F && dbg[1] == 'E' && dbg[2] == 'L' && dbg[3] == 'F') {
-        print_color_string("CykShell: executable is ELF format, flat binary required: ", VGA_RED);
-        print_string(target_file);
-        print_string("\n");
-        return 1;
+    if (app_entry.size >= 4 && staged_image[0] == 0x7F && staged_image[1] == 'E' &&
+        staged_image[2] == 'L' && staged_image[3] == 'F') {
+        if (load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest,
+                               &entry_address) != 0) {
+            free(staged_image);
+            staged_image = (unsigned char*)0;
+            g_usercmd_active = 0;
+            print_color_string("CykShell: invalid ELF app or unresolved kernel import: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1;
+        }
+    } else {
+        if (app_entry.size > USER_APP_MAX_SIZE) {
+            free(staged_image);
+            staged_image = (unsigned char*)0;
+            g_usercmd_active = 0;
+            print_color_string("CykShell: flat app exceeds its memory limit: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1;
+        }
+        memset(dest, 0, USER_APP_MAX_SIZE);
+        memcpy(dest, staged_image, app_entry.size);
     }
+    free(staged_image);
+    staged_image = (unsigned char*)0;
 
     // Tokenize arguments into standard (int argc, char** argv)
     #define MAX_APP_ARGS 16
@@ -298,28 +582,19 @@ int exec_user_command(const char* cmd_name, const char* args) {
     }
     s_argv[argc] = (void*)0; // NULL termination
 
-    // Prepare execution context frame for SYS_EXIT / Ctrl+C jump
-    volatile int app_ret = 0;
-    static unsigned int saved_esp;
-    static unsigned int saved_ebp;
-
-    g_usercmd_active = 1;
-
-    asm volatile(
-        "movl %%esp, %0\n"
-        "movl %%ebp, %1\n"
-        : "=m"(saved_esp), "=m"(saved_ebp)
-    );
-    g_usercmd_saved_esp = saved_esp;
-    g_usercmd_saved_ebp = saved_ebp;
-
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
-    app_main_fn entry = (app_main_fn)dest;
+    app_main_fn entry = (app_main_fn)entry_address;
     app_ret = entry(argc, s_argv);
 
     asm volatile("usercmd_return_label:\n");
     g_usercmd_active = 0;
+    if (staged_image) {
+        free(staged_image);
+        staged_image = (unsigned char*)0;
+    }
+    cyk_display_driver_t* dpy = modload_get_display_driver();
+    if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
     (void)app_ret;
 
     return 1;
@@ -339,10 +614,54 @@ void usercmd_terminate(int exit_code) {
     asm volatile(
         "movl %0, %%esp\n"
         "movl %1, %%ebp\n"
+        "sti\n"
         "jmp usercmd_return_label\n"
         :
         : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
     );
+}
+
+__attribute__((noreturn)) void usercmd_abort_from_irq(void) {
+    if (!g_usercmd_active) {
+        for (;;) asm volatile("hlt");
+    }
+    g_usercmd_active = 0;
+    cyk_display_driver_t* dpy = modload_get_display_driver();
+    if (dpy && dpy->get_mode && dpy->get_mode() != 0) {
+        dpy->set_mode(0);
+    }
+    print_string("^C\n");
+    asm volatile(
+        "movl %0, %%esp\n"
+        "movl %1, %%ebp\n"
+        "sti\n"
+        "jmp usercmd_return_label\n"
+        :
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "memory"
+    );
+    __builtin_unreachable();
+}
+
+__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector) {
+    if (!g_usercmd_active) {
+        for (;;) asm volatile("cli; hlt");
+    }
+    g_usercmd_active = 0;
+    cyk_display_driver_t* dpy = modload_get_display_driver();
+    if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
+    (void)vector;
+    print_color_string("Application stopped after a CPU exception; returned to shell.\n", VGA_RED);
+    asm volatile(
+        "movl %0, %%esp\n"
+        "movl %1, %%ebp\n"
+        "sti\n"
+        "jmp usercmd_return_label\n"
+        :
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "memory"
+    );
+    __builtin_unreachable();
 }
 
 int usercmd_is_running(void) {

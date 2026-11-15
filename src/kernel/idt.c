@@ -1,11 +1,74 @@
 #include "idt.h"
 #include "cykastd.h"
+#include "usercmd.h"
 
 #define IDT_ENTRIES 256
 
 static idt_entry_t g_idt[IDT_ENTRIES];
 static idt_ptr_t   g_idtp;
 static isr_handler_t g_interrupt_handlers[IDT_ENTRIES];
+
+#define KEYBOARD_QUEUE_SIZE 64
+#define KEYBOARD_QUEUE_MASK (KEYBOARD_QUEUE_SIZE - 1)
+static volatile unsigned char g_keyboard_queue[KEYBOARD_QUEUE_SIZE];
+static volatile unsigned char g_keyboard_head;
+static volatile unsigned char g_keyboard_tail;
+static volatile unsigned char g_irq_ctrl_down;
+
+int keyboard_irq_has_scancode(void) {
+    return g_keyboard_head != g_keyboard_tail;
+}
+
+int keyboard_irq_read_scancode(void) {
+    unsigned char tail = g_keyboard_tail;
+    if (tail == g_keyboard_head) return -1;
+    unsigned char scancode = g_keyboard_queue[tail];
+    g_keyboard_tail = (unsigned char)((tail + 1) & KEYBOARD_QUEUE_MASK);
+    return scancode;
+}
+
+static void keyboard_queue_clear(void) {
+    g_keyboard_tail = g_keyboard_head;
+}
+
+static void keyboard_queue_push(unsigned char scancode) {
+    unsigned char head = g_keyboard_head;
+    unsigned char next = (unsigned char)((head + 1) & KEYBOARD_QUEUE_MASK);
+    if (next == g_keyboard_tail) {
+        g_keyboard_tail = (unsigned char)((g_keyboard_tail + 1) & KEYBOARD_QUEUE_MASK);
+    }
+    g_keyboard_queue[head] = scancode;
+    g_keyboard_head = next;
+}
+
+static void keyboard_irq_handler(registers_t* regs) {
+    unsigned char scancode = inb(0x60);
+    if (scancode == 0x1D) g_irq_ctrl_down = 1;
+    else if (scancode == 0x9D) g_irq_ctrl_down = 0;
+
+    if (g_irq_ctrl_down && scancode == 0x2E && usercmd_is_running()) {
+        keyboard_queue_clear();
+        regs->eflags &= ~(1u << 9);
+        regs->eip = (unsigned int)usercmd_abort_from_irq;
+    } else {
+        keyboard_queue_push(scancode);
+    }
+    outb(0x20, 0x20);
+}
+
+static void pic_init_keyboard_only(void) {
+    outb(0x20, 0x11); outb(0x80, 0);
+    outb(0xA0, 0x11); outb(0x80, 0);
+    outb(0x21, 0x20); outb(0x80, 0);
+    outb(0xA1, 0x28); outb(0x80, 0);
+    outb(0x21, 0x04); outb(0x80, 0);
+    outb(0xA1, 0x02); outb(0x80, 0);
+    outb(0x21, 0x01); outb(0x80, 0);
+    outb(0xA1, 0x01); outb(0x80, 0);
+    // Only IRQ1 is enabled until handlers for the other IRQs exist.
+    outb(0x21, 0xFD);
+    outb(0xA1, 0xFF);
+}
 
 // Names of standard x86 CPU exceptions (0..31)
 static const char* const g_exception_messages[32] = {
@@ -69,6 +132,12 @@ void fault_handler(registers_t* regs) {
         return;
     }
 
+    // Recover from faults in a loaded app instead of disabling all interrupts
+    // and trapping the machine on the kernel panic screen.
+    if (usercmd_is_running()) {
+        usercmd_abort_from_exception(regs->int_no);
+    }
+
     // Unhandled CPU Exception: Display Blue Screen / Crash Dump
     clear_screen();
     print_color_string("================================================================================\n", VGA_RED);
@@ -124,6 +193,7 @@ extern void isr16(void); extern void isr17(void); extern void isr18(void); exter
 extern void isr20(void); extern void isr21(void); extern void isr22(void); extern void isr23(void);
 extern void isr24(void); extern void isr25(void); extern void isr26(void); extern void isr27(void);
 extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
+extern void isr33(void);  // IRQ1: keyboard
 extern void isr128(void); // Vector 0x80: Syscall Gate
 
 // Inline assembly defining the raw ISR stubs
@@ -181,6 +251,9 @@ __asm__(
     "ISR_NOERRCODE 29\n"
     "ISR_NOERRCODE 30\n"
     "ISR_NOERRCODE 31\n"
+
+    // Remapped master PIC IRQ1 (keyboard)
+    "ISR_NOERRCODE 33\n"
 
     // Syscall 0x80 (128)
     "ISR_NOERRCODE 128\n"
@@ -251,9 +324,14 @@ void idt_init(void) {
     idt_set_gate(30, (unsigned int)isr30, 0x08, 0x8E);
     idt_set_gate(31, (unsigned int)isr31, 0x08, 0x8E);
 
+    idt_set_gate(33, (unsigned int)isr33, 0x08, 0x8E);
+    register_interrupt_handler(33, keyboard_irq_handler);
+
     // Install Syscall Handler at 0x80 (128) - 0xEE sets DPL=3 so userland can call 'int 0x80'
     idt_set_gate(128, (unsigned int)isr128, 0x08, 0xEE);
 
     // Load IDT into CPU register
     asm volatile("lidt %0" : : "m"(g_idtp));
+    pic_init_keyboard_only();
+    asm volatile("sti");
 }

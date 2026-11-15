@@ -5,8 +5,8 @@ This directory provides the standalone tooling to compile, link, and package Rus
 ## Architecture
 
 - **Freestanding Rust**: All applications are written with `#![no_std]` and `#![no_main]`.
-- **Memory Layout**: Executables are loaded at `0x50000` (`USER_APP_BASE`) in 32-bit protected mode.
-- **External Linking**: Applications call kernel functions directly via `bin/kernel_syms.ld`. They are linked independently into flat binary files (`.BIN`) and never linked into the kernel ELF.
+- **Memory Layout**: Executables are loaded into the reserved application region at `0x68000` in 32-bit protected mode.
+- **Dynamic Linking**: Rust applications are emitted as position-independent ELF32 shared objects. The kernel maps their load segments and resolves imports against its public export table at launch. Existing flat binaries remain supported.
 - **Packaging**: The image builder places the shell in `/bin`, applications in `/usr/bin`, drivers and their manifest in `/boot`, aliases in `/etc`, and documentation in `/usr/share/doc`.
 
 Games live under `apps/games/` and are built like every other Rust userland app. Cykis is the bundled falling-block game; run it from CykShell with `cykis`.

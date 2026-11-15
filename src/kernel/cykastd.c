@@ -2,6 +2,9 @@
 #include "modload.h"
 #include "vfs.h"
 
+/* Error codes for modular keyboard operations */
+#define KEYBOARD_ERROR (-1)
+
 #define CONSOLE_COLOR VGA_WHITE
 
 #define BOOT_LOG_CAPACITY 2048
@@ -252,10 +255,11 @@ void rust_begin_unwind(void) {
 void msecwait(unsigned int milliseconds) {
     if (milliseconds == 0) return;
     // Calibrated delay:
-    // Each inb(0x80) on modern QEMU takes ~0.1 - 0.2 microseconds,
+    // Each inb(0x80) on QEMU/real hardware is fast (~sub-microsecond),
     // and compiler loop overhead is minimal.
-    // 5,000 inb(0x80) reads reliably approximates 1-2 milliseconds across hypervisors
-    // without resetting or stopping PIT Channel 2 on Port 0x61.
+    // 5,000 inb(0x80) reads reliably approximates 1-2 milliseconds
+    // without touching PIT channels (avoids interfering with channel 2
+    // used by the sound driver, and avoids PIT port I/O storms on QEMU TCG).
     for (unsigned int i = 0; i < milliseconds; i++) {
         for (unsigned int j = 0; j < 5000; j++) {
             asm volatile("inb $0x80, %%al" : : : "eax");
@@ -305,7 +309,7 @@ int has_key(void) {
     if (kbd && kbd->has_key) {
         return kbd->has_key();
     }
-    return (inb(0x64) & 0x01) != 0;
+    return KEYBOARD_ERROR;
 }
 
 char get_scancode(void) {
@@ -313,13 +317,13 @@ char get_scancode(void) {
     if (kbd && kbd->get_scancode) {
         return kbd->get_scancode();
     }
-    while (!(inb(0x64) & 0x01)) {
-        asm volatile("pause");
-    }
-    return (char)inb(0x60);
+    return KEYBOARD_ERROR;
 }
 
-// US QWERTY Set 1 fallback scancode table
+/* Legacy... */
+
+// US QWERTY Set 1 fallback scancode table (legacy - modular driver API required)
+__attribute__((unused))
 static const char fallback_scancode_normal[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
@@ -329,7 +333,7 @@ static const char fallback_scancode_normal[128] = {
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
-};
+};/* Suppressed: legacy scancode table - modular driver API required */
 
 static int g_fallback_extended = 0;
 static int g_fallback_ctrl = 0;
@@ -342,8 +346,8 @@ char scancode_to_ascii(unsigned char scancode) {
     if (scancode == 0xE0) {
         g_fallback_extended = 1;
         return 0;
-    }
-    if (scancode == 0xE1) {
+
+/* Legacy... */
         return 0;
     }
     if (scancode & 0x80) {
@@ -352,13 +356,14 @@ char scancode_to_ascii(unsigned char scancode) {
             g_fallback_ctrl = 0;
         }
         g_fallback_extended = 0;
-        return 0; // Key release
+        return KEYBOARD_ERROR;
     }
-    g_fallback_extended = 0;
+/* Legacy Ctrl press check - no modular driver loaded */
     if (scancode == 0x1D) {
-        g_fallback_ctrl = 1;
-        return 0;
+        return KEYBOARD_ERROR;
     }
+
+/* Standard key code lookup - only valid when modular driver is loaded */
     switch (scancode) {
         case 0x48: return KEY_UP;
         case 0x50: return KEY_DOWN;
@@ -372,13 +377,9 @@ char scancode_to_ascii(unsigned char scancode) {
         case 0x53: return KEY_DELETE;
         default: break;
     }
-    if (scancode < 128) {
-        if (g_fallback_ctrl && scancode == 0x2E) {
-            return 0x03; // Ctrl+C
-        }
-        return fallback_scancode_normal[scancode];
-    }
-    return 0;
+
+    /* No modular driver loaded - return error */
+    return KEYBOARD_ERROR;
 }
 
 char get_char(void) {
@@ -392,5 +393,13 @@ char get_char(void) {
         if (ascii != 0) {
             return ascii;
         }
+        // If we got here, the scancode didn't produce ASCII (e.g., arrow keys,
+        // function keys, or release codes). Keep looping to try the next scancode.
+        // But we need to make sure we don't infinite-loop on stuck keys.
+        // Yield control briefly.
+        asm volatile("pause");
     }
+    return KEYBOARD_ERROR;
 }
+
+

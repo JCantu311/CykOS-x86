@@ -363,6 +363,14 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_TRY_GET_KEY: {
+            cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
+            regs->eax = (kbd && kbd->try_get_char)
+                ? (unsigned int)kbd->try_get_char()
+                : (unsigned int)-1;
+            break;
+        }
+
         case SYS_SLEEP: {
             secwait(arg1);
             regs->eax = 0;
@@ -526,13 +534,18 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = 0;
             } else if (arg1 > 0 && arg2 > 0) {
                 // Kernel fallback PC speaker driver
-                unsigned int divisor = 1193182U / arg1;
-                if (divisor == 0 || divisor > 0xFFFF) divisor = 0xFFFF;
+                unsigned int frequency = arg1;
+                unsigned int milliseconds = arg2;
+                if (frequency < 20u)  frequency = 20u;
+                if (frequency > 20000u)  frequency = 20000u;
+                unsigned int divisor = 1193182U / frequency;
+                if (divisor == 0)       divisor = 1;
+                if (divisor > 0xFFFF)   divisor = 0xFFFF;
                 outb(0x43, 0xB6);
                 outb(0x42, (unsigned char)(divisor & 0xFF));
                 outb(0x42, (unsigned char)(divisor >> 8));
                 outb(0x61, (unsigned char)(inb(0x61) | 0x03));
-                msecwait(arg2);
+                msecwait(milliseconds);
                 outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
                 regs->eax = 0;
             } else {
@@ -564,6 +577,49 @@ static void syscall_handler(registers_t* regs) {
                 msecwait(240);
                 outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
                 regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_SOUND_SET_VOLUME: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->set_volume) {
+                regs->eax = (unsigned int)snd->set_volume(arg1);
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_SOUND_PLAY_SAMPLE: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->play_sample) {
+                regs->eax = (unsigned int)snd->play_sample(
+                    (const unsigned char*)arg1, arg2, regs->edx);
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_SOUND_STOP: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->stop) {
+                regs->eax = (unsigned int)snd->stop();
+            } else {
+                // Kernel fallback: silence the PC speaker
+                outb(0x61, (unsigned char)(inb(0x61) & 0xFC));
+                regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_SOUND_GET_CAPS: {
+            cyk_sound_driver_t* snd = modload_get_sound_driver();
+            if (snd && snd->get_caps) {
+                regs->eax = (unsigned int)snd->get_caps();
+            } else {
+                regs->eax = (unsigned int)SOUND_CAP_NONE;
             }
             break;
         }
@@ -623,6 +679,41 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)dpy->get_framebuffer();
             } else {
                 regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_GFX_INFO: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->get_info && arg1) {
+                regs->eax = (unsigned int)dpy->get_info((cyk_display_info_t*)arg1);
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_GFX_BITMAP: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            if (dpy && dpy->draw_bitmap_ex && arg2) {
+                int x = (int)(short)(arg1 >> 16);
+                int y = (int)(short)(arg1 & 0xFFFF);
+                regs->eax = (unsigned int)dpy->draw_bitmap_ex(x, y, (const cyk_bitmap_t*)arg2);
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_GFX_PALETTE: {
+            cyk_display_driver_t* dpy = modload_get_display_driver();
+            unsigned int first = arg1 >> 16;
+            unsigned int count = arg1 & 0xFFFF;
+            if (dpy && dpy->set_palette && arg2 && count) {
+                regs->eax = (unsigned int)dpy->set_palette(
+                    first, count, (const unsigned char*)arg2);
+            } else {
+                regs->eax = (unsigned int)-1;
             }
             break;
         }

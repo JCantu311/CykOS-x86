@@ -33,12 +33,20 @@
 #define SYS_GETCWD        183 // Linux i386 getcwd(buf, size), returns buf
 #define SYS_SOUND_TONE    184 // CykOS sound_tone(freq, ms)
 #define SYS_SOUND_CHIME   185 // CykOS sound_chime()
+#define SYS_SOUND_SET_VOLUME 192 // CykOS sound_set_volume(volume)
+#define SYS_SOUND_PLAY_SAMPLE 193 // CykOS sound_play_sample(data, len, freq_hz)
+#define SYS_SOUND_STOP    194 // CykOS sound_stop()
+#define SYS_SOUND_GET_CAPS 195 // CykOS sound_get_caps()
 #define SYS_MSLEEP        186 // CykOS msecwait(ms)
-#define SYS_GFX_MODE      187 // CykOS gfx set/get mode (arg1: -1 = get, 0 = text, 1 = 320x200 graphics)
+#define SYS_GFX_MODE      187 // CykOS gfx mode: 0=text, 1=VBE 640x480x8, 2=320x200x256, 3=640x480x16-planar
 #define SYS_GFX_PUTPIXEL  188 // CykOS gfx put pixel (arg1 = x, arg2 = y, arg3 = color)
 #define SYS_GFX_RECT      189 // CykOS gfx fill rect (arg1 = packed (x<<16)|y, arg2 = packed (w<<16)|h, arg3 = color)
 #define SYS_GFX_CLEAR     190 // CykOS gfx clear screen (arg1 = color)
-#define SYS_GFX_FRAMEBUF  191 // CykOS gfx get framebuffer pointer (returns 0xA0000 in graphics mode)
+#define SYS_GFX_FRAMEBUF  191 // Returns the active linear framebuffer when the mode has one
+#define SYS_GFX_INFO      196 // arg1 = cyk_display_info_t*
+#define SYS_GFX_BITMAP    197 // arg1 = packed signed x/y, arg2 = cyk_bitmap_t*
+#define SYS_TRY_GET_KEY   198 // non-blocking translated keyboard input; -1 if none
+#define SYS_GFX_PALETTE   199 // arg1 = packed first/count, arg2 = RGB8 triples
 
 // File descriptor constants
 #define FD_STDIN          0

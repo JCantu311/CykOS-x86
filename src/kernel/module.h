@@ -32,25 +32,84 @@ typedef struct {
     char (*scancode_to_ascii)(unsigned char scancode); // Convert scancode to ASCII character
     int (*has_key)(void);       // Non-blocking: 1 if key available in hardware buffer, 0 otherwise
     char (*get_char)(void);     // Blocking: wait for a printable ASCII keypress
+    int (*try_get_char)(void);  // Non-blocking: ASCII/ETX byte, or -1 when no character is ready
 } cyk_keyboard_driver_t;
 
-// Level 2 Sound Driver Interface Table
+// Sound capability flags (bitmask returned by get_caps())
+#define SOUND_CAP_NONE     0x00   // No audio capability
+#define SOUND_CAP_TONE     0x01   // Can play tone(freq, ms) via PC speaker or similar
+#define SOUND_CAP_CHIME    0x02   // Can play chime melody
+#define SOUND_CAP_SAMPLE   0x04   // Can play digitized audio samples (HDA, etc.)
+#define SOUND_CAP_MUSIC    0x08   // Can play background music / streaming audio
+#define SOUND_CAP_VOLUME   0x10   // Volume control supported (0-100)
+#define SOUND_CAP_ALL      0xFF
+
+// Kernel IRQ1 keyboard queue consumed by the modular keyboard driver.
+int keyboard_irq_has_scancode(void);
+int keyboard_irq_read_scancode(void);
+
+// Level 2 Sound Driver Interface Table (standardized for game porting)
+// Matches the audio abstraction expected by doomgeneric and similar software:
+//   tone() / chime()    -> simple beep/melody (PC speaker)
+//   play_sample()       -> digitized sound effects (HDA, AC'97, etc.)
+//   set_volume() / stop() -> basic audio control
 typedef struct {
     cyk_module_header_t header;
+
+    // Core tone API (PC speaker style)
     void (*tone)(unsigned int frequency, unsigned int milliseconds);
     void (*chime)(void);
+
+    // Standardized game audio API
+    int  (*set_volume)(unsigned int volume);          // 0-100, returns 0 on success
+    int  (*play_sample)(const unsigned char* data, unsigned int len, unsigned int freq_hz);
+    int  (*stop)(void);                                // Stop all audio output
+    int  (*get_caps)(void);                            // Returns SOUND_CAP_* bitmask
+
+    // Hardware identification string (e.g., "PC Speaker", "Intel HDA Audio")
+    char hardware_name[32];
 } cyk_sound_driver_t;
+
+// Display pixel formats used by the generic bitmap API.
+#define CYK_PIXEL_TEXT16       0
+#define CYK_PIXEL_INDEX8       1
+#define CYK_PIXEL_VGA_PLANAR4  2
+
+#define CYK_BITMAP_INDEX8      1
+#define CYK_BITMAP_RGB332      2
+#define CYK_BITMAP_RGB24       3
+#define CYK_BITMAP_RGBA32      4
+
+typedef struct {
+    unsigned int width;
+    unsigned int height;
+    unsigned int stride;
+    unsigned int format;
+    const unsigned char* pixels;
+} cyk_bitmap_t;
+
+typedef struct {
+    unsigned int width;
+    unsigned int height;
+    unsigned int pitch;
+    unsigned int bits_per_pixel;
+    unsigned int pixel_format;
+    unsigned char* framebuffer; // NULL when the hardware framebuffer is planar.
+} cyk_display_info_t;
 
 // Level 2 Display / Graphics Driver Interface Table
 typedef struct {
     cyk_module_header_t header;
-    int (*set_mode)(int mode); // 0 = 80x25 text, 1 = 320x200 256-color graphics
-    int (*get_mode)(void);     // Returns current mode (0 or 1)
+    int (*set_mode)(int mode); // 0=text, 1=VBE 640x480x8, 2=legacy 320x200x8, 3=VGA 640x480x4 fallback
+    int (*get_mode)(void);     // Returns active mode (0, 1, 2, or 3)
     void (*put_pixel)(int x, int y, unsigned char color);
     void (*fill_rect)(int x, int y, int w, int h, unsigned char color);
     void (*clear)(unsigned char color);
     void (*draw_bitmap)(int x, int y, int w, int h, const unsigned char* data);
     unsigned char* (*get_framebuffer)(void);
+    int (*get_info)(cyk_display_info_t* info);
+    int (*draw_bitmap_ex)(int x, int y, const cyk_bitmap_t* bitmap);
+    int (*set_palette)(unsigned int first, unsigned int count, const unsigned char* rgb8);
 } cyk_display_driver_t;
 
 #endif // MODULE_H

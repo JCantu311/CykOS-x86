@@ -17,7 +17,6 @@ case "$MODE" in
         test_audio_driver() {
             local drv="$1"
             "$QEMU" -audiodev help 2>&1 | grep -qw "$drv" || return 1
-            # Probe using -device pcspk,audiodev=test without machine override
             "$QEMU" -audiodev "id=test,driver=$drv" -device pcspk,audiodev=test -display none -serial none -monitor none </dev/null &> /dev/null
         }
 
@@ -33,11 +32,71 @@ case "$MODE" in
             fi
         done
 
+        # Fallback 1: try bare -device pcspk (QEMU may pick a default audio backend)
+        if [[ ${#AUDIO_OPTS[@]} -eq 0 ]]; then
+            "$QEMU" -device pcspk -display none -serial none -monitor none </dev/null &> /dev/null && \
+                AUDIO_OPTS=(-device pcspk)
+        fi
+
+        # Fallback 2: legacy -soundhw pcspk (older QEMU)
         if [[ ${#AUDIO_OPTS[@]} -eq 0 ]] && "$QEMU" -soundhw help 2>&1 | grep -qw 'pcspk'; then
             AUDIO_OPTS=(-soundhw pcspk)
         fi
 
-        exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+        # Try different PC speaker device names for QEMU compatibility.
+        # QEMU 11.x may use 'isa-pcspk' instead of 'pcspk'; older builds may not have pcspk at all.
+        PCSPEAKER_DEVICES=("pcspk" "isa-pcspk")
+        AUDIO_OPTS=()
+        FOUND_AUDIO=0
+
+        for drv in pa alsa sdl oss pipewire jack default; do
+            for pcm in "${PCSPEAKER_DEVICES[@]}"; do
+                test_opts=(-audiodev "id=snd0,driver=${drv}" -device "${pcm},audiodev=snd0")
+                if "$QEMU" "${test_opts[@]}" -display none -serial none -monitor none </dev/null &> /dev/null; then
+                    AUDIO_OPTS=("${test_opts[@]}")
+                    FOUND_AUDIO=1
+                    break 2
+                fi
+            done
+        done
+
+        if [[ $FOUND_AUDIO -eq 0 ]]; then
+            # Fallback: try bare -device without audiodev (QEMU may pick default backend)
+            for pcm in "${PCSPEAKER_DEVICES[@]}"; do
+                if "$QEMU" -device "$pcm" -display none -serial none -monitor none </dev/null &> /dev/null; then
+                    AUDIO_OPTS=(-device "$pcm")
+                    FOUND_AUDIO=1
+                    break
+                fi
+            done
+        fi
+
+        # A manual override takes precedence over automatic backend detection.
+        if [[ -n "${CYKOS_QEMU_AUDIO:-}" ]]; then
+            # shellcheck disable=SC2206
+            AUDIO_OPTS=(${CYKOS_QEMU_AUDIO})
+            FOUND_AUDIO=1
+        fi
+
+        if [[ $FOUND_AUDIO -eq 1 ]]; then
+            echo "[run.sh] QEMU audio: ${AUDIO_OPTS[*]}"
+            exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+        fi
+
+        echo "[run.sh] Warning: No PC speaker device/audio backend combination works with this QEMU build."
+        echo "[run.sh] Sound will be silent in QEMU."
+        echo "[run.sh] Try: CYKOS_QEMU_AUDIO='-audiodev id=snd0,driver=alsa' $0 qemu"
+        echo "[run.sh] Or check: qemu-system-i386 -device help | grep -i -E 'pcspk|speaker'"
+
+        # Allow manual override via CYKOS_QEMU_AUDIO env var
+        if [[ -n "${CYKOS_QEMU_AUDIO:-}" ]]; then
+            # shellcheck disable=SC2086
+            AUDIO_OPTS=(${CYKOS_QEMU_AUDIO})
+            echo "[run.sh] Using override: ${AUDIO_OPTS[*]}"
+            exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+        fi
+
+        exec "$QEMU" -m 4G -drive file=bin/os_image.bin,format=raw,if=ide,index=0
         ;;
     virtualbox)
         if [[ $# -ne 2 ]] || ! command -v VBoxManage &> /dev/null; then

@@ -1,4 +1,5 @@
 #include "module.h"
+#include "cykastd.h"
 
 // Hardware I/O Port Definitions
 #define KBD_DATA_PORT    0x60
@@ -58,15 +59,16 @@ static const char scancode_shifted[128] = {
 
 // Check if keyboard buffer has data ready to read (non-blocking)
 static int keyboard_has_key(void) {
-    return (kbd_inb(KBD_STATUS_PORT) & 0x01) != 0;
+    return keyboard_irq_has_scancode();
 }
 
 // Blocking read of next raw scancode
 static char keyboard_get_scancode(void) {
-    while (!keyboard_has_key()) {
+    int scancode;
+    while ((scancode = keyboard_irq_read_scancode()) < 0) {
         asm volatile("pause");
     }
-    return (char)kbd_inb(KBD_DATA_PORT);
+    return (char)scancode;
 }
 
 // Convert Set 1 scancode to ASCII character, tracking Shift and Caps Lock
@@ -160,6 +162,16 @@ static char keyboard_get_char(void) {
     }
 }
 
+// Non-blocking character read for games and other frame-based applications.
+static int keyboard_try_get_char(void) {
+    int scancode;
+    while ((scancode = keyboard_irq_read_scancode()) >= 0) {
+        char character = keyboard_scancode_to_ascii((unsigned char)scancode);
+        if (character != 0) return (unsigned char)character;
+    }
+    return -1;
+}
+
 // Hardware Driver Initialization
 static int keyboard_init(void) {
     // 1. Drain the controller output buffer
@@ -191,4 +203,5 @@ const cyk_keyboard_driver_t cyk_keyboard_driver = {
     .scancode_to_ascii = keyboard_scancode_to_ascii,
     .has_key = keyboard_has_key,
     .get_char = keyboard_get_char,
+    .try_get_char = keyboard_try_get_char,
 };

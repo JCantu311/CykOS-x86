@@ -262,7 +262,7 @@ static int check_bpb_at_lba(unsigned char drive, unsigned int lba) {
             g_fat16.volume_label[i] = '\0';
         }
         g_fat16.ata_device = drive;
-        g_fat16.is_mounted = 1;
+        g_fat16.is_mounted = 0;
         g_cached_fat_lba = 0xFFFFFFFF;
         return 1;
     }
@@ -279,6 +279,9 @@ static int fat16_register_volume(unsigned char drive, unsigned int lba, unsigned
     if (g_volume_count >= FAT16_MAX_VOLUMES || !check_bpb_at_lba(drive, lba)) {
         return -1;
     }
+    // The BPB check fills the candidate state but leaves it inactive.
+    // Registered volumes must be marked mounted so activation permits lookup.
+    g_fat16.is_mounted = 1;
     fat16_make_mount_name(&g_fat16, drive, partition);
     g_volumes[g_volume_count] = g_fat16;
     return g_volume_count++;
@@ -301,7 +304,7 @@ int fat16_init(void) {
         return -1;
     }
 
-    g_fat16.is_mounted = 0;
+    g_fat16.is_mounted = 1;
 
     if (ata_select_drive(0) == 0 && ata_read_sectors(0, 1, g_sector_buf) == 0) {
         mbr_partition_t partitions[4];
@@ -702,10 +705,13 @@ int fat16_find_file(const char* filename, fat16_entry_t* out_entry) {
     }
 
     char resolved_path[256];
-    if (fat16_select_path_volume(filename, resolved_path, sizeof(resolved_path)) != 0 ||
-        fat16_name_equal(resolved_path, "/DRIVE")) {
+    if (fat16_select_path_volume(filename, resolved_path, sizeof(resolved_path)) != 0) {
         return -1;
     }
+
+    // After calling select_path_volume, we must ensure the volume is still activated
+    // In case traverse_path or select_path_volume changed it
+    fat16_activate_volume(g_active_volume);
 
     unsigned short parent_cluster = 0;
     char leaf[32];
@@ -1422,3 +1428,4 @@ unsigned short fat16_get_cwd_cluster(void) {
 const char* fat16_get_cwd_path(void) {
     return g_cwd_path;
 }
+

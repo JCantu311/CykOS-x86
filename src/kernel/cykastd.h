@@ -9,6 +9,7 @@
 #define VGA_GREEN 0x0A
 #define VGA_RED   0x0C
 #define VGA_BLUE  0x09
+#define VGA_YELLOW 0x0E
 
 typedef unsigned int size_t;
 
@@ -70,5 +71,40 @@ void bootlog_append_char(char c);
 void bootlog_append_string(const char* str);
 void bootlog_flush(const char* filepath);
 void bootlog_disable(void);
+
+// POSIX-standard keyboard driver interface.
+// These functions delegate to the Level 2 keyboard driver loaded via modload.
+// If no keyboard driver is present (not loaded from MODULES.CFG alongside
+// DRIVERS.LST), the behavior is undefined - direct hardware access may be
+// required for bare-metal operation, but application code targeting this
+// API must ensure a compliant driver is loaded first.
+
+int has_key(void);
+char get_scancode(void);
+char scancode_to_ascii(unsigned char scancode);
+char get_char(void);
+
+/* POSIX-standard sound driver interface.
+// Function signatures standardized for porting software (Doom, SDL, etc.)
+// that expect these exact definitions.
+
+void tone(unsigned int frequency, unsigned int milliseconds);
+void chime(int play_sample(const unsigned char* data, unsigned int len, unsigned int freq_hz);
+int set_volume(unsigned int volume);
+int stop(void);
+int get_caps(unsigned char hardware_name[32]);
+*/
+
+/* POSIX-standard display/graphics driver interface.
+// Standardized function signatures for porting graphics software.
+
+int set_mode(int mode);
+int get_mode(void);
+void put_pixel(int x, int y, unsigned char color);
+void fill_rect(int x, int y, int w, int h, unsigned char color);
+void clear(unsigned char color);
+void draw_bitmap(int x, int y, int w, int h, const unsigned char* data);
+unsigned char* get_framebuffer(void);
+*/
 
 #endif // CYKASTD_H

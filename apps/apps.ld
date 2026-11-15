@@ -3,8 +3,8 @@ ENTRY(main)
 
 SECTIONS
 {
-    /* User applications in CykOS load at 0x50000 */
-    . = 0x50000;
+    /* User applications load after the reserved Level 2 module slots. */
+    . = 0x68000;
 
     .text : {
         /* Entry point MUST be at byte 0 of the binary */

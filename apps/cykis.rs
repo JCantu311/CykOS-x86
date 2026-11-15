@@ -1,6 +1,4 @@
-//! Cykis - Tetris Clone for CykOS
-//! Userland Rust application using int 0x80 syscalls.
-//! Includes automatic block drop timer, keyboard input, full scoring, and audio chimes.
+//! CYKIS: a compact Tetris-style game for the CykOS graphics API.
 
 #![no_std]
 #![no_main]
@@ -10,45 +8,29 @@ use core::panic::PanicInfo;
 mod cykos;
 use cykos::*;
 
-// Board dimensions (standard 10 wide, 20 high)
 const BOARD_W: usize = 10;
 const BOARD_H: usize = 20;
+const FRAME_MS: u32 = 20;
+const LOCK_DELAY_MS: u32 = 500;
+const MAX_LOCK_RESETS: u8 = 15;
+const BOARD_X: i16 = 38;
+const BOARD_Y: i16 = 24;
+const CELL_W: i16 = 26;
+const CELL_H: i16 = 21;
 
-// Board screen origin on 80x25 VGA text mode
-const ORIGIN_X: u8 = 30;
-const ORIGIN_Y: u8 = 2;
-
-// Tetromino definitions (7 classic shapes, 4 rotations each, 4x4 bounding boxes)
-// Represented as 16-bit bitmasks (4 rows x 4 cols)
+// Four rotations of each of the seven standard tetrominoes in 4x4 masks.
 static PIECES: [[u16; 4]; 7] = [
-    // I piece
     [0x0F00, 0x2222, 0x00F0, 0x4444],
-    // J piece
     [0x8E00, 0x6440, 0x0E20, 0x44C0],
-    // L piece
     [0x2E00, 0x4460, 0x0E80, 0xC440],
-    // O piece
     [0x6600, 0x6600, 0x6600, 0x6600],
-    // S piece
     [0x6C00, 0x4620, 0x06C0, 0x8C40],
-    // T piece
     [0x4E00, 0x4640, 0x0E40, 0x4C40],
-    // Z piece
     [0xC600, 0x2640, 0x0C60, 0x4C80],
 ];
 
-// Colors for each piece (VGA color attributes)
-static PIECE_COLORS: [u8; 7] = [
-    0x0B, // Cyan (I)
-    0x09, // Blue (J)
-    0x06, // Brown/Orange (L)
-    0x0E, // Yellow (O)
-    0x0A, // Light Green (S)
-    0x0D, // Magenta (T)
-    0x0C, // Light Red (Z)
-];
-
-// Simple LCG PRNG for freestanding game loop
+// RGB332 palette indices: cyan, blue, orange, yellow, green, magenta, red.
+static PIECE_COLORS: [u8; 7] = [31, 3, 236, 252, 28, 227, 224];
 static mut RNG_STATE: u32 = 0x12345678;
 
 fn rand_piece() -> usize {
@@ -58,17 +40,14 @@ fn rand_piece() -> usize {
     }
 }
 
-// Micro-delay using hardware msleep
-fn delay_loop(count: u32) {
-    if count > 0 {
-        msleep((count / 1000).max(1));
-    }
+fn piece_has_cell(piece: usize, rot: usize, row: usize, col: usize) -> bool {
+    (PIECES[piece][rot & 3] & (1 << (15 - (row * 4 + col)))) != 0
 }
 
-// Game State
 struct GameState {
     board: [[u8; BOARD_W]; BOARD_H],
     cur_piece: usize,
+    next_piece: usize,
     cur_rot: usize,
     cur_x: i32,
     cur_y: i32,
@@ -79,9 +58,10 @@ struct GameState {
 
 impl GameState {
     fn new() -> Self {
-        let mut g = Self {
+        let mut game = Self {
             board: [[0; BOARD_W]; BOARD_H],
-            cur_piece: 0,
+            cur_piece: rand_piece(),
+            next_piece: rand_piece(),
             cur_rot: 0,
             cur_x: 3,
             cur_y: 0,
@@ -89,292 +69,369 @@ impl GameState {
             lines: 0,
             game_over: false,
         };
-        g.cur_piece = rand_piece();
-        g
+        if game.check_collision(game.cur_piece, 0, game.cur_x, game.cur_y) {
+            game.game_over = true;
+        }
+        game
     }
 
     fn check_collision(&self, piece: usize, rot: usize, px: i32, py: i32) -> bool {
-        let mask = PIECES[piece][rot % 4];
-        for r in 0..4 {
-            for c in 0..4 {
-                let bit = (mask >> (15 - (r * 4 + c))) & 1;
-                if bit != 0 {
-                    let bx = px + c as i32;
-                    let by = py + r as i32;
-                    if bx < 0 || bx >= BOARD_W as i32 || by >= BOARD_H as i32 {
-                        return true;
-                    }
-                    if by >= 0 && self.board[by as usize][bx as usize] != 0 {
-                        return true;
-                    }
-                }
+        for row in 0..4 {
+            for col in 0..4 {
+                if !piece_has_cell(piece, rot, row, col) { continue; }
+                let bx = px + col as i32;
+                let by = py + row as i32;
+                if bx < 0 || bx >= BOARD_W as i32 || by >= BOARD_H as i32 { return true; }
+                if by >= 0 && self.board[by as usize][bx as usize] != 0 { return true; }
             }
         }
         false
     }
 
-    fn lock_piece(&mut self) {
-        let mask = PIECES[self.cur_piece][self.cur_rot % 4];
-        let color = PIECE_COLORS[self.cur_piece];
-        for r in 0..4 {
-            for c in 0..4 {
-                let bit = (mask >> (15 - (r * 4 + c))) & 1;
-                if bit != 0 {
-                    let bx = self.cur_x + c as i32;
-                    let by = self.cur_y + r as i32;
-                    if by >= 0 && by < BOARD_H as i32 && bx >= 0 && bx < BOARD_W as i32 {
-                        self.board[by as usize][bx as usize] = color;
-                    }
-                }
-            }
-        }
-
-        self.clear_lines();
-        self.cur_piece = rand_piece();
-        self.cur_rot = 0;
-        self.cur_x = 3;
-        self.cur_y = 0;
-
-        if self.check_collision(self.cur_piece, self.cur_rot, self.cur_x, self.cur_y) {
-            self.game_over = true;
-        }
+    fn grounded(&self) -> bool {
+        self.check_collision(self.cur_piece, self.cur_rot, self.cur_x, self.cur_y + 1)
     }
 
-    fn clear_lines(&mut self) {
+    fn try_move(&mut self, dx: i32, dy: i32) -> bool {
+        if self.check_collision(self.cur_piece, self.cur_rot, self.cur_x + dx, self.cur_y + dy) {
+            return false;
+        }
+        self.cur_x += dx;
+        self.cur_y += dy;
+        true
+    }
+
+    fn try_rotate(&mut self) -> bool {
+        let next_rot = (self.cur_rot + 1) & 3;
+        // Small wall kicks make rotation near a wall feel like modern Tetris.
+        let kicks = [0, -1, 1, -2, 2];
+        for kick in kicks {
+            if !self.check_collision(self.cur_piece, next_rot, self.cur_x + kick, self.cur_y) {
+                self.cur_x += kick;
+                self.cur_rot = next_rot;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn clear_lines(&mut self) -> u32 {
         let mut cleared = 0;
-        let mut r = (BOARD_H - 1) as i32;
-        while r >= 0 {
+        let mut row = (BOARD_H as i32) - 1;
+        while row >= 0 {
             let mut full = true;
-            for c in 0..BOARD_W {
-                if self.board[r as usize][c] == 0 {
-                    full = false;
-                    break;
-                }
+            for col in 0..BOARD_W {
+                if self.board[row as usize][col] == 0 { full = false; break; }
             }
             if full {
                 cleared += 1;
-                for move_r in (1..=r as usize).rev() {
-                    self.board[move_r] = self.board[move_r - 1];
+                for move_row in (1..=row as usize).rev() {
+                    self.board[move_row] = self.board[move_row - 1];
                 }
                 self.board[0] = [0; BOARD_W];
             } else {
-                r -= 1;
+                row -= 1;
+            }
+        }
+        cleared
+    }
+
+    fn lock_piece(&mut self) -> u32 {
+        for row in 0..4 {
+            for col in 0..4 {
+                if !piece_has_cell(self.cur_piece, self.cur_rot, row, col) { continue; }
+                let bx = self.cur_x + col as i32;
+                let by = self.cur_y + row as i32;
+                if by >= 0 && by < BOARD_H as i32 && bx >= 0 && bx < BOARD_W as i32 {
+                    self.board[by as usize][bx as usize] = PIECE_COLORS[self.cur_piece];
+                }
             }
         }
 
+        let cleared = self.clear_lines();
         if cleared > 0 {
+            let line_score = match cleared { 1 => 40, 2 => 100, 3 => 300, _ => 1200 };
+            self.score = self.score.saturating_add(line_score * (self.lines / 10 + 1));
             self.lines += cleared;
-            let pts = match cleared {
-                1 => 100,
-                2 => 300,
-                3 => 500,
-                _ => 800,
-            };
-            self.score += pts;
-            // Play success chime
             sound_chime();
-        } else {
-            // Soft drop tone
-            sound_tone(220, 20);
         }
+
+        self.cur_piece = self.next_piece;
+        self.next_piece = rand_piece();
+        self.cur_rot = 0;
+        self.cur_x = 3;
+        self.cur_y = 0;
+        if self.check_collision(self.cur_piece, self.cur_rot, self.cur_x, self.cur_y) {
+            self.game_over = true;
+        }
+        cleared
     }
 
-    fn draw_cell(x: u8, y: u8, color: u8, ch: u8) {
-        set_cursor(x, y);
-        let mut buf = [ch, 0];
-        let vga_ptr = 0xB8000 as *mut u16;
-        let offset = (y as usize) * 80 + (x as usize);
-        unsafe {
-            *vga_ptr.add(offset) = ((color as u16) << 8) | (ch as u16);
-        }
-    }
+    fn level(&self) -> u32 { self.lines / 10 }
 
-    fn render(&self) {
-        // Draw Border
-        for y in 0..(BOARD_H + 2) {
-            Self::draw_cell(ORIGIN_X - 1, ORIGIN_Y + y as u8, 0x07, b'|');
-            Self::draw_cell(ORIGIN_X + (BOARD_W * 2) as u8, ORIGIN_Y + y as u8, 0x07, b'|');
-        }
-        for x in 0..(BOARD_W * 2 + 2) {
-            Self::draw_cell(ORIGIN_X - 1 + x as u8, ORIGIN_Y + (BOARD_H + 1) as u8, 0x07, b'-');
-        }
-
-        // Draw Board content
-        for r in 0..BOARD_H {
-            for c in 0..BOARD_W {
-                let cell = self.board[r][c];
-                let sx = ORIGIN_X + (c * 2) as u8;
-                let sy = ORIGIN_Y + 1 + r as u8;
-                if cell != 0 {
-                    Self::draw_cell(sx, sy, cell, b'[');
-                    Self::draw_cell(sx + 1, sy, cell, b']');
-                } else {
-                    Self::draw_cell(sx, sy, 0x08, b'.');
-                    Self::draw_cell(sx + 1, sy, 0x08, b' ');
-                }
-            }
-        }
-
-        // Draw Active Falling Piece
-        let mask = PIECES[self.cur_piece][self.cur_rot % 4];
-        let color = PIECE_COLORS[self.cur_piece];
-        for r in 0..4 {
-            for c in 0..4 {
-                let bit = (mask >> (15 - (r * 4 + c))) & 1;
-                if bit != 0 {
-                    let bx = self.cur_x + c as i32;
-                    let by = self.cur_y + r as i32;
-                    if by >= 0 && by < BOARD_H as i32 && bx >= 0 && bx < BOARD_W as i32 {
-                        let sx = ORIGIN_X + (bx * 2) as u8;
-                        let sy = ORIGIN_Y + 1 + by as u8;
-                        Self::draw_cell(sx, sy, color, b'#');
-                        Self::draw_cell(sx + 1, sy, color, b'#');
-                    }
-                }
-            }
-        }
-
-        // Draw HUD / Scoreboard on side
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 2);
-        print("=== CYKIS ===");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 4);
-        print("Score: ");
-        print_num(self.score);
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 6);
-        print("Lines: ");
-        print_num(self.lines);
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 9);
-        print("Controls:");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 11);
-        print("Left/Right: Move");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 12);
-        print("Up:         Rotate");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 13);
-        print("Down:       Soft Drop");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 14);
-        print("Space:      Hard Drop");
-        set_cursor(ORIGIN_X + (BOARD_W * 2) as u8 + 4, ORIGIN_Y + 15);
-        print("Ctrl+C / Q: Quit");
+    fn gravity_period_ms(&self) -> u32 {
+        const PERIODS: [u32; 15] = [1000, 850, 700, 600, 500, 420, 340, 270, 210, 160, 120, 90, 70, 55, 45];
+        PERIODS[(self.level().min(14)) as usize]
     }
 }
 
-fn print_num(mut n: u32) {
-    if n == 0 {
-        putc(b'0');
-        return;
+fn draw_block(x: i16, y: i16, color: u8, width: i16, height: i16) {
+    gfx_fill_rect(x + 1, y + 1, width - 2, height - 2, color);
+    gfx_fill_rect(x + 2, y + 2, width - 5, 2, 255);
+    gfx_fill_rect(x + 2, y + 2, 2, height - 5, 255);
+    gfx_fill_rect(x + width - 4, y + 3, 2, height - 6, 73);
+}
+
+fn draw_piece(piece: usize, rot: usize, px: i32, py: i32, color: u8, ghost: bool) {
+    for row in 0..4 {
+        for col in 0..4 {
+            if !piece_has_cell(piece, rot, row, col) { continue; }
+            let board_x = px + col as i32;
+            let board_y = py + row as i32;
+            if board_x < 0 || board_x >= BOARD_W as i32 || board_y < 0 || board_y >= BOARD_H as i32 { continue; }
+            let x = BOARD_X + board_x as i16 * CELL_W;
+            let y = BOARD_Y + board_y as i16 * CELL_H;
+            if ghost {
+                gfx_fill_rect(x + 3, y + 3, CELL_W - 6, 2, color);
+                gfx_fill_rect(x + 3, y + CELL_H - 5, CELL_W - 6, 2, color);
+                gfx_fill_rect(x + 3, y + 3, 2, CELL_H - 6, color);
+                gfx_fill_rect(x + CELL_W - 5, y + 3, 2, CELL_H - 6, color);
+            } else {
+                draw_block(x, y, color, CELL_W, CELL_H);
+            }
+        }
     }
-    let mut buf = [0u8; 12];
-    let mut i = 0;
-    while n > 0 {
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
+}
+
+fn font_rows(ch: u8) -> [u8; 5] {
+    match ch {
+        b'A' => [2, 5, 7, 5, 5], b'B' => [6, 5, 6, 5, 6], b'C' => [3, 4, 4, 4, 3],
+        b'D' => [6, 5, 5, 5, 6], b'E' => [7, 4, 6, 4, 7], b'F' => [7, 4, 6, 4, 4],
+        b'G' => [3, 4, 5, 5, 3], b'H' => [5, 5, 7, 5, 5], b'I' => [7, 2, 2, 2, 7],
+        b'J' => [1, 1, 1, 5, 2], b'K' => [5, 5, 6, 5, 5], b'L' => [4, 4, 4, 4, 7],
+        b'M' => [5, 7, 7, 5, 5], b'N' => [5, 7, 7, 7, 5], b'O' => [2, 5, 5, 5, 2],
+        b'P' => [6, 5, 6, 4, 4], b'Q' => [2, 5, 5, 7, 3], b'R' => [6, 5, 6, 5, 5],
+        b'S' => [3, 4, 2, 1, 6], b'T' => [7, 2, 2, 2, 2], b'U' => [5, 5, 5, 5, 7],
+        b'V' => [5, 5, 5, 5, 2], b'W' => [5, 5, 7, 7, 5], b'X' => [5, 5, 2, 5, 5],
+        b'Y' => [5, 5, 2, 2, 2], b'Z' => [7, 1, 2, 4, 7],
+        b'0' => [7, 5, 5, 5, 7], b'1' => [2, 6, 2, 2, 7], b'2' => [6, 1, 2, 4, 7],
+        b'3' => [6, 1, 2, 1, 6], b'4' => [5, 5, 7, 1, 1], b'5' => [7, 4, 6, 1, 6],
+        b'6' => [3, 4, 6, 5, 2], b'7' => [7, 1, 2, 2, 2], b'8' => [2, 5, 2, 5, 2],
+        b'9' => [2, 5, 3, 1, 6], b'/' => [1, 1, 2, 4, 4], b':' => [0, 2, 0, 2, 0],
+        _ => [0; 5],
     }
-    while i > 0 {
-        i -= 1;
-        putc(buf[i]);
+}
+
+fn draw_text(text: &[u8], x: i16, y: i16, color: u8, scale: i16) {
+    let mut cursor_x = x;
+    for &ch in text {
+        if ch == b' ' { cursor_x += 4 * scale; continue; }
+        let rows = font_rows(ch.to_ascii_uppercase());
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (1 << (2 - col)) != 0 {
+                    gfx_fill_rect(cursor_x + col * scale, y + row as i16 * scale, scale, scale, color);
+                }
+            }
+        }
+        cursor_x += 4 * scale;
+    }
+}
+
+fn draw_digit(x: i16, y: i16, value: u8, color: u8, scale: i16) {
+    let segments: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+    let mask = segments[(value % 10) as usize];
+    let t = scale;
+    let w = 4 * scale;
+    let h = 7 * scale;
+    if mask & 0x01 != 0 { gfx_fill_rect(x + t, y, w, t, color); }
+    if mask & 0x02 != 0 { gfx_fill_rect(x + w + t, y + t, t, 2 * scale, color); }
+    if mask & 0x04 != 0 { gfx_fill_rect(x + w + t, y + 4 * scale, t, 2 * scale, color); }
+    if mask & 0x08 != 0 { gfx_fill_rect(x + t, y + h, w, t, color); }
+    if mask & 0x10 != 0 { gfx_fill_rect(x, y + 4 * scale, t, 2 * scale, color); }
+    if mask & 0x20 != 0 { gfx_fill_rect(x, y + t, t, 2 * scale, color); }
+    if mask & 0x40 != 0 { gfx_fill_rect(x + t, y + 3 * scale, w, t, color); }
+}
+
+fn draw_number(mut value: u32, x: i16, y: i16, color: u8, scale: i16) {
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    if value == 0 { digits[0] = 0; count = 1; }
+    while value > 0 && count < digits.len() {
+        digits[count] = (value % 10) as u8;
+        value /= 10;
+        count += 1;
+    }
+    let digit_width = 6 * scale;
+    for i in 0..count {
+        draw_digit(x + (count - i - 1) as i16 * digit_width, y, digits[i], color, scale);
+    }
+}
+
+fn draw_preview(piece: usize, x: i16, y: i16) {
+    for row in 0..4 {
+        for col in 0..4 {
+            if piece_has_cell(piece, 0, row, col) {
+                draw_block(x + col as i16 * 18, y + row as i16 * 18,
+                           PIECE_COLORS[piece], 18, 18);
+            }
+        }
+    }
+}
+
+impl GameState {
+    fn render(&self, ghost_y: i32) {
+        gfx_clear(0);
+        gfx_fill_rect(BOARD_X - 4, BOARD_Y - 4, BOARD_W as i16 * CELL_W + 8,
+                      BOARD_H as i16 * CELL_H + 8, 73);
+        gfx_fill_rect(BOARD_X, BOARD_Y, BOARD_W as i16 * CELL_W,
+                      BOARD_H as i16 * CELL_H, 2);
+
+        for col in 1..BOARD_W {
+            gfx_fill_rect(BOARD_X + col as i16 * CELL_W, BOARD_Y, 1,
+                          BOARD_H as i16 * CELL_H, 73);
+        }
+        for row in 1..BOARD_H {
+            gfx_fill_rect(BOARD_X, BOARD_Y + row as i16 * CELL_H,
+                          BOARD_W as i16 * CELL_W, 1, 73);
+        }
+        for row in 0..BOARD_H {
+            for col in 0..BOARD_W {
+                if self.board[row][col] != 0 {
+                    draw_block(BOARD_X + col as i16 * CELL_W,
+                               BOARD_Y + row as i16 * CELL_H,
+                               self.board[row][col], CELL_W, CELL_H);
+                }
+            }
+        }
+
+        if ghost_y != self.cur_y {
+            draw_piece(self.cur_piece, self.cur_rot, self.cur_x, ghost_y, 73, true);
+        }
+        draw_piece(self.cur_piece, self.cur_rot, self.cur_x, self.cur_y,
+                   PIECE_COLORS[self.cur_piece], false);
+
+        let panel_x = 340;
+        draw_text(b"CYKIS", panel_x, 34, 252, 3);
+        draw_text(b"SCORE", panel_x, 104, 255, 2);
+        draw_number(self.score, panel_x, 120, 31, 3);
+        draw_text(b"LINES", panel_x, 178, 255, 2);
+        draw_number(self.lines, panel_x, 194, 28, 3);
+        draw_text(b"LEVEL", panel_x, 252, 255, 2);
+        draw_number(self.level(), panel_x, 268, 252, 3);
+        draw_text(b"NEXT", panel_x, 326, 255, 2);
+        draw_preview(self.next_piece, panel_x + 12, 346);
+        draw_text(b"A D MOVE", panel_x, 416, 182, 1);
+        draw_text(b"W ROTATE", panel_x, 430, 182, 1);
+        draw_text(b"S SOFT", panel_x, 444, 182, 1);
+        draw_text(b"SPACE DROP", panel_x, 458, 182, 1);
+    }
+}
+
+fn current_ghost_y(game: &GameState) -> i32 {
+    let mut y = game.cur_y;
+    while !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x, y + 1) { y += 1; }
+    y
+}
+
+fn drop_piece(game: &mut GameState, hard: bool) -> bool {
+    if hard {
+        let start_y = game.cur_y;
+        while game.try_move(0, 1) {}
+        game.score = game.score.saturating_add(((game.cur_y - start_y) as u32) * 2);
+        game.lock_piece();
+        return true;
+    }
+    if game.try_move(0, 1) {
+        game.score = game.score.saturating_add(1);
+        true
+    } else {
+        false
     }
 }
 
 #[no_mangle]
 #[link_section = ".entry"]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
-    clear();
-    let mut game = GameState::new();
-    game.render();
+    if gfx_set_mode(GFX_MODE_640X480) != 0 {
+        gfx_set_mode(GFX_MODE_TEXT);
+        println("CYKIS: display driver unavailable.");
+        return -1;
+    }
 
-    // Gravity loop settings:
-    // Drop automatically every DROP_TICKS cycles of the non-blocking input poll
-    const FRAME_MS: u32 = 25; // 25ms per frame
-    const DROP_INTERVAL: u32 = 16; // 16 * 25ms = 400ms between automatic drops
-    let mut tick_counter: u32 = 0;
+    let mut game = GameState::new();
+    let mut gravity_elapsed = 0u32;
+    let mut lock_elapsed = 0u32;
+    let mut lock_resets = 0u8;
+    game.render(current_ghost_y(&game));
 
     while !game.game_over {
-        // Accurate hardware PIT delay (25ms per frame)
         msleep(FRAME_MS);
-        tick_counter += 1;
+        gravity_elapsed = gravity_elapsed.saturating_add(FRAME_MS);
+        let mut changed = false;
+        let grounded_before_input = game.grounded();
 
-        // 1. Process non-blocking keyboard input
-        if key_available() {
-            let key = read_char();
-            let mut need_redraw = false;
-
+        if let Some(key) = try_read_char() {
             match key {
-                0x03 | b'q' | b'Q' => {
-                    // Quit game cleanly
-                    break;
+                0x03 | b'q' | b'Q' => break,
+                0x82 | b'a' | b'A' => changed = game.try_move(-1, 0),
+                0x83 | b'd' | b'D' => changed = game.try_move(1, 0),
+                0x80 | b'w' | b'W' => changed = game.try_rotate(),
+                0x81 | b's' | b'S' => {
+                    changed = drop_piece(&mut game, false);
+                    if changed { gravity_elapsed = 0; }
                 }
-                0x82 | b'a' | b'A' => { // Left arrow or 'a'
-                    if !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x - 1, game.cur_y) {
-                        game.cur_x -= 1;
-                        need_redraw = true;
-                    }
-                }
-                0x83 | b'd' | b'D' => { // Right arrow or 'd'
-                    if !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x + 1, game.cur_y) {
-                        game.cur_x += 1;
-                        need_redraw = true;
-                    }
-                }
-                0x80 | b'w' | b'W' => { // Up arrow or 'w' (Rotate)
-                    let next_rot = (game.cur_rot + 1) % 4;
-                    if !game.check_collision(game.cur_piece, next_rot, game.cur_x, game.cur_y) {
-                        game.cur_rot = next_rot;
-                        need_redraw = true;
-                    }
-                }
-                0x81 | b's' | b'S' => { // Down arrow or 's' (Soft drop)
-                    if !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x, game.cur_y + 1) {
-                        game.cur_y += 1;
-                        need_redraw = true;
-                    } else {
-                        game.lock_piece();
-                        need_redraw = true;
-                    }
-                    tick_counter = 0; // Reset drop timer on manual drop
-                }
-                b' ' => { // Hard drop
-                    while !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x, game.cur_y + 1) {
-                        game.cur_y += 1;
-                    }
-                    game.lock_piece();
-                    need_redraw = true;
-                    tick_counter = 0;
+                b' ' => {
+                    drop_piece(&mut game, true);
+                    gravity_elapsed = 0;
+                    lock_elapsed = 0;
+                    lock_resets = 0;
+                    changed = true;
                 }
                 _ => {}
             }
-
-            if need_redraw {
-                game.render();
-            }
         }
 
-        // 2. Automatic gravity: drop block after short period of time
-        if tick_counter >= DROP_INTERVAL {
-            tick_counter = 0;
-            if !game.check_collision(game.cur_piece, game.cur_rot, game.cur_x, game.cur_y + 1) {
-                game.cur_y += 1;
-            } else {
+        if changed && grounded_before_input && lock_resets < MAX_LOCK_RESETS {
+            lock_elapsed = 0;
+            lock_resets += 1;
+        }
+
+        if !game.game_over && gravity_elapsed >= game.gravity_period_ms() {
+            gravity_elapsed -= game.gravity_period_ms();
+            if game.try_move(0, 1) { changed = true; }
+            else { changed = true; }
+        }
+
+        if game.grounded() {
+            lock_elapsed = lock_elapsed.saturating_add(FRAME_MS);
+            if lock_elapsed >= LOCK_DELAY_MS {
                 game.lock_piece();
+                lock_elapsed = 0;
+                lock_resets = 0;
+                gravity_elapsed = 0;
+                changed = true;
             }
-            game.render();
+        } else {
+            lock_elapsed = 0;
+        }
+
+        if changed && !game.game_over {
+            game.render(current_ghost_y(&game));
         }
     }
 
-    // Game Over display
-    set_cursor(ORIGIN_X + 2, ORIGIN_Y + (BOARD_H / 2) as u8);
-    print("*** GAME OVER ***");
-    sound_tone(150, 400);
-    sleep(2);
-
-    clear();
-    set_cursor(0, 0);
+    if game.game_over {
+        gfx_fill_rect(72, 210, 214, 46, 224);
+        draw_text(b"GAME OVER", 84, 225, 255, 3);
+        sound_tone(150, 250);
+        msleep(1500);
+    }
+    gfx_set_mode(GFX_MODE_TEXT);
     0
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe { core::arch::asm!("hlt"); }
-    }
+    loop { unsafe { core::arch::asm!("hlt"); } }
 }

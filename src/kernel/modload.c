@@ -3,58 +3,41 @@
 #include "vfs.h"
 #include "cykastd.h"
 
-#define MAX_MODULES         8
-#define MODULE_SLOT_SIZE    0x4000    // 16KB per module
-#define MODULE_BASE_ADDR    0x40000   // Level 2 memory base
+#define MAX_MODULES 8
+#define MODULE_SLOT_SIZE 0x4000
+#define MODULE_BASE_ADDR 0x48000
 
 static cyk_module_header_t* g_loaded_modules[MAX_MODULES];
 static unsigned char g_used_slots[MAX_MODULES];
 static int g_loaded_count = 0;
 static cyk_keyboard_driver_t* g_keyboard_driver = (void*)0;
-static cyk_sound_driver_t* g_sound_driver = (void*)0;
+static cyk_sound_driver_t* g_sound_drivers[MAX_MODULES];
+static int g_sound_driver_count = 0;
+static int g_selected_sound_index = 0;
 static cyk_display_driver_t* g_display_driver = (void*)0;
-
-// Internal helper to trim whitespace and extract next word
 static const char* parse_next_token(const char* p, char* out_token, int max_len) {
-    // Skip leading whitespace and newlines
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-        p++;
-    }
-
-    if (*p == '\0') {
-        return (void*)0;
-    }
-
-    // Skip comment line
-    if (*p == '#') {
-        while (*p != '\0' && *p != '\n') {
-            p++;
-        }
-        return parse_next_token(p, out_token, max_len);
-    }
-
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == '\0') return (void*)0;
+    if (*p == '#') { while (*p && *p != '\n') p++; return parse_next_token(p, out_token, max_len); }
     int i = 0;
-    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && i < max_len - 1) {
-        out_token[i++] = *p++;
-    }
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && i < max_len - 1) out_token[i++] = *p++;
     out_token[i] = '\0';
-
     return p;
 }
-
 int modload_load_all(void) {
     g_loaded_count = 0;
     memset(g_loaded_modules, 0, sizeof(g_loaded_modules));
     memset(g_used_slots, 0, sizeof(g_used_slots));
     g_keyboard_driver = (void*)0;
-    g_sound_driver = (void*)0;
+    g_sound_driver_count = 0;
+    g_selected_sound_index = 0;
+    memset(g_sound_drivers, 0, sizeof(g_sound_drivers));
     g_display_driver = (void*)0;
 
     print_string("[MODLOAD] Checking for /BOOT/MODULES.CFG...\n");
 
     vfs_file_t cfg_entry;
-    if (vfs_find_file("/BOOT/MODULES.CFG", &cfg_entry) != 0 &&
-        vfs_find_file("/CYKOS/MODULES.CFG", &cfg_entry) != 0) {
+    if (vfs_find_file("/BOOT/MODULES.CFG", &cfg_entry) != 0) {
         print_color_string("[MODLOAD] Note: MODULES.CFG not found on disk.\n", VGA_RED);
         return 0;
     }
@@ -124,16 +107,14 @@ int modload_load_all(void) {
             continue;
         }
 
-        // Validate module header magic
         cyk_module_header_t* header = (cyk_module_header_t*)target_dest;
         if (header->magic != CYKOS_MODULE_MAGIC || header->load_address != preview.load_address) {
-            print_color_string(" -> Error: Invalid module magic header!\n", VGA_RED);
+            print_color_string(" -> Error: Module header changed while loading.\n", VGA_RED);
             continue;
         }
 
         g_used_slots[slot_index] = 1;
 
-        // Execute module initialization
         if (header->init != (void*)0) {
             int init_res = header->init();
             if (init_res != 0) {
@@ -142,11 +123,12 @@ int modload_load_all(void) {
             }
         }
 
-        // Register driver by type
         if (header->type == MODULE_TYPE_KEYBOARD) {
             g_keyboard_driver = (cyk_keyboard_driver_t*)header;
         } else if (header->type == MODULE_TYPE_SOUND) {
-            g_sound_driver = (cyk_sound_driver_t*)header;
+            if (g_sound_driver_count < MAX_MODULES) {
+                g_sound_drivers[g_sound_driver_count++] = (cyk_sound_driver_t*)header;
+            }
         } else if (header->type == MODULE_TYPE_DISPLAY) {
             g_display_driver = (cyk_display_driver_t*)header;
         }
@@ -159,15 +141,60 @@ int modload_load_all(void) {
         print_color_string(" [OK]\n", VGA_GREEN);
     }
 
+    if (g_sound_driver_count > 0) {
+        int best_index = 0;
+        int best_caps = -1;
+        for (int i = 0; i < g_sound_driver_count; i++) {
+            cyk_sound_driver_t* drv = g_sound_drivers[i];
+            int caps = 0;
+            if (drv && drv->get_caps) {
+                caps = drv->get_caps();
+            }
+            if (caps > best_caps) {
+                best_caps = caps;
+                best_index = i;
+            }
+        }
+        g_selected_sound_index = best_index;
+
+        cyk_sound_driver_t* best = g_sound_drivers[best_index];
+        print_color_string("[MODLOAD] Auto-selected sound driver: ", VGA_GREEN);
+        print_string(best ? best->header.name : "(none)");
+        if (best && best->hardware_name[0]) {
+            print_string(" (");
+            print_string(best->hardware_name);
+            print_string(")");
+        }
+        print_char('\n');
+    }
+
     return g_loaded_count;
 }
-
 cyk_keyboard_driver_t* modload_get_keyboard_driver(void) {
     return g_keyboard_driver;
 }
 
 cyk_sound_driver_t* modload_get_sound_driver(void) {
-    return g_sound_driver;
+    if (g_sound_driver_count == 0) return (void*)0;
+    if (g_selected_sound_index < 0 || g_selected_sound_index >= g_sound_driver_count) {
+        g_selected_sound_index = 0;
+    }
+    return g_sound_drivers[g_selected_sound_index];
+}
+
+int modload_get_all_sound_drivers(cyk_sound_driver_t** out_drivers, int max_drivers) {
+    if (!out_drivers || max_drivers <= 0) return 0;
+    int count = g_sound_driver_count < max_drivers ? g_sound_driver_count : max_drivers;
+    for (int i = 0; i < count; i++) {
+        out_drivers[i] = g_sound_drivers[i];
+    }
+    return count;
+}
+
+int modload_select_sound_driver(int index) {
+    if (index < 0 || index >= g_sound_driver_count) return -1;
+    g_selected_sound_index = index;
+    return 0;
 }
 
 cyk_display_driver_t* modload_get_display_driver(void) {
@@ -183,3 +210,4 @@ cyk_module_header_t* modload_find_module(const char* name) {
     }
     return (void*)0;
 }
+
