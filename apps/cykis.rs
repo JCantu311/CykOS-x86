@@ -569,9 +569,11 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
         draw_text(b"GAME OVER", 206, 216, 15, 4);
         draw_text(b"PRESS ANY KEY", 216, 258, 15, 2);
         sound_tone(150, 250);
+        let mut shown_ms = 0;
         loop {
-            if try_read_char().is_some() { break; }
             msleep(FRAME_MS);
+            shown_ms += FRAME_MS;
+            if try_read_char().is_some() && shown_ms >= 1500 { break; }
         }
     }
     gfx_set_mode(GFX_MODE_TEXT);
