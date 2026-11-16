@@ -17,6 +17,7 @@ const BOARD_X: i16 = 38;
 const BOARD_Y: i16 = 24;
 const CELL_W: i16 = 26;
 const CELL_H: i16 = 21;
+const GRID_COLOR: u8 = 8;
 
 // Four rotations of each of the seven standard tetrominoes in 4x4 masks.
 static PIECES: [[u16; 4]; 7] = [
@@ -102,6 +103,7 @@ struct GameState {
     cur_y: i32,
     score: u32,
     lines: u32,
+    board_revision: u32,
     game_over: bool,
 }
 
@@ -120,6 +122,7 @@ impl GameState {
             cur_y: 0,
             score: 0,
             lines: 0,
+            board_revision: 0,
             game_over: false,
         };
         if game.check_collision(game.cur_piece, 0, game.cur_x, game.cur_y) {
@@ -190,6 +193,7 @@ impl GameState {
     }
 
     fn lock_piece(&mut self) -> u32 {
+        self.board_revision = self.board_revision.wrapping_add(1);
         for row in 0..4 {
             for col in 0..4 {
                 if !piece_has_cell(self.cur_piece, self.cur_rot, row, col) { continue; }
@@ -294,19 +298,33 @@ fn font_rows(ch: u8) -> [u8; 5] {
 }
 
 fn draw_text(text: &[u8], x: i16, y: i16, color: u8, scale: i16) {
-    let mut cursor_x = x;
-    for &ch in text {
-        if ch == b' ' { cursor_x += 4 * scale; continue; }
+    const MAX_WIDTH: usize = 160;
+    const MAX_HEIGHT: usize = 20;
+    if scale <= 0 { return; }
+    let scale = scale as usize;
+    let width = text.len() * 4 * scale;
+    let height = 5 * scale;
+    if width == 0 || width > MAX_WIDTH || height > MAX_HEIGHT { return; }
+
+    let mut bitmap = [255u8; MAX_WIDTH * MAX_HEIGHT];
+    let pixel = color & 0x0F;
+    for (character, &ch) in text.iter().enumerate() {
         let rows = font_rows(ch.to_ascii_uppercase());
-        for (row, bits) in rows.iter().enumerate() {
+        for row in 0..5 {
             for col in 0..3 {
-                if bits & (1 << (2 - col)) != 0 {
-                    gfx_fill_rect(cursor_x + col * scale, y + row as i16 * scale, scale, scale, color);
+                if rows[row] & (1 << (2 - col)) == 0 { continue; }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let px = character * 4 * scale + col * scale + dx;
+                        let py = row * scale + dy;
+                        bitmap[py * width + px] = pixel;
+                    }
                 }
             }
         }
-        cursor_x += 4 * scale;
     }
+    let _ = gfx_draw_bitmap(x, y, width as u32, height as u32, width as u32,
+                            GFX_BITMAP_INDEX8, &bitmap[..width * height]);
 }
 
 fn draw_digit(x: i16, y: i16, value: u8, color: u8, scale: i16) {
@@ -351,21 +369,12 @@ fn draw_preview(piece: usize, x: i16, y: i16) {
 }
 
 impl GameState {
-    fn render(&self, ghost_y: i32) {
-        gfx_clear(0);
+    fn draw_board(&self) {
         gfx_fill_rect(BOARD_X - 4, BOARD_Y - 4, BOARD_W as i16 * CELL_W + 8,
-                      BOARD_H as i16 * CELL_H + 8, 73);
+                      BOARD_H as i16 * CELL_H + 8, GRID_COLOR);
         gfx_fill_rect(BOARD_X, BOARD_Y, BOARD_W as i16 * CELL_W,
                       BOARD_H as i16 * CELL_H, 2);
 
-        for col in 1..BOARD_W {
-            gfx_fill_rect(BOARD_X + col as i16 * CELL_W, BOARD_Y, 1,
-                          BOARD_H as i16 * CELL_H, 73);
-        }
-        for row in 1..BOARD_H {
-            gfx_fill_rect(BOARD_X, BOARD_Y + row as i16 * CELL_H,
-                          BOARD_W as i16 * CELL_W, 1, 73);
-        }
         for row in 0..BOARD_H {
             for col in 0..BOARD_W {
                 if self.board[row][col] != 0 {
@@ -375,29 +384,67 @@ impl GameState {
                 }
             }
         }
+    }
+
+    fn restore_cell(&self, x: i32, y: i32) {
+        if x < 0 || x >= BOARD_W as i32 || y < 0 || y >= BOARD_H as i32 { return; }
+        let px = BOARD_X + x as i16 * CELL_W;
+        let py = BOARD_Y + y as i16 * CELL_H;
+        gfx_fill_rect(px + 1, py + 1, CELL_W - 2, CELL_H - 2, 2);
+        let color = self.board[y as usize][x as usize];
+        if color != 0 { draw_block(px, py, color, CELL_W, CELL_H); }
+    }
+
+    fn erase_piece_at(&self, piece: usize, rot: usize, px: i32, py: i32) {
+        for row in 0..4 {
+            for col in 0..4 {
+                if piece_has_cell(piece, rot, row, col) {
+                    self.restore_cell(px + col as i32, py + row as i32);
+                }
+            }
+        }
+    }
+
+    fn render(&self, ghost_y: i32, previous: Option<(usize, usize, i32, i32, i32)>,
+              redraw_board: bool, redraw_stats: bool, redraw_next: bool) {
+        if redraw_board {
+            self.draw_board();
+        } else if let Some((piece, rot, x, y, old_ghost_y)) = previous {
+            self.erase_piece_at(piece, rot, x, y);
+            if old_ghost_y != y {
+                self.erase_piece_at(piece, rot, x, old_ghost_y);
+            }
+        }
 
         if ghost_y != self.cur_y {
-            draw_piece(self.cur_piece, self.cur_rot, self.cur_x, ghost_y, 73, true);
+            draw_piece(self.cur_piece, self.cur_rot, self.cur_x, ghost_y, GRID_COLOR, true);
         }
         draw_piece(self.cur_piece, self.cur_rot, self.cur_x, self.cur_y,
                    PIECE_COLORS[self.cur_piece], false);
 
         let panel_x = 340;
         draw_text(b"CYKIS", panel_x, 34, 252, 3);
-        draw_text(b"SCORE", panel_x, 104, 255, 2);
-        draw_number(self.score, panel_x, 120, 31, 3);
-        draw_text(b"LINES", panel_x, 178, 255, 2);
-        draw_number(self.lines, panel_x, 194, 28, 3);
-        draw_text(b"LEVEL", panel_x, 252, 255, 2);
-        draw_number(self.level(), panel_x, 268, 252, 3);
-        draw_text(b"NEXT", panel_x, 326, 255, 2);
-        gfx_fill_rect(panel_x + 2, 344, 92, 78, 73);
-        gfx_fill_rect(panel_x + 4, 346, 88, 74, 0);
-        draw_preview(self.next_piece, panel_x + 12, 346);
-        draw_text(b"A D MOVE", panel_x, 426, 182, 1);
-        draw_text(b"W ROTATE", panel_x, 438, 182, 1);
-        draw_text(b"S SOFT", panel_x, 450, 182, 1);
-        draw_text(b"SPACE DROP", panel_x, 462, 182, 1);
+        draw_text(b"SCORE", panel_x, 104, 255, 3);
+        draw_text(b"LINES", panel_x, 178, 255, 3);
+        draw_text(b"LEVEL", panel_x, 252, 255, 3);
+        if redraw_stats {
+            gfx_fill_rect(panel_x, 122, 256, 40, 0);
+            draw_number(self.score, panel_x, 124, 15, 4);
+            gfx_fill_rect(panel_x, 196, 256, 40, 0);
+            draw_number(self.lines, panel_x, 198, 14, 4);
+            gfx_fill_rect(panel_x, 270, 256, 40, 0);
+            draw_number(self.level(), panel_x, 272, 11, 4);
+        }
+        draw_text(b"NEXT", panel_x, 326, 255, 3);
+        if redraw_next {
+            gfx_fill_rect(panel_x + 2, 344, 92, 78, GRID_COLOR);
+            gfx_fill_rect(panel_x + 4, 346, 88, 74, 0);
+            draw_preview(self.next_piece, panel_x + 12, 346);
+        }
+        draw_text(b"A D MOVE", panel_x, 426, 15, 2);
+        draw_text(b"W ROTATE", panel_x, 439, 15, 2);
+        draw_text(b"S SOFT", panel_x, 452, 15, 2);
+        draw_text(b"SPACE DROP", panel_x, 465, 15, 2);
     }
 }
 
@@ -432,13 +479,21 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
         return -1;
     }
 
+    gfx_clear(0);
     let mut game = GameState::new();
     let mut gravity_elapsed = 0u32;
     let mut lock_elapsed = 0u32;
     let mut lock_resets = 0u8;
-    game.render(current_ghost_y(&game));
+    let mut displayed_score = game.score;
+    let mut displayed_lines = game.lines;
+    let mut displayed_level = game.level();
+    let mut displayed_next = game.next_piece;
+    let mut displayed_board_revision = game.board_revision;
+    game.render(current_ghost_y(&game), None, true, true, true);
 
     while !game.game_over {
+        let previous_piece = (game.cur_piece, game.cur_rot, game.cur_x, game.cur_y,
+                              current_ghost_y(&game));
         msleep(FRAME_MS);
         gravity_elapsed = gravity_elapsed.saturating_add(FRAME_MS);
         let mut changed = false;
@@ -490,15 +545,34 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
         }
 
         if changed && !game.game_over {
-            game.render(current_ghost_y(&game));
+            let score = game.score;
+            let lines = game.lines;
+            let level = game.level();
+            let next = game.next_piece;
+            let redraw_board = game.board_revision != displayed_board_revision;
+            let redraw_stats = score != displayed_score || lines != displayed_lines ||
+                               level != displayed_level;
+            let redraw_next = next != displayed_next;
+            game.render(current_ghost_y(&game), Some(previous_piece), redraw_board,
+                        redraw_stats, redraw_next);
+            displayed_score = score;
+            displayed_lines = lines;
+            displayed_level = level;
+            displayed_next = next;
+            displayed_board_revision = game.board_revision;
         }
     }
 
     if game.game_over {
-        gfx_fill_rect(72, 210, 214, 46, 224);
-        draw_text(b"GAME OVER", 84, 225, 255, 3);
+        gfx_fill_rect(160, 190, 320, 100, 4);
+        gfx_fill_rect(164, 194, 312, 92, 0);
+        draw_text(b"GAME OVER", 206, 216, 15, 4);
+        draw_text(b"PRESS ANY KEY", 216, 258, 15, 2);
         sound_tone(150, 250);
-        msleep(1500);
+        loop {
+            if try_read_char().is_some() { break; }
+            msleep(FRAME_MS);
+        }
     }
     gfx_set_mode(GFX_MODE_TEXT);
     0
