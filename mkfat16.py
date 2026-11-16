@@ -351,6 +351,17 @@ if __name__ == "__main__":
     else:
         sample_files["ETC/USERCMDS.LST"] = "# CykOS External User Commands\nedit /USR/BIN/EDIT.BIN\nvi /USR/BIN/EDIT.BIN\n"
 
+    # Optional CykShell startup command list, installed in the standard config dir.
+    autoexec_path = "AUTOEXEC.SHE"
+    if os.path.exists(autoexec_path):
+        with open(autoexec_path, "r", encoding="utf-8") as autoexec_file:
+            sample_files["ETC/AUTOEXEC.SHE"] = autoexec_file.read()
+    else:
+        sample_files["ETC/AUTOEXEC.SHE"] = (
+            "# CykOS startup commands for CykShell.\n"
+            "# One command per line; lines beginning with # are ignored.\n"
+        )
+
     # Keep diagnostics and demonstration programs separate from normal apps.
     test_binaries = {
         "HELLO.BIN", "SYSDEMO.BIN", "POSIXTEST.BIN", "SOUNDTEST.BIN", "GFXDEMO.BIN"

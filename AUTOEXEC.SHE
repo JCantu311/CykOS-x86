@@ -1,0 +1,3 @@
+# CykOS startup commands for CykShell.
+# Put one normal CykShell command on each line; lines beginning with # are ignored.
+# Commands run after the shell banner and before the first prompt.

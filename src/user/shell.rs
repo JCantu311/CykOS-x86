@@ -1455,6 +1455,20 @@ fn run_script(filename: &[u8]) {
     unsafe { SCRIPT_ACTIVE = false; }
 }
 
+// AUTOEXEC.SHE is an optional, plain-text CykShell startup command list.
+// Probe first so an absent file does not produce a startup error message.
+fn run_startup_script() {
+    const AUTOEXEC_PATH: &[u8] = b"/ETC/AUTOEXEC.SHE";
+    let mut path = [0u8; 64];
+    let mut probe = [0u8; 1];
+    for i in 0..AUTOEXEC_PATH.len() { path[i] = AUTOEXEC_PATH[i]; }
+    path[AUTOEXEC_PATH.len()] = 0;
+
+    if unsafe { vfs_read_file_by_name(path.as_ptr(), probe.as_mut_ptr(), probe.len() as u32) } >= 0 {
+        run_script(AUTOEXEC_PATH);
+    }
+}
+
 // Command Dispatcher
 fn dispatch_single_command(raw_line: &[u8]) -> bool {
     let trimmed = trim_slice(raw_line);
@@ -1668,6 +1682,8 @@ pub extern "C" fn shell_main() -> ! {
     puts_color(b" CykOS Interactive Shell (CykShell v0.2)\n", 0x0A); // VGA Green
     puts(b" Type 'help' for available commands.\n");
     puts(b"========================================\n\n");
+
+    run_startup_script();
 
     loop {
         let mut cwd_buf = [0u8; 128];
