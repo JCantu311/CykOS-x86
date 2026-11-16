@@ -569,12 +569,12 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
         draw_text(b"GAME OVER", 206, 216, 15, 4);
         draw_text(b"PRESS ANY KEY", 216, 258, 15, 2);
         sound_tone(150, 250);
-        let mut shown_ms = 0;
-        loop {
-            msleep(FRAME_MS);
-            shown_ms += FRAME_MS;
-            if try_read_char().is_some() && shown_ms >= 1500 { break; }
-        }
+        // Drain the key that caused the game over, leave the prompt visible,
+        // then use the blocking character API used by the shell. The nonblocking
+        // game poll can miss input here when its IRQ queue is empty.
+        while try_read_char().is_some() {}
+        msleep(1500);
+        let _ = read_char();
     }
     gfx_set_mode(GFX_MODE_TEXT);
     0
