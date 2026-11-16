@@ -105,6 +105,15 @@ void exit(int status) {
     // ordinary console output from short-lived commands (for example `lua -v`).
     int graphics_mode = __syscall1(SYS_GFX_MODE, -1); // Query active video mode.
     if (graphics_mode > 0) {
+        static const unsigned char text_palette[16 * 3] = {
+              0,   0,   0,   0,   0, 170,   0, 170,   0,   0, 170, 170,
+            170,   0,   0, 170,   0, 170, 170,  85,   0, 170, 170, 170,
+             85,  85,  85,  85,  85, 255,  85, 255,  85,  85, 255, 255,
+            255,  85,  85, 255,  85, 255, 255, 255,  85, 255, 255, 255
+        };
+        // The current mode's palette API permits replacing entries 0-15.
+        // Restore the text colors explicitly before returning to text mode.
+        (void)__syscall2(SYS_GFX_PALETTE, 16 << 16, (int)text_palette);
         (void)__syscall1(SYS_GFX_MODE, 0); // Restore text mode before flushing output.
     }
     fflush(stdout);

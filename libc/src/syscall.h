@@ -4,6 +4,7 @@
 #include <errno.h>
 
 #define SYS_GFX_MODE 187
+#define SYS_GFX_PALETTE 199
 
 static inline int __syscall0(int num) {
     int ret;
