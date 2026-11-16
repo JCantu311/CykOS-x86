@@ -31,12 +31,60 @@ static PIECES: [[u16; 4]; 7] = [
 
 // Standard VGA palette indices: cyan, blue, brown, yellow, green, magenta, red.
 static PIECE_COLORS: [u8; 7] = [11, 1, 6, 14, 2, 13, 4];
-static mut RNG_STATE: u32 = 0x12345678;
 
-fn rand_piece() -> usize {
-    unsafe {
-        RNG_STATE = RNG_STATE.wrapping_mul(1103515245).wrapping_add(12345);
-        ((RNG_STATE >> 16) % 7) as usize
+struct PieceBag {
+    pieces: [u8; 7],
+    cursor: usize,
+    state: u32,
+}
+
+impl PieceBag {
+    fn new() -> Self {
+        let low: u32;
+        let high: u32;
+        unsafe {
+            core::arch::asm!("rdtsc", out("eax") low, out("edx") high,
+                             options(nomem, nostack, preserves_flags));
+        }
+        let seed = low ^ high.rotate_left(13) ^ 0x9E3779B9;
+        let mut bag = Self { pieces: [0; 7], cursor: 7,
+                             state: if seed == 0 { 0xA341316C } else { seed } };
+        bag.shuffle();
+        bag
+    }
+
+    fn random(&mut self) -> u32 {
+        // xorshift32; state is kept nonzero by the seed fallback above.
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        x
+    }
+
+    fn below(&mut self, bound: u32) -> u32 {
+        let threshold = bound.wrapping_neg() % bound;
+        loop {
+            let value = self.random();
+            if value >= threshold { return value % bound; }
+        }
+    }
+
+    fn shuffle(&mut self) {
+        for i in 0..7 { self.pieces[i] = i as u8; }
+        for i in (1..7).rev() {
+            let j = self.below(i as u32 + 1) as usize;
+            self.pieces.swap(i, j);
+        }
+        self.cursor = 0;
+    }
+
+    fn next(&mut self) -> usize {
+        if self.cursor >= self.pieces.len() { self.shuffle(); }
+        let piece = self.pieces[self.cursor] as usize;
+        self.cursor += 1;
+        piece
     }
 }
 
@@ -46,6 +94,7 @@ fn piece_has_cell(piece: usize, rot: usize, row: usize, col: usize) -> bool {
 
 struct GameState {
     board: [[u8; BOARD_W]; BOARD_H],
+    bag: PieceBag,
     cur_piece: usize,
     next_piece: usize,
     cur_rot: usize,
@@ -58,10 +107,14 @@ struct GameState {
 
 impl GameState {
     fn new() -> Self {
+        let mut bag = PieceBag::new();
+        let cur_piece = bag.next();
+        let next_piece = bag.next();
         let mut game = Self {
             board: [[0; BOARD_W]; BOARD_H],
-            cur_piece: rand_piece(),
-            next_piece: rand_piece(),
+            bag,
+            cur_piece,
+            next_piece,
             cur_rot: 0,
             cur_x: 3,
             cur_y: 0,
@@ -157,7 +210,7 @@ impl GameState {
         }
 
         self.cur_piece = self.next_piece;
-        self.next_piece = rand_piece();
+        self.next_piece = self.bag.next();
         self.cur_rot = 0;
         self.cur_x = 3;
         self.cur_y = 0;
@@ -176,10 +229,28 @@ impl GameState {
 }
 
 fn draw_block(x: i16, y: i16, color: u8, width: i16, height: i16) {
-    gfx_fill_rect(x + 1, y + 1, width - 2, height - 2, color);
-    gfx_fill_rect(x + 2, y + 2, width - 5, 2, 255);
-    gfx_fill_rect(x + 2, y + 2, 2, height - 5, 255);
-    gfx_fill_rect(x + width - 4, y + 3, 2, height - 6, 73);
+    if width <= 0 || height <= 0 || width > 26 || height > 21 { return; }
+    let mut sprite = [255u8; 26 * 21];
+    let w = width as usize;
+    let h = height as usize;
+    for py in 1..h.saturating_sub(1) {
+        for px in 1..w.saturating_sub(1) {
+            sprite[py * w + px] = color;
+        }
+    }
+    // Beveled, indexed-color bitmap tile. 255 is the graphics API's transparent index.
+    for py in 2..h.saturating_sub(3) {
+        for px in 2..w.saturating_sub(3) {
+            if py < 4 || px < 4 { sprite[py * w + px] = 15; }
+        }
+    }
+    for py in 3..h.saturating_sub(3) {
+        for px in w.saturating_sub(4)..w.saturating_sub(2) {
+            sprite[py * w + px] = 8;
+        }
+    }
+    let _ = gfx_draw_bitmap(x, y, w as u32, h as u32, w as u32,
+                            GFX_BITMAP_INDEX8, &sprite[..w * h]);
 }
 
 fn draw_piece(piece: usize, rot: usize, px: i32, py: i32, color: u8, ghost: bool) {
@@ -320,11 +391,13 @@ impl GameState {
         draw_text(b"LEVEL", panel_x, 252, 255, 2);
         draw_number(self.level(), panel_x, 268, 252, 3);
         draw_text(b"NEXT", panel_x, 326, 255, 2);
+        gfx_fill_rect(panel_x + 2, 344, 92, 78, 73);
+        gfx_fill_rect(panel_x + 4, 346, 88, 74, 0);
         draw_preview(self.next_piece, panel_x + 12, 346);
-        draw_text(b"A D MOVE", panel_x, 416, 182, 1);
-        draw_text(b"W ROTATE", panel_x, 430, 182, 1);
-        draw_text(b"S SOFT", panel_x, 444, 182, 1);
-        draw_text(b"SPACE DROP", panel_x, 458, 182, 1);
+        draw_text(b"A D MOVE", panel_x, 426, 182, 1);
+        draw_text(b"W ROTATE", panel_x, 438, 182, 1);
+        draw_text(b"S SOFT", panel_x, 450, 182, 1);
+        draw_text(b"SPACE DROP", panel_x, 462, 182, 1);
     }
 }
 

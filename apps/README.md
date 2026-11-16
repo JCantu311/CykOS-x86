@@ -9,7 +9,7 @@ This directory provides the standalone tooling to compile, link, and package Rus
 - **Dynamic Linking**: Rust applications are emitted as position-independent ELF32 shared objects. The kernel maps their load segments and resolves imports against its public export table at launch. Existing flat binaries remain supported.
 - **Packaging**: The image builder places the shell in `/bin`, applications in `/usr/bin`, drivers and their manifest in `/boot`, aliases in `/etc`, and documentation in `/usr/share/doc`.
 
-Games live under `apps/games/` and are built like every other Rust userland app. Cykis is the bundled falling-block game; run it from CykShell with `cykis`.
+CYKIS is the bundled falling-block game, maintained at `apps/cykis.rs` and run from CykShell with `cykis`.
 
 ## Command Line Arguments (`argc`, `argv`)
 
@@ -42,10 +42,10 @@ To build all apps and update the QEMU hard disk image:
 ./apps/build.sh
 ```
 
-To build a specific app (e.g. `apps/games/cykis.rs`):
+To build a specific app (e.g. `apps/cykis.rs`):
 
 ```bash
-./apps/build.sh apps/games/cykis.rs
+./apps/build.sh apps/cykis.rs
 ```
 
 ## Running in QEMU

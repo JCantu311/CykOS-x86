@@ -1,5 +1,3 @@
-# Cykis
+# Games
 
-Cykis is a standalone `#![no_std]` falling-block game for CykOS. It renders directly in VGA text memory and uses the existing keyboard polling ABI.
-
-Controls: arrow keys move and rotate, `Space` hard-drops, `P` pauses, and `Q` returns to CykShell.
+CYKIS is maintained in `apps/cykis.rs` and uses the CykOS 640x480 indexed VGA graphics API. Its blocks are indexed bitmap sprites, and its preview panel shows the next piece. Controls: A/D move, W rotates, S soft-drops, Space hard-drops, and Q exits to CykShell.
