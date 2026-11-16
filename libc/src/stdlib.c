@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
@@ -99,6 +100,11 @@ void* realloc(void* ptr, size_t size) {
 }
 
 void exit(int status) {
+    // Reset graphics before flushing text diagnostics. The kernel also does
+    // this during SYS_EXIT, but that is too late for output written here.
+    (void)__syscall1(187, 0); // SYS_GFX_MODE: restore VGA text mode
+    fflush(stdout);
+    fflush(stderr);
     __syscall1(1, status); // SYS_EXIT
     while (1) {
         asm volatile("hlt");
@@ -111,6 +117,54 @@ void abort(void) {
 
 int atoi(const char* nptr) {
     return (int)strtol(nptr, NULL, 10);
+}
+
+double atof(const char* nptr) {
+    const char* s = nptr;
+    while (isspace((unsigned char)*s)) s++;
+
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    double value = 0.0;
+    while (isdigit((unsigned char)*s)) {
+        value = value * 10.0 + (*s++ - '0');
+    }
+    if (*s == '.') {
+        s++;
+        double place = 0.1;
+        while (isdigit((unsigned char)*s)) {
+            value += (*s++ - '0') * place;
+            place *= 0.1;
+        }
+    }
+
+    int exponent_sign = 1;
+    int exponent = 0;
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        if (*s == '-') {
+            exponent_sign = -1;
+            s++;
+        } else if (*s == '+') {
+            s++;
+        }
+        while (isdigit((unsigned char)*s)) {
+            if (exponent < 308) {
+                exponent = exponent * 10 + (*s - '0');
+                if (exponent > 308) exponent = 308;
+            }
+            s++;
+        }
+    }
+
+    while (exponent-- > 0) value = exponent_sign > 0 ? value * 10.0 : value / 10.0;
+    return sign * value;
 }
 
 long strtol(const char* nptr, char** endptr, int base) {
@@ -162,6 +216,14 @@ long strtol(const char* nptr, char** endptr, int base) {
 
 int abs(int j) {
     return j < 0 ? -j : j;
+}
+
+// Process creation is not implemented by CykOS yet. POSIX callers receive
+// failure, allowing optional host utilities (such as Doom's Zenity probe) to
+// be skipped cleanly.
+int system(const char* command) {
+    (void)command;
+    return -1;
 }
 
 void qsort(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*)) {

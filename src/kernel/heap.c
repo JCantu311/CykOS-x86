@@ -3,6 +3,18 @@
 
 #define HEAP_MAGIC 0xCAFE1234
 #define ALIGN8(x) (((x) + 7) & ~7)
+#define E820_COUNT_ADDRESS 0x04FC
+#define E820_MAP_ADDRESS   0x0500
+#define E820_ENTRY_LIMIT   20
+
+typedef struct __attribute__((packed)) {
+    unsigned int base_low;
+    unsigned int base_high;
+    unsigned int length_low;
+    unsigned int length_high;
+    unsigned int type;
+    unsigned int attributes;
+} heap_e820_entry_t;
 
 typedef struct heap_block {
     unsigned int magic;
@@ -15,9 +27,51 @@ typedef struct heap_block {
 #define BLOCK_HEADER_SIZE ALIGN8(sizeof(heap_block_t))
 
 static unsigned int g_heap_break = HEAP_START_ADDR;
+static unsigned int g_heap_max_addr = HEAP_FALLBACK_MAX_ADDR;
 static heap_block_t* g_head = (void*)0;
 
+static unsigned int detect_heap_max_addr(void) {
+    volatile unsigned int* count_ptr = (volatile unsigned int*)E820_COUNT_ADDRESS;
+    heap_e820_entry_t* entries = (heap_e820_entry_t*)E820_MAP_ADDRESS;
+    unsigned int count = *count_ptr;
+    unsigned int covered = HEAP_START_ADDR;
+
+    if (count > E820_ENTRY_LIMIT) count = E820_ENTRY_LIMIT;
+    if (count == 0) return HEAP_FALLBACK_MAX_ADDR;
+
+    // Extend only across contiguous usable ranges. This avoids allocating
+    // through an E820 reserved hole when firmware splits the memory map.
+    for (unsigned int pass = 0; pass < count; pass++) {
+        unsigned int previous = covered;
+        for (unsigned int i = 0; i < count; i++) {
+            heap_e820_entry_t* entry = &entries[i];
+            if (entry->type != 1 || !(entry->attributes & 1) ||
+                entry->base_high != 0 || entry->length_low == 0) continue;
+
+            unsigned int start = entry->base_low;
+            unsigned int end;
+            if (entry->length_high != 0 || entry->length_low > 0xFFFFFFFFu - start)
+                end = HEAP_MAX_ADDR;
+            else
+                end = start + entry->length_low;
+
+            if (end > HEAP_MAX_ADDR) end = HEAP_MAX_ADDR;
+            if (start <= covered && end > covered) covered = end;
+        }
+        if (covered == previous || covered >= HEAP_MAX_ADDR) break;
+    }
+
+    return covered > HEAP_START_ADDR ? covered : HEAP_FALLBACK_MAX_ADDR;
+}
+
+unsigned int heap_get_max_addr(void) {
+    return g_heap_max_addr;
+}
+
 void heap_init(void) {
+    g_heap_max_addr = detect_heap_max_addr();
+    if (g_heap_max_addr < HEAP_START_ADDR + 65536)
+        g_heap_max_addr = HEAP_FALLBACK_MAX_ADDR;
     g_heap_break = HEAP_START_ADDR;
     g_head = (void*)0;
 
@@ -40,7 +94,7 @@ void* sbrk(int increment) {
     }
 
     if (increment > 0) {
-        if (g_heap_break + (unsigned int)increment > HEAP_MAX_ADDR) {
+        if ((unsigned int)increment > g_heap_max_addr - g_heap_break) {
             return (void*)-1; // Out of memory
         }
         g_heap_break += increment;

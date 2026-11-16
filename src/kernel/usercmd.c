@@ -12,8 +12,10 @@
 #define USER_BIN_DIR      "/USR/BIN/"
 #define LEGACY_BIN_DIR    "/CYKOS/"
 #define USER_APP_BASE     0x180000  // RAM arena above the BIOS/VGA memory hole
-#define USER_APP_MAX_SIZE 0x30000   // 192 KB maximum application binary size
-#define USER_APP_STACK_TOP 0x1F0000 // Separate 128 KB stack below the kernel heap
+#define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
+#define USER_DYNAMIC_APP_MAX_SIZE 0xC0000 // Larger PIC apps are loaded from the kernel heap
+#define USER_SHELL_MAX_SIZE 0x30000 // Preserve the shell's reserved 192 KB region
+#define USER_APP_STACK_TOP 0x230000 // 128 KB stack above the fixed app arena
 #define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
 
@@ -184,7 +186,7 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
         if (ph[i].flags & ELF_PF_X) executable_segment = 1;
     }
     if (min_vaddr == 0xFFFFFFFFu || max_vaddr <= min_vaddr ||
-        min_vaddr > USER_APP_BASE || max_vaddr - min_vaddr > USER_APP_MAX_SIZE ||
+        min_vaddr > USER_APP_BASE || max_vaddr - min_vaddr > USER_DYNAMIC_APP_MAX_SIZE ||
         !executable_segment || !dynamic_vaddr || !dynamic_size ||
         !image_range(dynamic_vaddr, dynamic_size, min_vaddr, max_vaddr)) return -1;
 
@@ -192,9 +194,9 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     if (load_base < min_vaddr) return -1;
     unsigned int load_bias = load_base - min_vaddr;
     if (load_bias > 0xFFFFFFFFu - max_vaddr ||
-        load_bias + max_vaddr > load_base + USER_APP_MAX_SIZE) return -1;
+        load_bias + max_vaddr > load_base + USER_DYNAMIC_APP_MAX_SIZE) return -1;
 
-    memset(load_area, 0, USER_APP_MAX_SIZE);
+    memset(load_area, 0, USER_DYNAMIC_APP_MAX_SIZE);
     for (unsigned int i = 0; i < eh->phnum; i++) {
         if (ph[i].type != ELF_PT_LOAD) continue;
         memcpy((void*)(load_bias + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
@@ -308,9 +310,9 @@ static volatile unsigned int g_usercmd_app_argv = 0;
 
 /*
  * Applications and their syscalls currently execute at ring 0, so they need
- * a private stack even before full privilege separation exists. Keeping the
- * stack below the heap prevents large Rust stack frames from consuming the
- * kernel/shell stack. The app arena ends at 0x1B0000; this stack has 128 KB.
+ * a private stack even before full privilege separation exists. The fixed app
+ * arena ends at 0x210000; this stack occupies 0x210000-0x230000 and the kernel
+ * heap starts at 0x250000.
  */
 static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
                                      char** argv) {
@@ -446,6 +448,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
     volatile int app_ret = 0;
     unsigned char* staged_image = (unsigned char*)0;
     void* dest = (void*)USER_APP_BASE;
+    int dest_heap_allocated = 0;
     unsigned int entry_address = USER_APP_BASE;
 
     // Cover command lookup and disk loading too. Ctrl+C abandons this function
@@ -596,6 +599,19 @@ int exec_user_command(const char* cmd_name, const char* args) {
         staged_image[2] == 'L' && staged_image[3] == 'F') {
         unsigned short elf_type = app_entry.size >= sizeof(elf32_ehdr_t)
             ? ((const elf32_ehdr_t*)staged_image)->type : 0;
+        if (elf_type == ELF_ET_DYN) {
+            dest = malloc(USER_DYNAMIC_APP_MAX_SIZE);
+            if (!dest) {
+                free(staged_image);
+                staged_image = (unsigned char*)0;
+                g_usercmd_active = 0;
+                print_color_string("CykShell: not enough memory for dynamic app: ", VGA_RED);
+                print_string(target_file);
+                print_string("\n");
+                return 1;
+            }
+            dest_heap_allocated = 1;
+        }
         int load_result = elf_type == ELF_ET_DYN
             ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
             : elf_type == ELF_ET_EXEC
@@ -604,6 +620,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
         if (load_result != 0) {
             free(staged_image);
             staged_image = (unsigned char*)0;
+            if (dest_heap_allocated) free(dest);
             g_usercmd_active = 0;
             print_color_string("CykShell: invalid ELF app or unresolved kernel import: ", VGA_RED);
             print_string(target_file);
@@ -680,12 +697,14 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     asm volatile("usercmd_return_label:\n");
     g_usercmd_active = 0;
+    if (dest_heap_allocated) free(dest);
     if (staged_image) {
         free(staged_image);
         staged_image = (unsigned char*)0;
     }
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
+    syscall_flush_deferred_console();
     (void)app_ret;
 
     return 1;
@@ -701,6 +720,7 @@ void usercmd_terminate(int exit_code) {
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) {
         dpy->set_mode(0);
     }
+    syscall_flush_deferred_console();
 
     asm volatile(
         "movl %0, %%esp\n"
@@ -721,6 +741,7 @@ __attribute__((noreturn)) void usercmd_abort_from_irq(void) {
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) {
         dpy->set_mode(0);
     }
+    syscall_flush_deferred_console();
     print_string("^C\n");
     asm volatile(
         "movl %0, %%esp\n"
@@ -751,6 +772,7 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
     g_usercmd_active = 0;
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
+    syscall_flush_deferred_console();
     print_color_string("Application stopped after CPU exception: vector ", VGA_RED);
     usercmd_print_hex(vector);
     print_string(", EIP ");
@@ -781,14 +803,14 @@ int exec_shell_binary(void) {
         shell_path = "/CYKOS/SHELL.BIN";
         if (vfs_find_file(shell_path, &shell_entry) != 0) return 0;
     }
-    if (shell_entry.size == 0 || shell_entry.size > USER_APP_MAX_SIZE) {
+    if (shell_entry.size == 0 || shell_entry.size > USER_SHELL_MAX_SIZE) {
         print_color_string("CykShell: invalid shell image size\n", VGA_RED);
         return -1;
     }
 
     void* shell_base = (void*)0x100000;
-    memset(shell_base, 0, USER_APP_MAX_SIZE);
-    int bytes_read = vfs_read_at(&shell_entry, 0, shell_base, USER_APP_MAX_SIZE);
+    memset(shell_base, 0, USER_SHELL_MAX_SIZE);
+    int bytes_read = vfs_read_at(&shell_entry, 0, shell_base, USER_SHELL_MAX_SIZE);
     if (bytes_read <= 0) {
         print_color_string("CykShell: failed to load standalone shell image\n", VGA_RED);
         return -1;

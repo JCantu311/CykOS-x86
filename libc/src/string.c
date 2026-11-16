@@ -1,5 +1,27 @@
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <strings.h>
+
+int strcasecmp(const char* left, const char* right) {
+    while (*left && *right) {
+        int a = tolower((unsigned char)*left++);
+        int b = tolower((unsigned char)*right++);
+        if (a != b) return a - b;
+    }
+    return (unsigned char)*left - (unsigned char)*right;
+}
+
+int strncasecmp(const char* left, const char* right, size_t count) {
+    while (count && *left && *right) {
+        int a = tolower((unsigned char)*left++);
+        int b = tolower((unsigned char)*right++);
+        if (a != b) return a - b;
+        --count;
+    }
+    if (!count) return 0;
+    return (unsigned char)*left - (unsigned char)*right;
+}
 
 size_t strlen(const char* s) {
     size_t len = 0;

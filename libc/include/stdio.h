@@ -7,6 +7,16 @@
 
 #define EOF (-1)
 
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#endif
+#ifndef SEEK_CUR
+#define SEEK_CUR 1
+#endif
+#ifndef SEEK_END
+#define SEEK_END 2
+#endif
+
 #define BUFSIZ 512
 
 typedef struct FILE {
@@ -15,6 +25,8 @@ typedef struct FILE {
     int   eof;
     int   error;
     char  buf[BUFSIZ];
+    char *write_buf;
+    size_t write_buf_capacity;
     int   buf_pos;
     int   buf_len;
     int   mode; /* 0 = read, 1 = write */
@@ -33,6 +45,9 @@ int   fseek(FILE* stream, long offset, int whence);
 long  ftell(FILE* stream);
 int   feof(FILE* stream);
 int   ferror(FILE* stream);
+int   fileno(FILE* stream);
+int   remove(const char* pathname);
+int   rename(const char* old_path, const char* new_path);
 
 int   fgetc(FILE* stream);
 char* fgets(char* s, int size, FILE* stream);
@@ -41,6 +56,7 @@ int   fputs(const char* s, FILE* stream);
 int   getchar(void);
 int   putchar(int c);
 int   puts(const char* s);
+int   sscanf(const char* input, const char* format, ...);
 
 int   printf(const char* format, ...);
 int   fprintf(FILE* stream, const char* format, ...);

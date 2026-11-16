@@ -14,8 +14,10 @@ void* realloc(void* ptr, size_t size);
 
 void  exit(int status) __attribute__((noreturn));
 void  abort(void) __attribute__((noreturn));
+int   system(const char* command);
 
 int   atoi(const char* nptr);
+double atof(const char* nptr);
 long  strtol(const char* nptr, char** endptr, int base);
 int   abs(int j);
 

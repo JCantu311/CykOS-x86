@@ -84,6 +84,11 @@ start:
     dec dword [remaining]
     dec byte [cluster_sectors]
     jnz .read_cluster
+    ; The requested file may end exactly on a cluster boundary. In that case
+    ; the remaining-sector count is already zero and the FAT entry is the
+    ; normal 0xFFFF end marker, not another cluster to follow.
+    cmp dword [remaining], 0
+    je .enter_pm
     movzx eax, word [cluster]
     shl eax, 1
     mov edx, eax

@@ -4,6 +4,7 @@
 // Hardware I/O Port Definitions
 #define KBD_DATA_PORT    0x60
 #define KBD_STATUS_PORT  0x64
+#define KEY_SHIFT_EVENT  0x8A
 
 // Internal port access (keeps driver 100% self-contained)
 static inline unsigned char kbd_inb(unsigned short port) {
@@ -16,23 +17,87 @@ static inline void kbd_outb(unsigned short port, unsigned char data) {
     asm volatile("outb %0, %1" :: "a"(data), "Nd"(port));
 }
 
+static int kbd_wait_input_empty(void) {
+    for (unsigned int i = 0; i < 100000; ++i) {
+        if ((kbd_inb(KBD_STATUS_PORT) & 0x02u) == 0) return 0;
+    }
+    return -1;
+}
+
+static int kbd_wait_output_full(unsigned char* value) {
+    for (unsigned int i = 0; i < 100000; ++i) {
+        if (kbd_inb(KBD_STATUS_PORT) & 0x01u) {
+            *value = kbd_inb(KBD_DATA_PORT);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int kbd_write_command(unsigned char value) {
+    if (kbd_wait_input_empty() != 0) return -1;
+    kbd_outb(KBD_STATUS_PORT, value);
+    return 0;
+}
+
+static int kbd_write_data(unsigned char value) {
+    if (kbd_wait_input_empty() != 0) return -1;
+    kbd_outb(KBD_DATA_PORT, value);
+    return 0;
+}
+
+static int kbd_send_with_ack(unsigned char value) {
+    for (unsigned int attempt = 0; attempt < 3; ++attempt) {
+        unsigned char response;
+        if (kbd_write_data(value) != 0 || kbd_wait_output_full(&response) != 0)
+            return -1;
+        if (response == 0xFA) return 0; // ACK
+        if (response != 0xFE) return -1; // RESEND is the only retry response
+    }
+    return -1;
+}
+
+// Ask the keyboard for Set-2 and enable the i8042's Set-2-to-Set-1
+// translation. The OS event parser consumes Set-1 make/break codes. Every
+// controller wait is bounded because some VMs and machines lack an i8042.
+static void kbd_configure_set1_stream(void) {
+    unsigned int saved_flags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(saved_flags) :: "memory");
+
+    unsigned char command_byte = 0;
+    unsigned char response;
+    int have_command_byte = 0;
+
+    if (kbd_write_command(0x20) == 0 && kbd_wait_output_full(&command_byte) == 0) {
+        have_command_byte = 1;
+        // Turn off IRQ1 during direct ACK polling; enable translation and
+        // keep the first PS/2 port enabled.
+        command_byte = (unsigned char)((command_byte | 0x40u) & ~0x11u);
+        if (kbd_write_command(0x60) == 0 && kbd_write_data(command_byte) == 0) {
+            if (kbd_send_with_ack(0xF0) == 0)
+                (void)kbd_send_with_ack(0x02); // Keyboard scan-code set 2
+            (void)kbd_send_with_ack(0xF4);     // Enable scanning
+        }
+    }
+
+    if (have_command_byte) {
+        // Re-read to preserve unrelated controller flags, then enable IRQ1
+        // and translation while leaving the keyboard port active.
+        if (kbd_write_command(0x20) == 0 && kbd_wait_output_full(&response) == 0) {
+            response = (unsigned char)((response | 0x41u) & ~0x10u);
+            if (kbd_write_command(0x60) == 0) (void)kbd_write_data(response);
+        }
+    }
+
+    if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
+}
+
 // Internal modifier states
 static int g_shift_state = 0;
 static int g_ctrl_state = 0;
 static int g_caps_lock = 0;
 static int g_extended = 0;
-
-// Navigation & Special Key Codes (0x80 - 0x89)
-#define KEY_UP       ((char)0x80)
-#define KEY_DOWN     ((char)0x81)
-#define KEY_LEFT     ((char)0x82)
-#define KEY_RIGHT    ((char)0x83)
-#define KEY_HOME     ((char)0x84)
-#define KEY_END      ((char)0x85)
-#define KEY_PAGEUP   ((char)0x86)
-#define KEY_PAGEDOWN ((char)0x87)
-#define KEY_INSERT   ((char)0x88)
-#define KEY_DELETE   ((char)0x89)
+static unsigned char g_pressed_keys[256];
 
 // Standard US QWERTY Scancode Set 1 Lookup Tables
 static const char scancode_normal[128] = {
@@ -71,17 +136,20 @@ static char keyboard_get_scancode(void) {
     return (char)scancode;
 }
 
-// Convert Set 1 scancode to ASCII character, tracking Shift and Caps Lock
-static char keyboard_scancode_to_ascii(unsigned char scancode) {
+// Convert Set 1 scancodes into stable keydown/keyup events. The encoded
+// keyup range preserves real key holds for applications such as Doom.
+static int keyboard_scancode_to_event(unsigned char scancode) {
     // Extended scancode escape prefix (e.g., arrow keys)
     if (scancode == 0xE0) {
         g_extended = 1;
         return 0;
     }
     if (scancode == 0xE1) {
+        g_extended = 0;
         return 0;
     }
 
+    unsigned int key_index = (g_extended ? 128u : 0u) + (scancode & 0x7Fu);
     // Key releases (break codes)
     if (scancode & 0x80) {
         unsigned char released = scancode & 0x7F;
@@ -91,21 +159,27 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
         if (released == 0x1D) { // Left or Right Ctrl release
             g_ctrl_state = 0;
         }
+        unsigned int alternate_index = key_index ^ 128u;
+        unsigned char key = g_pressed_keys[key_index];
+        if (!key) key = g_pressed_keys[alternate_index];
+        g_pressed_keys[key_index] = 0;
+        g_pressed_keys[alternate_index] = 0;
         g_extended = 0;
-        return 0;
+        return key ? 0x100 + key : 0;
     }
 
     // Key presses (make codes)
     g_extended = 0;
-
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift press
         g_shift_state = 1;
-        return 0;
+        g_pressed_keys[key_index] = KEY_SHIFT_EVENT;
+        return KEY_SHIFT_EVENT;
     }
 
     if (scancode == 0x1D) { // Left or Right Ctrl press
         g_ctrl_state = 1;
-        return 0;
+        g_pressed_keys[key_index] = 0xA3; // Doom's default KEY_FIRE
+        return 0xA3;
     }
 
     if (scancode == 0x3A) { // Caps Lock toggle
@@ -114,18 +188,27 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
     }
 
     // Navigation and editing keys (both dedicated extended cluster and keypad)
+    int key;
     switch (scancode) {
-        case 0x48: return KEY_UP;
-        case 0x50: return KEY_DOWN;
-        case 0x4B: return KEY_LEFT;
-        case 0x4D: return KEY_RIGHT;
-        case 0x47: return KEY_HOME;
-        case 0x4F: return KEY_END;
-        case 0x49: return KEY_PAGEUP;
-        case 0x51: return KEY_PAGEDOWN;
-        case 0x52: return KEY_INSERT;
-        case 0x53: return KEY_DELETE;
+        case 0x48: key = KEY_UP; break;
+        case 0x50: key = KEY_DOWN; break;
+        case 0x4B: key = KEY_LEFT; break;
+        case 0x4D: key = KEY_RIGHT; break;
+        case 0x47: key = KEY_HOME; break;
+        case 0x4F: key = KEY_END; break;
+        case 0x49: key = KEY_PAGEUP; break;
+        case 0x51: key = KEY_PAGEDOWN; break;
+        case 0x52: key = KEY_INSERT; break;
+        case 0x53: key = KEY_DELETE; break;
         default: break;
+    }
+
+    if (scancode == 0x48 || scancode == 0x50 || scancode == 0x4B ||
+        scancode == 0x4D || scancode == 0x47 || scancode == 0x4F ||
+        scancode == 0x49 || scancode == 0x51 || scancode == 0x52 ||
+        scancode == 0x53) {
+        g_pressed_keys[key_index] = (unsigned char)key;
+        return key;
     }
 
     if (scancode >= 128) {
@@ -134,8 +217,13 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
 
     if (g_ctrl_state) {
         if (scancode == 0x2E) { // 'c' / 'C'
-            return 0x03;        // ETX (Ctrl+C)
+            key = 0x03;          // ETX (Ctrl+C)
+        } else {
+            char normal = scancode_normal[scancode];
+            key = (normal >= 'a' && normal <= 'z') ? normal - 'a' + 1 : 0;
         }
+        if (key) g_pressed_keys[key_index] = (unsigned char)key;
+        return key;
     }
 
     char normal_c = scancode_normal[scancode];
@@ -144,11 +232,24 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
     // For alphabetical characters, handle Shift XOR Caps Lock
     if (normal_c >= 'a' && normal_c <= 'z') {
         int uppercase = g_shift_state ^ g_caps_lock;
-        return uppercase ? shifted_c : normal_c;
+        key = uppercase ? shifted_c : normal_c;
+    } else {
+        // For symbols and numbers, Shift determines shifted character
+        key = g_shift_state ? shifted_c : normal_c;
     }
+    if (key) g_pressed_keys[key_index] = (unsigned char)key;
+    return key;
+}
 
-    // For symbols and numbers, Shift determines shifted character
-    return g_shift_state ? shifted_c : normal_c;
+// Character APIs intentionally suppress keyup events.
+static char keyboard_scancode_to_ascii(unsigned char scancode) {
+    int event = keyboard_scancode_to_event(scancode);
+    // Preserve control keys expected by the shell and POSIX line input.
+    if (event == '\b' || event == '\t' || event == '\n' || event == '\r' ||
+        event == 0x03 || event == 0x1B ||
+        (event >= 0x80 && event <= 0x89)) return (char)event;
+    if (event >= 0x20 && event < 0x7F) return (char)event;
+    return 0;
 }
 
 // Blocking get character (convenience function for Shell and applications)
@@ -179,11 +280,14 @@ static int keyboard_init(void) {
         kbd_inb(KBD_DATA_PORT);
     }
 
+    kbd_configure_set1_stream();
+
     // 2. Reset internal states
     g_shift_state = 0;
     g_ctrl_state = 0;
     g_caps_lock = 0;
     g_extended = 0;
+    memset(g_pressed_keys, 0, sizeof(g_pressed_keys));
 
     return 0; // Success
 }

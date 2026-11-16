@@ -87,6 +87,18 @@ void clear_screen(void) {
     update_hardware_cursor();
 }
 
+// Restore the VGA text mode and its saved DAC/font state before clearing.
+// The shell uses this after graphics applications that may have changed the
+// VGA palette while leaving the driver in an inconsistent mode state.
+void console_clear(void) {
+    cyk_display_driver_t* display = modload_get_display_driver();
+    if (display && display->set_mode) {
+        display->set_mode(0);
+        return; // set_mode(0) also clears the text screen
+    }
+    clear_screen();
+}
+
 static void scroll_screen(void) {
     unsigned short* vga = (unsigned short*)VGA_ADDRESS;
     unsigned short blank = (CONSOLE_COLOR << 8) | ' ';

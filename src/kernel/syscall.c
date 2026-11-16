@@ -38,6 +38,70 @@ static unsigned int g_pipe_output_capacity;
 static unsigned int g_pipe_output_len;
 static int g_pipe_active;
 
+#define DEFERRED_CONSOLE_CAPACITY 4096
+typedef struct {
+    char value;
+    unsigned char is_error;
+} deferred_console_char_t;
+static deferred_console_char_t g_deferred_console[DEFERRED_CONSOLE_CAPACITY];
+static unsigned int g_deferred_console_length;
+static int g_keyboard_event_extended;
+
+// Kernel-owned physical-key event adapter for applications that need held-key
+// state. Keep this separate from the keyboard module's shell character API so
+// translated characters and module ABI details cannot consume or alter events.
+static int syscall_try_key_event(void) {
+    int scancode;
+    while ((scancode = keyboard_irq_read_scancode()) >= 0) {
+        unsigned char raw = (unsigned char)scancode;
+        if (raw == 0xE0) {
+            g_keyboard_event_extended = 1;
+            continue;
+        }
+        if (raw == 0xE1) {
+            g_keyboard_event_extended = 0;
+            continue;
+        }
+
+        unsigned int key_id = (g_keyboard_event_extended ? 128u : 0u) +
+                              (raw & 0x7Fu) + 1u;
+        g_keyboard_event_extended = 0;
+        if (raw & 0x80u) return (int)(0x100u + key_id);
+        return (int)key_id;
+    }
+    return -1;
+}
+
+static int syscall_graphics_mode_active(void) {
+    cyk_display_driver_t* dpy = modload_get_display_driver();
+    return dpy && dpy->get_mode && dpy->get_mode() != 0;
+}
+
+static void syscall_defer_console_write(const char* data, unsigned int length,
+                                        int is_error) {
+    for (unsigned int i = 0; i < length &&
+         g_deferred_console_length < DEFERRED_CONSOLE_CAPACITY; i++) {
+        deferred_console_char_t* item = &g_deferred_console[g_deferred_console_length++];
+        item->value = data[i];
+        item->is_error = is_error ? 1 : 0;
+    }
+}
+
+void syscall_flush_deferred_console(void) {
+    if (syscall_graphics_mode_active()) return;
+    unsigned int length = g_deferred_console_length;
+    g_deferred_console_length = 0;
+    for (unsigned int i = 0; i < length; i++) {
+        deferred_console_char_t* item = &g_deferred_console[i];
+        if (item->is_error) {
+            char text[2] = { item->value, '\0' };
+            print_color_string(text, VGA_RED);
+        } else {
+            print_char(item->value);
+        }
+    }
+}
+
 static int syscall_absolute_path(const char* path, char output[128]) {
     if (!path || !path[0]) return -1;
     unsigned int length = strlen(path);
@@ -140,6 +204,9 @@ static void syscall_handler(registers_t* regs) {
             if (fd == FD_STDOUT) {
                 if (g_pipe_active && g_pipe_output) {
                     regs->eax = syscall_pipe_write(buf, (unsigned int)count);
+                } else if (syscall_graphics_mode_active()) {
+                    syscall_defer_console_write(buf, (unsigned int)count, 0);
+                    regs->eax = (unsigned int)count;
                 } else {
                     for (size_t i = 0; i < count; i++) {
                         print_char(buf[i]);
@@ -147,9 +214,13 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = (unsigned int)count;
                 }
             } else if (fd == FD_STDERR) {
-                for (size_t i = 0; i < count; i++) {
-                    char temp[2] = { buf[i], '\0' };
-                    print_color_string(temp, VGA_RED);
+                if (syscall_graphics_mode_active()) {
+                    syscall_defer_console_write(buf, (unsigned int)count, 1);
+                } else {
+                    for (size_t i = 0; i < count; i++) {
+                        char temp[2] = { buf[i], '\0' };
+                        print_color_string(temp, VGA_RED);
+                    }
                 }
                 regs->eax = (unsigned int)count;
             } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
@@ -328,7 +399,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_BRK: {
             unsigned int current = (unsigned int)sbrk(0);
             unsigned int requested = arg1;
-            if (requested >= HEAP_START_ADDR && requested <= HEAP_MAX_ADDR) {
+            if (requested >= HEAP_START_ADDR && requested <= heap_get_max_addr()) {
                 int difference = (int)(requested - current);
                 if (sbrk(difference) != (void*)-1) current = (unsigned int)sbrk(0);
             }
@@ -383,6 +454,11 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = (kbd && kbd->try_get_char)
                 ? (unsigned int)kbd->try_get_char()
                 : (unsigned int)-1;
+            break;
+        }
+
+        case SYS_TRY_KEY_EVENT: {
+            regs->eax = (unsigned int)syscall_try_key_event();
             break;
         }
 
@@ -710,6 +786,8 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)dpy->get_mode();
             } else {
                 regs->eax = (unsigned int)dpy->set_mode((int)arg1);
+                if ((int)arg1 == 0 && (int)regs->eax == 0)
+                    syscall_flush_deferred_console();
             }
             break;
         }

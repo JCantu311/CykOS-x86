@@ -17,6 +17,7 @@ const KEY_DELETE: u8   = 0x89;
 // Level 1 Kernel & Driver C Function Declarations
 extern "C" {
     fn clear_screen();
+    fn console_clear();
     #[link_name = "print_char"]
     fn kernel_print_char(c: u8);
     fn print_string(s: *const u8);
@@ -189,7 +190,7 @@ pub struct Command {
 // Built-in Command: clear (Linux compatible screen clear)
 fn cmd_clear(_args: &[u8]) {
     unsafe {
-        clear_screen();
+        console_clear();
     }
 }
 

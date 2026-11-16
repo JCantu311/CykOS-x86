@@ -8,7 +8,7 @@ static idt_entry_t g_idt[IDT_ENTRIES];
 static idt_ptr_t   g_idtp;
 static isr_handler_t g_interrupt_handlers[IDT_ENTRIES];
 
-#define KEYBOARD_QUEUE_SIZE 64
+#define KEYBOARD_QUEUE_SIZE 256
 #define KEYBOARD_QUEUE_MASK (KEYBOARD_QUEUE_SIZE - 1)
 static volatile unsigned char g_keyboard_queue[KEYBOARD_QUEUE_SIZE];
 static volatile unsigned char g_keyboard_head;

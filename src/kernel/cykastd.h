@@ -43,16 +43,16 @@ void secwait(unsigned int seconds);
 void msecwait(unsigned int milliseconds);
 
 // Navigation & Special Key Codes (0x80 - 0x89)
-#define KEY_UP       ((char)0x80)
-#define KEY_DOWN     ((char)0x81)
-#define KEY_LEFT     ((char)0x82)
-#define KEY_RIGHT    ((char)0x83)
-#define KEY_HOME     ((char)0x84)
-#define KEY_END      ((char)0x85)
-#define KEY_PAGEUP   ((char)0x86)
-#define KEY_PAGEDOWN ((char)0x87)
-#define KEY_INSERT   ((char)0x88)
-#define KEY_DELETE   ((char)0x89)
+#define KEY_UP       ((unsigned char)0x80)
+#define KEY_DOWN     ((unsigned char)0x81)
+#define KEY_LEFT     ((unsigned char)0x82)
+#define KEY_RIGHT    ((unsigned char)0x83)
+#define KEY_HOME     ((unsigned char)0x84)
+#define KEY_END      ((unsigned char)0x85)
+#define KEY_PAGEUP   ((unsigned char)0x86)
+#define KEY_PAGEDOWN ((unsigned char)0x87)
+#define KEY_INSERT   ((unsigned char)0x88)
+#define KEY_DELETE   ((unsigned char)0x89)
 
 // NEW: Keyboard Engine
 char get_scancode(void);

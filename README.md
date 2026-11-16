@@ -97,7 +97,7 @@ Used by `apps/soundtest.rs` and `apps/games/cykis.rs`. Suitable for porting Doom
 
 ### Testing
 
-Boot CykOS and run `soundtest` (mapped to `/USR/BIN/SOUNDTEST.BIN` in `USERCMDS.LST`) to inspect the active driver's capabilities without starting playback. Use `soundtest chime` or `soundtest tones` to opt in to synchronous playback tests.
+Test and demonstration binaries are installed under `/USR/BIN/TESTS` and are not added to the normal command aliases. For example, run `/USR/BIN/TESTS/SOUNDTEST.BIN` to inspect audio capabilities, or `/USR/BIN/TESTS/GFXDEMO.BIN` to inspect VGA graphics.
 
 ### Hardware Limitations
 
@@ -114,3 +114,7 @@ The generic display driver uses standard VGA modes only: text mode (0), 640x480 
 `gfx_get_info` reports the active dimensions, byte pitch, pixel format, and framebuffer pointer. `gfx_framebuffer` returns a pointer for mode 2; mode 1 is planar and has no linear framebuffer. `gfx_set_palette` can replace 16 VGA palette entries in mode 1 or all 256 DAC entries in mode 2 using RGB8 triples.
 
 Bitmap drawing accepts pitched `INDEX8`, `RGB332`, `RGB24`, and `RGBA32` data. `INDEX8` uses `0xFF` as transparent; `RGBA32` uses a zero alpha as transparent and blends partial alpha with the destination. Rows are top-to-bottom, pixels left-to-right, and stride is measured in bytes. The graphics syscalls for mode control, display information, bitmap drawing, and palette updates are 187 and 196–199.
+
+## DoomGeneric
+
+The `doom` command builds the stock DoomGeneric sources with its upstream Makefile, using a separate CykOS platform shim, the CykOS libc, and a static i386 link. The fixed application arena and private application stack have dedicated non-overlapping memory ranges; the kernel heap can grow from 0x250000 up to 16 MiB, limited by contiguous usable RAM reported by BIOS E820 (with an 8 MiB fallback). Doom uses VGA mode 13h (320x200 indexed color), the CykOS graphics, keyboard, and millisecond-sleep syscalls. The shareware `DOOM1.WAD` is bundled under `/USR/SHARE/GAMES/DOOM`; the CykOS platform shim supplies that path by default. Run `doom -iwad /path/to/game.wad` to select another compatible IWAD. The build is driven by `apps/doom/build.sh` and is also part of `make.sh`.

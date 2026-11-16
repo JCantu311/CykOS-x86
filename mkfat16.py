@@ -310,6 +310,11 @@ if __name__ == "__main__":
     else:
         sample_files["ETC/USERCMDS.LST"] = "# CykOS External User Commands\nedit /USR/BIN/EDIT.BIN\nvi /USR/BIN/EDIT.BIN\n"
 
+    # Keep diagnostics and demonstration programs separate from normal apps.
+    test_binaries = {
+        "HELLO.BIN", "SYSDEMO.BIN", "POSIXTEST.BIN", "SOUNDTEST.BIN", "GFXDEMO.BIN"
+    }
+
     # Automatically scan bin/ and apps/bin/ for all user binaries
     search_dirs = ["bin", os.path.join("bin", "DRIVERS"), os.path.join("apps", "bin")]
     for sdir in search_dirs:
@@ -322,24 +327,31 @@ if __name__ == "__main__":
                     if target_name in ["OS_IMAGE.BIN", "CYKOS_BIN.BIN", "KERNEL.BIN", "KERNEL.MAP", "KERNEL_SYMS.LD", "KERNEL.ELF", "STAGE2.BIN", "MBR.BIN"]:
                         continue
                     ext = os.path.splitext(fname)[1].upper()
-                    if ext in [".BIN", ".COM", ".DRV"]:
+                    if ext in [".BIN", ".COM", ".DRV", ".WAD"]:
                         with open(fpath, "rb") as bf:
                             content = bf.read()
                             if len(content) == 0:
                                 print(f"[mkfat16] Warning: Skipping 0-byte file: {fname}")
                                 continue
-                            if len(content) > 196608:
-                                print(f"[mkfat16] Warning: Skipping oversized application or disk image: {fname} ({len(content)} bytes)")
+                            if ext in [".BIN", ".COM"] and len(content) > 524288:
+                                print(f"[mkfat16] Warning: Skipping application larger than 512 KiB: {fname} ({len(content)} bytes)")
                                 continue
-                            if ext == ".DRV":
+                            if ext == ".WAD":
+                                destination = f"USR/SHARE/GAMES/DOOM/{target_name}"
+                            elif ext == ".DRV":
                                 destination = f"BOOT/DRIVERS/{target_name}"
                             elif target_name == "SHELL.BIN":
                                 destination = f"BIN/{target_name}"
+                            elif target_name in test_binaries:
+                                destination = f"USR/BIN/TESTS/{target_name}"
                             else:
                                 destination = f"USR/BIN/{target_name}"
                             sample_files[destination] = content
-                            print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
+                            if ext == ".WAD":
+                                print(f"[mkfat16] Bundled Doom game data: {target_name} ({len(content)} bytes)")
+                            else:
+                                print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
 
-    directories = ["BIN", "BOOT/DRIVERS", "ETC", "HOME/USER", "MNT", "TMP", "USR/BIN", "USR/SHARE/DOC", "VAR/LOG"]
+    directories = ["BIN", "BOOT/DRIVERS", "ETC", "HOME/USER", "MNT", "TMP", "USR/BIN", "USR/BIN/TESTS", "USR/SHARE/DOC", "USR/SHARE/GAMES/DOOM", "VAR/LOG"]
     format_disk(target_img, sample_files, directories)
 

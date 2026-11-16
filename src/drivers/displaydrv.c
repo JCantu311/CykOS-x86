@@ -2,6 +2,7 @@
 #include "cykastd.h"
 
 #define VGA_AC_INDEX        0x3C0
+#define VGA_AC_READ         0x3C1
 #define VGA_MISC_WRITE      0x3C2
 #define VGA_SEQ_INDEX       0x3C4
 #define VGA_SEQ_DATA        0x3C5
@@ -22,6 +23,11 @@
 
 static int g_current_mode;
 static int g_cached_set_reset = -1;
+static unsigned char g_text_mode_regs[61];
+static unsigned char g_text_palette[48];
+static unsigned char g_text_font[8192];
+static unsigned char g_text_pel_mask;
+static void set_vga16_palette(void);
 static const unsigned char g_vga_palette[16][3] = {
     {0,0,0}, {0,0,170}, {0,170,0}, {0,170,170},
     {170,0,0}, {170,0,170}, {170,85,0}, {170,170,170},
@@ -55,21 +61,14 @@ static const unsigned char g_mode13_regs[] = {
     0x41, 0x00, 0x0F, 0x00, 0x00
 };
 
-static const unsigned char g_mode3_regs[] = {
-    0x67,
-    0x03, 0x00, 0x03, 0x00, 0x02,
-    0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F,
-    0x00, 0x4F, 0x0E, 0x0F, 0x00, 0x00, 0x00, 0x00,
-    0x9C, 0x0E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3, 0xFF,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF,
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
-    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
-    0x0C, 0x00, 0x0F, 0x08, 0x00
-};
-
 static void write_vga_registers(const unsigned char* regs) {
-    outb(VGA_MISC_WRITE, *regs++);
-    for (unsigned char i = 0; i < 5; i++) {
+    unsigned char misc = *regs++;
+    unsigned char sequencer_run = *regs++;
+    outb(VGA_MISC_WRITE, misc);
+    // Hold the sequencer in reset while programming dependent VGA registers.
+    outb(VGA_SEQ_INDEX, 0);
+    outb(VGA_SEQ_DATA, 0x01);
+    for (unsigned char i = 1; i < 5; i++) {
         outb(VGA_SEQ_INDEX, i);
         outb(VGA_SEQ_DATA, *regs++);
     }
@@ -92,7 +91,74 @@ static void write_vga_registers(const unsigned char* regs) {
     }
     inb(VGA_INSTAT_READ);
     outb(VGA_AC_INDEX, 0x20);
+    outb(VGA_SEQ_INDEX, 0);
+    outb(VGA_SEQ_DATA, sequencer_run);
     g_cached_set_reset = -1;
+}
+
+static void capture_text_mode(void) {
+    unsigned int offset = 0;
+    g_text_mode_regs[offset++] = inb(0x3CC);
+    for (unsigned char i = 0; i < 5; i++) {
+        outb(VGA_SEQ_INDEX, i);
+        g_text_mode_regs[offset++] = inb(VGA_SEQ_DATA);
+    }
+    for (unsigned char i = 0; i < 25; i++) {
+        outb(VGA_CRTC_INDEX, i);
+        g_text_mode_regs[offset++] = inb(VGA_CRTC_DATA);
+    }
+    for (unsigned char i = 0; i < 9; i++) {
+        outb(VGA_GC_INDEX, i);
+        g_text_mode_regs[offset++] = inb(VGA_GC_DATA);
+    }
+    for (unsigned char i = 0; i < 21; i++) {
+        inb(VGA_INSTAT_READ);
+        outb(VGA_AC_INDEX, i);
+        g_text_mode_regs[offset++] = inb(VGA_AC_READ);
+    }
+    inb(VGA_INSTAT_READ);
+    outb(VGA_AC_INDEX, 0x20);
+
+    g_text_pel_mask = inb(0x3C6);
+    outb(0x3C7, 0);
+    for (unsigned int i = 0; i < sizeof(g_text_palette); i++)
+        g_text_palette[i] = inb(0x3C9);
+}
+
+static void restore_text_palette(void) {
+    outb(0x3C6, g_text_pel_mask);
+    outb(0x3C8, 0);
+    for (unsigned int i = 0; i < sizeof(g_text_palette); i++)
+        outb(0x3C9, g_text_palette[i]);
+}
+
+static void select_text_font_plane(void) {
+    outb(VGA_SEQ_INDEX, 0);
+    outb(VGA_SEQ_DATA, 0x01);
+    outb(VGA_SEQ_INDEX, 2);
+    outb(VGA_SEQ_DATA, 0x04); // Plane 2
+    outb(VGA_SEQ_INDEX, 4);
+    outb(VGA_SEQ_DATA, 0x07); // Planar access, disable odd/even and chain-4
+    outb(VGA_SEQ_INDEX, 0);
+    outb(VGA_SEQ_DATA, 0x03);
+    outb(VGA_GC_INDEX, 4);
+    outb(VGA_GC_DATA, 0x02);  // Read plane 2
+    outb(VGA_GC_INDEX, 5);
+    outb(VGA_GC_DATA, 0x00);  // Write mode 0
+    outb(VGA_GC_INDEX, 6);
+    outb(VGA_GC_DATA, 0x05);  // A0000 64 KB aperture
+}
+
+static void capture_text_font(void) {
+    select_text_font_plane();
+    memcpy(g_text_font, (const void*)VGA_GFX_ADDR, sizeof(g_text_font));
+    write_vga_registers(g_text_mode_regs);
+}
+
+static void restore_text_font(void) {
+    select_text_font_plane();
+    memcpy((void*)VGA_GFX_ADDR, g_text_font, sizeof(g_text_font));
+    write_vga_registers(g_text_mode_regs);
 }
 
 static void planar_set_reset(unsigned char color) {
@@ -184,6 +250,7 @@ static unsigned char rgb_to_332(unsigned char r, unsigned char g, unsigned char 
 }
 
 static void set_vga16_palette(void) {
+    outb(0x3C6, 0xFF); // Unmask all DAC color bits.
     outb(0x3C8, 0);
     for (unsigned int index = 0; index < 16; index++) {
         outb(0x3C9, (unsigned char)(((unsigned int)g_vga_palette[index][0] * 63u + 127u) / 255u));
@@ -352,11 +419,16 @@ static int gfx_set_mode(int mode) {
         return 0;
     }
     if (mode == 0) {
-        // Restore VGA text mode using the standard register set directly.
-        // This path is also used by the Ctrl+C abort trampoline, so it must
-        // not enter firmware code while unwinding an application.
-        write_vga_registers(g_mode3_regs);
+        // Restore the exact VGA text state captured at driver initialization.
+        // This path is also used while aborting an application, so it never
+        // enters firmware code during unwind.
+        write_vga_registers(g_text_mode_regs);
+        restore_text_palette();
+        // Applications may replace the complete DAC palette. Reassert the
+        // canonical 16 VGA text colors so console attributes remain readable
+        // even if firmware's captured palette was already altered.
         set_vga16_palette();
+        restore_text_font();
         g_current_mode = 0;
         clear_screen();
         enable_hardware_cursor();
@@ -423,6 +495,8 @@ static int gfx_get_info(cyk_display_info_t* info) {
 }
 
 static int gfx_init(void) {
+    capture_text_mode();
+    capture_text_font();
     g_current_mode = 0;
     g_cached_set_reset = -1;
     return 0;

@@ -47,6 +47,7 @@
 #define SYS_GFX_BITMAP    197 // arg1 = packed signed x/y, arg2 = cyk_bitmap_t*
 #define SYS_TRY_GET_KEY   198 // non-blocking translated keyboard input; -1 if none
 #define SYS_GFX_PALETTE   199 // arg1 = packed first/count, arg2 = RGB8 triples
+#define SYS_TRY_KEY_EVENT 200 // Non-blocking keydown/keyup event for interactive apps
 #define SYS_CHMOD         15
 #define SYS_CHOWN         182
 #define SYS_ACCESS        33
@@ -67,5 +68,6 @@ unsigned int syscall_pipe_write(const char* data, unsigned int length);
 int syscall_pipe_read(char* data, unsigned int length);
 int syscall_pipe_active(void);
 int syscall_pipe_output_active(void);
+void syscall_flush_deferred_console(void);
 
 #endif // SYSCALL_H

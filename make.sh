@@ -325,6 +325,12 @@ if [ -d apps ]; then
     done
 fi
 
+# Build DoomGeneric against the CykOS VGA 320x200 indexed-color interface.
+if [ -f apps/doom/build.sh ]; then
+    echo "Compiling DoomGeneric for CykOS..."
+    bash apps/doom/build.sh "$CC" "$LD"
+fi
+
 # 9c. Build MODULES.CFG from DRIVERS.LST manifest
 echo "Building MODULES.CFG from DRIVERS.LST manifest..."
 if [ -f "DRIVERS.LST" ]; then

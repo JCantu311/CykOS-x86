@@ -24,16 +24,18 @@ static void emit_char(out_target_t* target, char c) {
     }
 }
 
-static void emit_string(out_target_t* target, const char* s, int width, int pad_zero, int left_align) {
+static void emit_string(out_target_t* target, const char* s, int width, int precision,
+                        int pad_zero, int left_align) {
     if (!s) s = "(null)";
     int len = (int)strlen(s);
+    if (precision >= 0 && len > precision) len = precision;
     int padding = (width > len) ? (width - len) : 0;
 
     if (!left_align && padding > 0) {
         char pad = pad_zero ? '0' : ' ';
         while (padding--) emit_char(target, pad);
     }
-    while (*s) {
+    while (*s && len-- > 0) {
         emit_char(target, *s++);
     }
     if (left_align && padding > 0) {
@@ -41,19 +43,21 @@ static void emit_string(out_target_t* target, const char* s, int width, int pad_
     }
 }
 
-static void emit_number(out_target_t* target, uint32_t val, int is_signed, int base, int uppercase, int width, int pad_zero, int left_align) {
+static void emit_number(out_target_t* target, uint32_t val, int is_signed, int base,
+                        int uppercase, int width, int precision, int pad_zero,
+                        int left_align) {
     char buf[32];
     int idx = 0;
     int negative = 0;
 
     if (is_signed && (int32_t)val < 0) {
         negative = 1;
-        val = (uint32_t)(-(int32_t)val);
+        val = 0u - val;
     }
 
     const char* digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
 
-    if (val == 0) {
+    if (val == 0 && precision != 0) {
         buf[idx++] = '0';
     } else {
         while (val > 0) {
@@ -62,18 +66,21 @@ static void emit_number(out_target_t* target, uint32_t val, int is_signed, int b
         }
     }
 
-    int len = idx + (negative ? 1 : 0);
+    int precision_zeroes = precision > idx ? precision - idx : 0;
+    int len = idx + precision_zeroes + (negative ? 1 : 0);
     int padding = (width > len) ? (width - len) : 0;
 
-    if (!left_align && !pad_zero && padding > 0) {
+    if (!left_align && (!pad_zero || precision >= 0) && padding > 0) {
         while (padding--) emit_char(target, ' ');
     }
     if (negative) {
         emit_char(target, '-');
     }
-    if (!left_align && pad_zero && padding > 0) {
+    if (!left_align && pad_zero && precision < 0 && padding > 0) {
         while (padding--) emit_char(target, '0');
     }
+
+    while (precision_zeroes-- > 0) emit_char(target, '0');
 
     while (idx > 0) {
         emit_char(target, buf[--idx]);
@@ -98,6 +105,7 @@ int vsnprintf(char* str, size_t size, const char* format, va_list ap) {
         // Flags
         int left_align = 0;
         int pad_zero = 0;
+        int precision = -1;
         while (*p == '-' || *p == '0') {
             if (*p == '-') left_align = 1;
             if (*p == '0') pad_zero = 1;
@@ -112,8 +120,17 @@ int vsnprintf(char* str, size_t size, const char* format, va_list ap) {
             p++;
         }
 
-        // Length modifiers (ignored for 32-bit: l, h)
-        while (*p == 'l' || *p == 'h') p++;
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            while (*p >= '0' && *p <= '9') {
+                precision = precision * 10 + (*p - '0');
+                p++;
+            }
+        }
+
+        // These all use the 32-bit int/size_t argument width in this ABI.
+        while (*p == 'l' || *p == 'h' || *p == 'z' || *p == 't' || *p == 'j') p++;
 
         switch (*p) {
             case 'c': {
@@ -123,34 +140,35 @@ int vsnprintf(char* str, size_t size, const char* format, va_list ap) {
             }
             case 's': {
                 const char* s = va_arg(ap, const char*);
-                emit_string(&target, s, width, pad_zero, left_align);
+                emit_string(&target, s, width, precision, pad_zero, left_align);
                 break;
             }
             case 'd':
             case 'i': {
                 int val = va_arg(ap, int);
-                emit_number(&target, (uint32_t)val, 1, 10, 0, width, pad_zero, left_align);
+                emit_number(&target, (uint32_t)val, 1, 10, 0, width, precision,
+                            pad_zero, left_align);
                 break;
             }
             case 'u': {
                 unsigned int val = va_arg(ap, unsigned int);
-                emit_number(&target, val, 0, 10, 0, width, pad_zero, left_align);
+                emit_number(&target, val, 0, 10, 0, width, precision, pad_zero, left_align);
                 break;
             }
             case 'x': {
                 unsigned int val = va_arg(ap, unsigned int);
-                emit_number(&target, val, 0, 16, 0, width, pad_zero, left_align);
+                emit_number(&target, val, 0, 16, 0, width, precision, pad_zero, left_align);
                 break;
             }
             case 'X': {
                 unsigned int val = va_arg(ap, unsigned int);
-                emit_number(&target, val, 0, 16, 1, width, pad_zero, left_align);
+                emit_number(&target, val, 0, 16, 1, width, precision, pad_zero, left_align);
                 break;
             }
             case 'p': {
                 uint32_t val = (uint32_t)va_arg(ap, void*);
-                emit_string(&target, "0x", 0, 0, 0);
-                emit_number(&target, val, 0, 16, 0, width, 1, left_align);
+                emit_string(&target, "0x", 0, -1, 0, 0);
+                emit_number(&target, val, 0, 16, 0, width, precision, 1, left_align);
                 break;
             }
             case '%': {

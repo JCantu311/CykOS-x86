@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <string.h>
 
+#define FILE_WRITE_BUFFER_CAPACITY (256u * 1024u)
+
 static FILE _stdin  = { .fd = STDIN_FILENO,  .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 0 };
 static FILE _stdout = { .fd = STDOUT_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1 };
 static FILE _stderr = { .fd = STDERR_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1 };
@@ -11,6 +13,45 @@ static FILE _stderr = { .fd = STDERR_FILENO, .flags = 0, .eof = 0, .error = 0, .
 FILE* stdin  = &_stdin;
 FILE* stdout = &_stdout;
 FILE* stderr = &_stderr;
+
+int fileno(FILE* stream) {
+    return stream ? stream->fd : -1;
+}
+
+int remove(const char* pathname) {
+    return unlink(pathname);
+}
+
+int rename(const char* old_path, const char* new_path) {
+    int source = open(old_path, O_RDONLY);
+    if (source < 0) return -1;
+    int destination = open(new_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (destination < 0) {
+        close(source);
+        return -1;
+    }
+
+    char buffer[512];
+    int result = 0;
+    ssize_t count;
+    while ((count = read(source, buffer, sizeof(buffer))) > 0) {
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(destination, buffer + offset, (size_t)(count - offset));
+            if (written <= 0) {
+                result = -1;
+                break;
+            }
+            offset += written;
+        }
+        if (result != 0) break;
+    }
+    if (count < 0) result = -1;
+    if (close(source) != 0) result = -1;
+    if (close(destination) != 0) result = -1;
+    if (result == 0 && unlink(old_path) != 0) result = -1;
+    return result;
+}
 
 FILE* fopen(const char* pathname, const char* mode) {
     int flags = 0;
@@ -37,6 +78,12 @@ FILE* fopen(const char* pathname, const char* mode) {
     fp->flags = flags;
     fp->eof = 0;
     fp->error = 0;
+    fp->write_buf = 0;
+    fp->write_buf_capacity = 0;
+    if (*mode != 'r') {
+        fp->write_buf = (char*)malloc(FILE_WRITE_BUFFER_CAPACITY);
+        if (fp->write_buf) fp->write_buf_capacity = FILE_WRITE_BUFFER_CAPACITY;
+    }
     fp->buf_pos = 0;
     fp->buf_len = 0;
     fp->mode = (*mode == 'r') ? 0 : 1;
@@ -46,10 +93,17 @@ FILE* fopen(const char* pathname, const char* mode) {
 int fflush(FILE* stream) {
     if (!stream) return 0;
     if (stream->mode == 1 && stream->buf_pos > 0) {
-        ssize_t written = write(stream->fd, stream->buf, stream->buf_pos);
-        if (written < 0) {
-            stream->error = 1;
-            return EOF;
+        const char* data = stream->write_buf ? stream->write_buf : stream->buf;
+        size_t remaining = (size_t)stream->buf_pos;
+        size_t offset = 0;
+        while (remaining > 0) {
+            ssize_t written = write(stream->fd, data + offset, remaining);
+            if (written <= 0) {
+                stream->error = 1;
+                return EOF;
+            }
+            offset += (size_t)written;
+            remaining -= (size_t)written;
         }
         stream->buf_pos = 0;
     }
@@ -60,6 +114,7 @@ int fclose(FILE* stream) {
     if (!stream) return EOF;
     fflush(stream);
     int ret = close(stream->fd);
+    if (stream->write_buf) free(stream->write_buf);
     if (stream != stdin && stream != stdout && stream != stderr) {
         free(stream);
     }
@@ -100,6 +155,23 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
     if (!stream || size == 0 || nmemb == 0) return 0;
     size_t total_bytes = size * nmemb;
     const char* src = (const char*)ptr;
+
+    if (stream->write_buf && stream->write_buf_capacity) {
+        size_t written_total = 0;
+        while (written_total < total_bytes) {
+            size_t room = stream->write_buf_capacity - (size_t)stream->buf_pos;
+            size_t chunk = total_bytes - written_total;
+            if (chunk > room) chunk = room;
+            memcpy(stream->write_buf + stream->buf_pos, src + written_total, chunk);
+            stream->buf_pos += (int)chunk;
+            written_total += chunk;
+            if ((size_t)stream->buf_pos == stream->write_buf_capacity &&
+                fflush(stream) == EOF) {
+                return written_total / size;
+            }
+        }
+        return nmemb;
+    }
 
     for (size_t i = 0; i < total_bytes; i++) {
         stream->buf[stream->buf_pos++] = src[i];
