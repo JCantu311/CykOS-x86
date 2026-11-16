@@ -8,6 +8,47 @@ import sys
 import os
 import struct
 
+def strip_elf_unloaded_tail(content):
+    """Drop trailing ELF section/debug metadata while keeping all PT_LOAD bytes.
+
+    The kernel loads applications from program headers and does not consume ELF
+    section tables. This keeps large debug tables from making a small app exceed
+    the on-disk/application-file limit.
+    """
+    if len(content) < 52 or content[:7] != b"\x7fELF\x01\x01\x01":
+        return content
+
+    try:
+        header = struct.unpack_from("<16sHHIIIIIHHHHHH", content, 0)
+        elf_type, machine = header[1], header[2]
+        phoff, phentsize, phnum = header[5], header[9], header[10]
+        if elf_type not in (2, 3) or machine != 3 or phentsize != 32 or not phnum or phnum > 32:
+            return content
+        if phoff > len(content) or phnum > (len(content) - phoff) // phentsize:
+            return content
+
+        load_end = 0
+        for index in range(phnum):
+            p_type, p_offset, _vaddr, _paddr, p_filesz, _memsz, _flags, _align = \
+                struct.unpack_from("<IIIIIIII", content, phoff + index * phentsize)
+            if p_type == 1:
+                if p_offset > len(content) or p_filesz > len(content) - p_offset:
+                    return content
+                load_end = max(load_end, p_offset + p_filesz)
+
+        if not load_end or load_end >= len(content):
+            return content
+        if phoff + phnum * phentsize > load_end:
+            return content
+
+        stripped = bytearray(content[:load_end])
+        # ELF32 e_shoff, e_shentsize, e_shnum, and e_shstrndx.
+        struct.pack_into("<I", stripped, 32, 0)
+        struct.pack_into("<HHH", stripped, 46, 0, 0, 0)
+        return bytes(stripped)
+    except (struct.error, OverflowError):
+        return content
+
 def format_disk(image_path, files_to_add=None, directories_to_add=None):
     if files_to_add is None:
         files_to_add = {}
@@ -330,6 +371,12 @@ if __name__ == "__main__":
                     if ext in [".BIN", ".COM", ".DRV", ".WAD"]:
                         with open(fpath, "rb") as bf:
                             content = bf.read()
+                            if ext in [".BIN", ".COM"] and len(content) > 524288:
+                                original_size = len(content)
+                                content = strip_elf_unloaded_tail(content)
+                                if len(content) < original_size:
+                                    print(f"[mkfat16] Removed non-loadable ELF tail from {fname}: "
+                                          f"{original_size} -> {len(content)} bytes")
                             if len(content) == 0:
                                 print(f"[mkfat16] Warning: Skipping 0-byte file: {fname}")
                                 continue
