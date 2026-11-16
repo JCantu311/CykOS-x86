@@ -26,6 +26,7 @@ typedef struct {
     vfs_file_t entry;
     unsigned int cursor;
     unsigned int flags;
+    unsigned int owner;
     char path[128];
 } fd_table_t;
 
@@ -98,6 +99,19 @@ void syscall_flush_deferred_console(void) {
             print_color_string(text, VGA_RED);
         } else {
             print_char(item->value);
+        }
+    }
+}
+
+void syscall_close_process_fds(unsigned int owner) {
+    if (owner == 0) return;
+    for (int fd = 3; fd < MAX_FDS; fd++) {
+        if (g_fds[fd].in_use && g_fds[fd].owner == owner) {
+            g_fds[fd].in_use = 0;
+            g_fds[fd].cursor = 0;
+            g_fds[fd].flags = 0;
+            g_fds[fd].owner = 0;
+            g_fds[fd].path[0] = '\0';
         }
     }
 }
@@ -187,6 +201,12 @@ static void syscall_handler(registers_t* regs) {
             if (usercmd_is_running()) {
                 usercmd_terminate((int)arg1);
             }
+            break;
+        }
+
+        case SYS_WAIT: {
+            int* status = (int*)arg1;
+            regs->eax = (unsigned int)usercmd_wait(status);
             break;
         }
 
@@ -371,6 +391,7 @@ static void syscall_handler(registers_t* regs) {
             if (found) {
                 g_fds[found_fd].in_use = 1;
                 g_fds[found_fd].flags = flags;
+                g_fds[found_fd].owner = usercmd_current_pid();
                 g_fds[found_fd].cursor = (flags & OPEN_APPEND) ? g_fds[found_fd].entry.size : 0;
                 unsigned int path_length = strlen(absolute_path);
                 memcpy(g_fds[found_fd].path, absolute_path, path_length);
@@ -387,6 +408,8 @@ static void syscall_handler(registers_t* regs) {
             int fd = (int)arg1;
             if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use) {
                 g_fds[fd].in_use = 0;
+                g_fds[fd].owner = 0;
+                g_fds[fd].cursor = 0;
                 g_fds[fd].flags = 0;
                 g_fds[fd].path[0] = '\0';
                 regs->eax = 0;
@@ -397,6 +420,10 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_BRK: {
+            if (usercmd_is_app_started()) {
+                regs->eax = usercmd_app_brk(arg1);
+                break;
+            }
             unsigned int current = (unsigned int)sbrk(0);
             unsigned int requested = arg1;
             if (requested >= HEAP_START_ADDR && requested <= heap_get_max_addr()) {
@@ -408,7 +435,9 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_SBRK: {
-            void* res = sbrk((int)arg1);
+            void* res = usercmd_is_app_started()
+                ? usercmd_app_sbrk((int)arg1)
+                : sbrk((int)arg1);
             regs->eax = (unsigned int)res;
             break;
         }

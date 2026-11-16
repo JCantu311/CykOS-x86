@@ -5,3 +5,4 @@ CYKIS static
 GFXDEMO static
 SYSDEMO static
 SOUNDTEST static
+LUA static

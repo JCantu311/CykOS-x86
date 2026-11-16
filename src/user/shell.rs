@@ -13,6 +13,7 @@ const KEY_END: u8      = 0x85;
 const KEY_PAGEUP: u8   = 0x86;
 const KEY_PAGEDOWN: u8 = 0x87;
 const KEY_DELETE: u8   = 0x89;
+const SYS_WAIT: u32 = 7;
 
 // Level 1 Kernel & Driver C Function Declarations
 extern "C" {
@@ -1183,6 +1184,32 @@ fn cmd_run(args: &[u8]) {
     run_script(filename);
 }
 
+fn cmd_wait(_args: &[u8]) {
+    let mut status = 0i32;
+    let pid: u32;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            inout("eax") SYS_WAIT => pid,
+            in("ebx") (&mut status as *mut i32 as u32)
+        );
+    }
+    if pid == u32::MAX {
+        puts(b"wait: no exited application to collect\n");
+    } else {
+        puts(b"[process ");
+        print_u32(pid);
+        puts(b"] exit status ");
+        if status < 0 {
+            print_char(b'-');
+            print_u32(status.wrapping_neg() as u32);
+        } else {
+            print_u32(status as u32);
+        }
+        print_char(b'\n');
+    }
+}
+
 // Configurable Command Registry Table
 // Space is reserved below for future built-ins and user applications!
 pub static COMMANDS: &[Command] = &[
@@ -1190,6 +1217,16 @@ pub static COMMANDS: &[Command] = &[
         name: b"run",
         description: b"Run a shell script (e.g. run startup.SHE)",
         handler: cmd_run,
+    },
+    Command {
+        name: b"wait",
+        description: b"Collect the most recently exited app's status",
+        handler: cmd_wait,
+    },
+    Command {
+        name: b"WAIT",
+        description: b"",
+        handler: cmd_wait,
     },
     Command {
         name: b"RUN",
@@ -1650,6 +1687,7 @@ static mut HISTORY_COUNT: usize = 0;
 // Autocomplete list
 const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"help",
+    b"wait",
     b"clear",
     b"dir",
     b"rm",

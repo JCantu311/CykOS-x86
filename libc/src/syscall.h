@@ -3,6 +3,8 @@
 
 #include <errno.h>
 
+#define SYS_GFX_MODE 187
+
 static inline int __syscall0(int num) {
     int ret;
     asm volatile("int $0x80" : "=a"(ret) : "a"(num) : "memory");

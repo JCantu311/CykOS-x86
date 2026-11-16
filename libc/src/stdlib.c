@@ -100,9 +100,13 @@ void* realloc(void* ptr, size_t size) {
 }
 
 void exit(int status) {
-    // Reset graphics before flushing text diagnostics. The kernel also does
-    // this during SYS_EXIT, but that is too late for output written here.
-    (void)__syscall1(187, 0); // SYS_GFX_MODE: restore VGA text mode
+    // Restore text mode only when the application actually changed modes.
+    // Setting mode 0 clears the screen, so doing it unconditionally erases
+    // ordinary console output from short-lived commands (for example `lua -v`).
+    int graphics_mode = __syscall1(SYS_GFX_MODE, -1); // Query active video mode.
+    if (graphics_mode > 0) {
+        (void)__syscall1(SYS_GFX_MODE, 0); // Restore text mode before flushing output.
+    }
     fflush(stdout);
     fflush(stderr);
     __syscall1(1, status); // SYS_EXIT

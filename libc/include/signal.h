@@ -3,6 +3,9 @@
 
 #include <sys/types.h>
 
+/* C requires sig_atomic_t for values safely accessed from a signal handler. */
+typedef int sig_atomic_t;
+
 #define SIGHUP     1
 #define SIGINT     2
 #define SIGQUIT    3

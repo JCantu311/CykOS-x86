@@ -3,9 +3,8 @@
 
 #include "cykastd.h"
 
-// Fixed apps: 0x180000-0x210000; app stack: 0x210000-0x230000.
-// Leave a guard gap before the kernel heap. The usable end is detected from
-// the BIOS E820 map and capped to keep the low-memory layout predictable.
+// Fixed app images: 0x180000-0x210000; foreground app stack: 0x210000-0x230000.
+// Leave the heap start above both reserved application regions.
 #define HEAP_START_ADDR       0x250000
 #define HEAP_MAX_ADDR         0x1000000 // 16 MiB maximum heap window
 #define HEAP_FALLBACK_MAX_ADDR 0x800000 // Safe ceiling if E820 is unavailable
@@ -16,6 +15,8 @@ void* malloc(size_t size);
 void  free(void* ptr);
 void* realloc(void* ptr, size_t size);
 void* calloc(size_t num, size_t size);
+void  heap_set_allocation_owner(unsigned int owner);
+void  heap_free_allocations_by_owner(unsigned int owner);
 
 // Diagnostics
 size_t heap_get_used_bytes(void);

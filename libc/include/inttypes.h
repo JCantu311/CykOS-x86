@@ -4,9 +4,6 @@
 /* C99 integer types and printf/scanf format specifiers for i386 CykOS. */
 #include <stdint.h>
 
-typedef int64_t intmax_t;
-typedef uint64_t uintmax_t;
-
 #define PRId8  "d"
 #define PRIi8  "i"
 #define PRIo8  "o"

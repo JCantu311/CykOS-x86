@@ -7,6 +7,7 @@
 // CykOS System Call Numbers
 // =========================================================================
 pub const SYS_EXIT: u32       = 1;
+pub const SYS_WAIT: u32       = 7;
 pub const SYS_READ: u32       = 3;
 pub const SYS_WRITE: u32      = 4;
 pub const SYS_OPEN: u32       = 5;
@@ -380,6 +381,13 @@ pub fn exit(code: i32) -> ! {
         syscall::syscall1(SYS_EXIT, code as u32);
         loop { core::arch::asm!("hlt"); }
     }
+}
+
+/// Reap the most recently exited foreground app, returning (pid, exit code).
+pub fn wait() -> Result<(u32, i32), i32> {
+    let mut status = 0i32;
+    let pid = unsafe { syscall::syscall1(SYS_WAIT, &mut status as *mut i32 as u32) };
+    if pid == u32::MAX { Err(-1) } else { Ok((pid, status)) }
 }
 
 /// Play a tone using the Level 2 sound driver (or PC speaker fallback)

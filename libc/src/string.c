@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <strings.h>
+#include <errno.h>
 
 int strcasecmp(const char* left, const char* right) {
     while (*left && *right) {
@@ -71,6 +72,26 @@ int strcmp(const char* s1, const char* s2) {
     return (unsigned char)*s1 - (unsigned char)*s2;
 }
 
+char* strerror(int error_number) {
+    switch (error_number) {
+        case 0: return (char*)"Success";
+        case EPERM: return (char*)"Operation not permitted";
+        case ENOENT: return (char*)"No such file or directory";
+        case EINTR: return (char*)"Interrupted system call";
+        case EIO: return (char*)"Input/output error";
+        case EBADF: return (char*)"Bad file descriptor";
+        case EACCES: return (char*)"Permission denied";
+        case EEXIST: return (char*)"File exists";
+        case ENOTDIR: return (char*)"Not a directory";
+        case EISDIR: return (char*)"Is a directory";
+        case EINVAL: return (char*)"Invalid argument";
+        case ENOSPC: return (char*)"No space left on device";
+        case EROFS: return (char*)"Read-only file system";
+        case ENOSYS: return (char*)"Function not implemented";
+        default: return (char*)"Unknown error";
+    }
+}
+
 int strncmp(const char* s1, const char* s2, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (s1[i] != s2[i])
@@ -115,6 +136,19 @@ char* strstr(const char* haystack, const char* needle) {
         }
     }
     return NULL;
+}
+
+char* strpbrk(const char* s, const char* accept) {
+    for (; *s; s++) {
+        if (strchr(accept, *s)) return (char*)s;
+    }
+    return NULL;
+}
+
+size_t strspn(const char* s, const char* accept) {
+    size_t length = 0;
+    while (s[length] && strchr(accept, s[length])) length++;
+    return length;
 }
 
 char* strdup(const char* s) {

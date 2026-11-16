@@ -90,6 +90,12 @@ FILE* fopen(const char* pathname, const char* mode) {
     return fp;
 }
 
+FILE* freopen(const char* pathname, const char* mode, FILE* stream) {
+    if (!pathname || !mode || !stream) return NULL;
+    if (fclose(stream) != 0) return NULL;
+    return fopen(pathname, mode);
+}
+
 int fflush(FILE* stream) {
     if (!stream) return 0;
     if (stream->mode == 1 && stream->buf_pos > 0) {
@@ -215,6 +221,10 @@ int fgetc(FILE* stream) {
         return (int)c;
     }
     return EOF;
+}
+
+int getc(FILE* stream) {
+    return fgetc(stream);
 }
 
 char* fgets(char* s, int size, FILE* stream) {

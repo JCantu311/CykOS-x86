@@ -36,7 +36,7 @@ Filesystem code should implement the `vfs_driver_t` operations in `vfs.h` and re
 
 ## Syscalls
 
-The `int 0x80` table uses Linux i386 numbers for the implemented POSIX-style subset: `read` (3), `write` (4), `open` (5), `close` (6), `unlink` (10), `chdir` (12), `lseek` (19), `mkdir` (39), `rmdir` (40), `brk` (45), and `getcwd` (183). Syscall number 1 is reserved for `exit`, but process termination semantics are not implemented yet; bundled apps return to the shell through a normal function return. File descriptors are limited, file opens support a subset of access/create/truncate/append flags, and errors return `-1` without a full `errno` implementation. `brk` takes an absolute address; the old increment-based behavior remains as CykOS `sbrk` syscall 112. Legacy CykOS filesystem syscalls 105-111 remain for existing programs. This is not a complete POSIX environment. MS-DOS does not define a universal protected-mode syscall-number ABI, so DOS-specific compatibility is provided only through filesystem/path semantics where they naturally overlap.
+The `int 0x80` table uses Linux i386 numbers for the implemented POSIX-style subset: `exit` (1), `read` (3), `write` (4), `open` (5), `close` (6), `wait` (7), `unlink` (10), `chdir` (12), `lseek` (19), `mkdir` (39), `rmdir` (40), `brk` (45), and `getcwd` (183). Applications run synchronously from the shell with a private 128 KiB stack. Kernel heap allocations, app `brk`/`sbrk` storage, and open file descriptors are tracked to the active process and reclaimed when it returns, calls `exit`, is interrupted with Ctrl+C, or faults; the app heap arena is capped at 8 MiB. A small process record tracks its PID and exit status; the shell's `wait` command collects the most recent completed app's PID and status. Apps still execute at ring 0 without address-space isolation, so exception recovery cannot contain arbitrary memory corruption. File descriptors are limited, file opens support a subset of access/create/truncate/append flags, and errors return `-1` without a full `errno` implementation. `brk` takes an absolute address; the old increment-based behavior remains as CykOS `sbrk` syscall 112. Legacy CykOS filesystem syscalls 105-111 remain for existing programs. This is not a complete POSIX environment. MS-DOS does not define a universal protected-mode syscall-number ABI, so DOS-specific compatibility is provided only through filesystem/path semantics where they naturally overlap.
 
 ## Driver Builds
 
@@ -45,6 +45,8 @@ Add one source/output/load-address row to `DRIVERS.LST`, then run `./drivers/bui
 ## Application Linking
 
 Applications can use dynamic or static linking. Set each program's mode in `APP_LINKING.LST` (`APP_NAME dynamic|static`); bundled apps default to static, and `CYKOS_LINK_MODE=static|dynamic` can override the manifest for a build. The kernel identifies ELF `ET_DYN` and `ET_EXEC` files from their headers; existing flat static binaries remain supported. Dynamic ELF32 applications use i386 REL relocations and kernel imports from `src/kernel/exports.c`. Dependent shared libraries (`DT_NEEDED`) are not supported yet. Static Rust apps are linked against `bin/kernel_syms.ld` and emitted as `ET_EXEC`.
+
+The initial Lua port builds the upstream Lua core as a CykOS command. It runs text scripts, supports `-e` and a small interactive prompt, and currently enables the base, coroutine, string, table, and UTF-8 libraries. See `ports/lua/README.md` for current library and runtime limitations.
 
 ## Sound
 

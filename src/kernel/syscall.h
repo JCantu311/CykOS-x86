@@ -5,6 +5,7 @@
 
 // CykOS System Call Numbers (Linux-compatible where applicable)
 #define SYS_EXIT          1   // Terminate current process / return to shell
+#define SYS_WAIT          7   // Reap the most recently exited foreground process
 #define SYS_READ          3   // Read from file descriptor or stdin (keyboard)
 #define SYS_WRITE         4   // Write to file descriptor or stdout (console)
 #define SYS_OPEN          5   // Open file on FAT16
@@ -69,5 +70,6 @@ int syscall_pipe_read(char* data, unsigned int length);
 int syscall_pipe_active(void);
 int syscall_pipe_output_active(void);
 void syscall_flush_deferred_console(void);
+void syscall_close_process_fds(unsigned int owner);
 
 #endif // SYSCALL_H

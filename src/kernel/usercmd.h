@@ -32,5 +32,11 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
                                                              unsigned int eip,
                                                              unsigned int error_code);
 int usercmd_is_running(void);
+int usercmd_is_app_started(void);
+unsigned int usercmd_current_pid(void);
+void* usercmd_app_sbrk(int increment);
+unsigned int usercmd_app_brk(unsigned int requested);
+/** Reap the most recently exited foreground app; returns its pid or -1. */
+int usercmd_wait(int* exit_code);
 
 #endif // USERCMD_H

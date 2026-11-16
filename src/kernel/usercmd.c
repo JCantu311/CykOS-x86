@@ -1,6 +1,7 @@
 #include "usercmd.h"
 #include "vfs.h"
 #include "cykastd.h"
+#include "heap.h"
 #include "syscall.h"
 #include "modload.h"
 #include "exports.h"
@@ -15,12 +16,13 @@
 #define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
 #define USER_DYNAMIC_APP_MAX_SIZE 0xC0000 // Larger PIC apps are loaded from the kernel heap
 #define USER_SHELL_MAX_SIZE 0x30000 // Preserve the shell's reserved 192 KB region
-#define USER_APP_STACK_TOP 0x230000 // 128 KB stack above the fixed app arena
+#define USER_APP_STACK_BASE 0x210000
+#define USER_APP_STACK_SIZE 0x20000 // Keep the existing 128 KiB app stack size
+#define USER_APP_HEAP_MAX_SIZE 0x800000 // Bound app-owned heap arena to 8 MiB
+#define USER_APP_HEAP_MIN_SIZE 0x10000
+#define USER_APP_HEAP_STEP 0x40000
 #define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
-
-#define USERCMD_STRINGIFY_INNER(value) #value
-#define USERCMD_STRINGIFY(value) USERCMD_STRINGIFY_INNER(value)
 
 #define ELF_ET_DYN        3
 #define ELF_ET_EXEC       2
@@ -300,7 +302,27 @@ static int load_static_elf32(const unsigned char* file, unsigned int file_size,
     return 0;
 }
 
+typedef enum {
+    USER_PROCESS_EMPTY = 0,
+    USER_PROCESS_RUNNING,
+    USER_PROCESS_EXITED,
+    USER_PROCESS_REAPED
+} user_process_state_t;
+
+typedef struct {
+    unsigned int pid;
+    user_process_state_t state;
+    int exit_code;
+    void* stack;
+    void* heap_arena;
+    unsigned int heap_capacity;
+    unsigned int heap_break;
+} user_process_t;
+
 static volatile int g_usercmd_active = 0;
+static volatile int g_usercmd_app_started = 0;
+static user_process_t g_user_process;
+static unsigned int g_next_user_pid = 1;
 static unsigned int g_usercmd_saved_esp = 0;
 static unsigned int g_usercmd_saved_ebp = 0;
 static volatile unsigned int g_usercmd_app_saved_esp = 0;
@@ -311,18 +333,19 @@ static volatile unsigned int g_usercmd_app_argv = 0;
 /*
  * Applications and their syscalls currently execute at ring 0, so they need
  * a private stack even before full privilege separation exists. The fixed app
- * arena ends at 0x210000; this stack occupies 0x210000-0x230000 and the kernel
- * heap starts at 0x250000.
+ * arena ends at 0x210000; each foreground app receives the reserved stack at
+ * 0x210000-0x230000, and the kernel heap starts at 0x250000.
  */
 static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
-                                     char** argv) {
+                                     char** argv, void* stack) {
     int result;
     g_usercmd_app_entry = (unsigned int)entry;
     g_usercmd_app_argc = (unsigned int)argc;
     g_usercmd_app_argv = (unsigned int)argv;
+    unsigned int stack_top = (unsigned int)stack + USER_APP_STACK_SIZE;
     asm volatile(
         "movl %%esp, g_usercmd_app_saved_esp\n"
-        "movl $" USERCMD_STRINGIFY(USER_APP_STACK_TOP) ", %%esp\n"
+        "movl %1, %%esp\n"
         "andl $-16, %%esp\n"
         "subl $8, %%esp\n"
         "pushl g_usercmd_app_argv\n"
@@ -330,7 +353,7 @@ static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
         "call *g_usercmd_app_entry\n"
         "movl g_usercmd_app_saved_esp, %%esp\n"
         : "=a"(result)
-        :
+        : "m"(stack_top)
         : "ecx", "edx", "memory", "cc"
     );
     return result;
@@ -445,6 +468,7 @@ static void shell_output_char(char ch) {
 
 int exec_user_command(const char* cmd_name, const char* args) {
     if (!cmd_name || cmd_name[0] == '\0') return 0;
+    g_usercmd_app_started = 0;
     volatile int app_ret = 0;
     unsigned char* staged_image = (unsigned char*)0;
     void* dest = (void*)USER_APP_BASE;
@@ -692,11 +716,35 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
+    void* app_stack = (void*)USER_APP_STACK_BASE;
+    g_user_process.pid = g_next_user_pid++;
+    if (g_next_user_pid == 0) g_next_user_pid = 1;
+    g_user_process.state = USER_PROCESS_RUNNING;
+    g_user_process.exit_code = 0;
+    g_user_process.stack = app_stack;
+    g_user_process.heap_arena = (void*)0;
+    g_user_process.heap_capacity = 0;
+    g_user_process.heap_break = 0;
+    g_usercmd_app_started = 1;
+    heap_set_allocation_owner(g_user_process.pid);
+
     app_main_fn entry = (app_main_fn)entry_address;
-    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv);
+    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv, app_stack);
+    if (g_user_process.state == USER_PROCESS_RUNNING) {
+        g_user_process.exit_code = app_ret;
+        g_user_process.state = USER_PROCESS_EXITED;
+    }
 
     asm volatile("usercmd_return_label:\n");
     g_usercmd_active = 0;
+    g_usercmd_app_started = 0;
+    heap_set_allocation_owner(0);
+    syscall_close_process_fds(g_user_process.pid);
+    heap_free_allocations_by_owner(g_user_process.pid);
+    g_user_process.stack = (void*)0;
+    g_user_process.heap_arena = (void*)0;
+    g_user_process.heap_capacity = 0;
+    g_user_process.heap_break = 0;
     if (dest_heap_allocated) free(dest);
     if (staged_image) {
         free(staged_image);
@@ -711,9 +759,11 @@ int exec_user_command(const char* cmd_name, const char* args) {
 }
 
 void usercmd_terminate(int exit_code) {
-    if (!g_usercmd_active) return;
+    if (!g_usercmd_active || !g_usercmd_app_started) return;
     g_usercmd_active = 0;
-    (void)exit_code;
+    g_usercmd_app_started = 0;
+    g_user_process.exit_code = exit_code;
+    g_user_process.state = USER_PROCESS_EXITED;
 
     // If a graphics mode was left active, reset back to text mode (Mode 03h)
     cyk_display_driver_t* dpy = modload_get_display_driver();
@@ -737,6 +787,11 @@ __attribute__((noreturn)) void usercmd_abort_from_irq(void) {
         for (;;) asm volatile("hlt");
     }
     g_usercmd_active = 0;
+    if (g_usercmd_app_started) {
+        g_user_process.exit_code = 130;
+        g_user_process.state = USER_PROCESS_EXITED;
+        g_usercmd_app_started = 0;
+    }
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) {
         dpy->set_mode(0);
@@ -770,6 +825,11 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
         for (;;) asm volatile("cli; hlt");
     }
     g_usercmd_active = 0;
+    if (g_usercmd_app_started) {
+        g_user_process.exit_code = 128 + (int)vector;
+        g_user_process.state = USER_PROCESS_EXITED;
+        g_usercmd_app_started = 0;
+    }
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
     syscall_flush_deferred_console();
@@ -794,6 +854,69 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
 
 int usercmd_is_running(void) {
     return g_usercmd_active;
+}
+
+int usercmd_is_app_started(void) {
+    return g_usercmd_app_started;
+}
+
+unsigned int usercmd_current_pid(void) {
+    return g_usercmd_app_started ? g_user_process.pid : 0;
+}
+
+static int usercmd_ensure_app_heap(unsigned int minimum_capacity) {
+    if (g_user_process.heap_arena) {
+        return minimum_capacity <= g_user_process.heap_capacity ? 0 : -1;
+    }
+
+    unsigned int capacity = USER_APP_HEAP_MAX_SIZE;
+    while (capacity >= minimum_capacity && capacity >= USER_APP_HEAP_MIN_SIZE) {
+        void* arena = malloc(capacity);
+        if (arena) {
+            g_user_process.heap_arena = arena;
+            g_user_process.heap_capacity = capacity;
+            g_user_process.heap_break = 0;
+            return 0;
+        }
+        if (capacity < USER_APP_HEAP_MIN_SIZE + USER_APP_HEAP_STEP) break;
+        capacity -= USER_APP_HEAP_STEP;
+    }
+    return -1;
+}
+
+void* usercmd_app_sbrk(int increment) {
+    if (!g_usercmd_app_started) return sbrk(increment);
+    unsigned int minimum = increment > 0 ? (unsigned int)increment : 1;
+    if (usercmd_ensure_app_heap(minimum) != 0) return (void*)-1;
+
+    unsigned int previous = g_user_process.heap_break;
+    if (increment > 0) {
+        if ((unsigned int)increment > g_user_process.heap_capacity - previous)
+            return (void*)-1;
+        g_user_process.heap_break += (unsigned int)increment;
+    } else if (increment < 0) {
+        unsigned int amount = 0U - (unsigned int)increment;
+        if (amount > previous) return (void*)-1;
+        g_user_process.heap_break -= amount;
+    }
+    return (unsigned char*)g_user_process.heap_arena + previous;
+}
+
+unsigned int usercmd_app_brk(unsigned int requested) {
+    if (!g_usercmd_app_started) return (unsigned int)sbrk(0);
+    if (usercmd_ensure_app_heap(1) != 0) return (unsigned int)-1;
+    unsigned int base = (unsigned int)g_user_process.heap_arena;
+    if (requested >= base && requested - base <= g_user_process.heap_capacity)
+        g_user_process.heap_break = requested - base;
+    return base + g_user_process.heap_break;
+}
+
+int usercmd_wait(int* exit_code) {
+    if (g_user_process.state != USER_PROCESS_EXITED) return -1;
+    int pid = (int)g_user_process.pid;
+    if (exit_code) *exit_code = g_user_process.exit_code;
+    g_user_process.state = USER_PROCESS_REAPED;
+    return pid;
 }
 
 int exec_shell_binary(void) {

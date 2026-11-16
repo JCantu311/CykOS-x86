@@ -29,6 +29,22 @@ static inline int isprint(int c) {
     return c >= 32 && c <= 126;
 }
 
+static inline int iscntrl(int c) {
+    return (c >= 0 && c < 32) || c == 127;
+}
+
+static inline int isgraph(int c) {
+    return c >= 33 && c <= 126;
+}
+
+static inline int ispunct(int c) {
+    return isgraph(c) && !isalnum(c);
+}
+
+static inline int isxdigit(int c) {
+    return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 static inline int toupper(int c) {
     return islower(c) ? (c - ('a' - 'A')) : c;
 }

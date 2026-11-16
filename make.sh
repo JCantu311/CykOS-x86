@@ -280,6 +280,9 @@ for libc_src in libc/src/*.c; do
     obj_name=$(basename "$libc_src" .c)
     "$CC" $LIBC_CFLAGS -c "$libc_src" -o "bin/libc_objs/${obj_name}.o"
 done
+if [ -f libc/src/setjmp.S ]; then
+    "$CC" -m32 -ffreestanding -fPIC -c libc/src/setjmp.S -o bin/libc_objs/setjmp.o
+fi
 
 # Pack libc.a archive using ar (or llvm-ar)
 if command -v i686-elf-ar &> /dev/null; then
@@ -323,6 +326,26 @@ if [ -d apps ]; then
             echo "  -> Created C binary: bin/${app_upper}.BIN ($sz bytes)"
         fi
     done
+fi
+
+# Build the Lua interpreter from the upstream Lua core and the CykOS host.
+if [ -d third_party/lua ] && [ -f ports/lua/main.c ]; then
+    echo "Compiling Lua for CykOS..."
+    mkdir -p bin/lua_objs
+    LUA_CFLAGS="-m32 -ffreestanding -O2 -nostdlib -fPIC -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Iports/lua/include -Ilibc/include -Ithird_party/lua -include ports/lua/cykos_compat.h -DLUA_CYKOS -Dluai_makeseed=cykos_lua_makeseed -Dl_strcoll=strcmp"
+    LUA_SOURCES="lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib lstrlib ltablib lutf8lib"
+    for lua_source in $LUA_SOURCES; do
+        "$CC" $LUA_CFLAGS -c "third_party/lua/${lua_source}.c" -o "bin/lua_objs/${lua_source}.o"
+    done
+    "$CC" $LUA_CFLAGS -c ports/lua/cykos_compat.c -o bin/lua_objs/cykos_compat.o
+    "$CC" $LUA_CFLAGS -c ports/lua/main.c -o bin/lua_objs/main.o
+    $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
+        bin/kernel_syms.ld bin/lua_objs/*.o bin/libc.a -o bin/LUA.BIN
+    lua_size=$(wc -c < bin/LUA.BIN)
+    echo "  -> Created: bin/LUA.BIN ($lua_size bytes)"
+    if [ "$lua_size" -gt 524288 ]; then
+        echo "  -> WARNING: LUA.BIN exceeds USER_APP_FILE_MAX (524288)!" >&2
+    fi
 fi
 
 # Build DoomGeneric against the CykOS VGA 320x200 indexed-color interface.

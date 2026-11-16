@@ -37,6 +37,7 @@ extern FILE* stdout;
 extern FILE* stderr;
 
 FILE* fopen(const char* pathname, const char* mode);
+FILE* freopen(const char* pathname, const char* mode, FILE* stream);
 int   fclose(FILE* stream);
 int   fflush(FILE* stream);
 size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream);
@@ -50,6 +51,7 @@ int   remove(const char* pathname);
 int   rename(const char* old_path, const char* new_path);
 
 int   fgetc(FILE* stream);
+int   getc(FILE* stream);
 char* fgets(char* s, int size, FILE* stream);
 int   fputc(int c, FILE* stream);
 int   fputs(const char* s, FILE* stream);
