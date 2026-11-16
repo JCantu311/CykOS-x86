@@ -148,7 +148,7 @@ rm -f bin/kernel_syms_shell.ld
 if command -v rustc &> /dev/null; then
     echo "Compiling Level 4 Userland Applications..."
 
-    RUST_FLAGS="--target i686-unknown-linux-gnu -O -C overflow-checks=no -C relocation-model=pic -C panic=abort"
+    RUST_FLAGS="--target i686-unknown-linux-gnu -O -C debuginfo=0 -C overflow-checks=no -C relocation-model=pic -C panic=abort"
 
     app_link_mode() {
         local app_upper="$1"
@@ -173,7 +173,7 @@ if command -v rustc &> /dev/null; then
         local mode
         mode=$(app_link_mode "$app_upper" static) || return 1
         if [ "$mode" = "static" ]; then
-            $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker \
+            $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker -s \
                 -u main bin/kernel_syms.ld "$input" -o "$output"
         else
             $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \

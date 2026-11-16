@@ -63,7 +63,7 @@ build_rust_app() {
 
     echo "Compiling Rust App: $src -> $out_bin"
 
-    rustc --target i686-unknown-linux-gnu -O \
+    rustc --target i686-unknown-linux-gnu -O -C debuginfo=0 \
         -C overflow-checks=no \
         -C relocation-model=pic \
         -C panic=abort \
@@ -71,7 +71,7 @@ build_rust_app() {
         --emit=obj "$src" -o "apps/bin/${name}.o"
 
     if [ "$mode" = "static" ]; then
-        $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker \
+        $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker -s \
             -u main bin/kernel_syms.ld "apps/bin/${name}.o" -o "$out_bin"
     else
         $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s \
