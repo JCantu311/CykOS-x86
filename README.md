@@ -26,6 +26,8 @@ The startup memory check uses the BIOS E820 map and tests addressable usable RAM
 
 The root filesystem uses a Unix-like layout: `/bin` contains the standalone shell, `/usr/bin` contains apps, `/boot/drivers` and `/boot/MODULES.CFG` hold boot drivers, `/etc` contains command configuration, `/usr/share/doc` contains documentation, `/home/user` is the user home, `/tmp` is for temporary files, `/var/log` is reserved for logs, and `/mnt` is the virtual mount point for additional volumes. Existing `/CYKOS` images and `/drive` paths remain readable for compatibility.
 
+CykShell's Tab completion resolves command names in the first token and file or directory names in later tokens. It uses the mounted VFS directory listing, compares names case-insensitively, appends `/` for a directory, and adds a space after a completed file.
+
 CykShell reads the optional `/ETC/AUTOEXEC.SHE` file after its startup banner and before showing the first prompt. It uses the existing `.SHE` script parser: one normal shell command per line, with `#` comments. The image builder installs the repository's `AUTOEXEC.SHE` template at that path; edit the template to select startup commands.
 
 The VFS probes registered filesystem drivers and mounts the first supported boot volume. FAT16 and FAT32 are registered built-in backends. Both support 8.3 path lookup, directory listing/navigation, and file reads; FAT32 also supports file create/replace/delete and empty-directory create/remove. Long file names are skipped. FAT32 is a single-volume implementation and does not yet support FSInfo updates, timestamps, permissions, symbolic links, or crash-safe journaling.

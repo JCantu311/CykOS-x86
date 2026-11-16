@@ -1676,6 +1676,118 @@ const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"gfxdemo",
 ];
 
+const PATH_COMPLETION_CAPACITY: usize = 128;
+static mut PATH_COMPLETION_COUNT: usize = 0;
+static mut PATH_COMPLETION_NAMES: [[u8; 13]; PATH_COMPLETION_CAPACITY] =
+    [[0; 13]; PATH_COMPLETION_CAPACITY];
+static mut PATH_COMPLETION_LENGTHS: [u8; PATH_COMPLETION_CAPACITY] =
+    [0; PATH_COMPLETION_CAPACITY];
+static mut PATH_COMPLETION_DIRS: [u8; PATH_COMPLETION_CAPACITY] =
+    [0; PATH_COMPLETION_CAPACITY];
+
+extern "C" fn path_completion_callback(name_ptr: *const u8, _size: u32, is_dir: u8) {
+    if name_ptr.is_null() { return; }
+    unsafe {
+        if PATH_COMPLETION_COUNT >= PATH_COMPLETION_CAPACITY { return; }
+        let mut len = 0;
+        while len < 12 && *name_ptr.add(len) != 0 { len += 1; }
+        if len == 0 || (len == 1 && *name_ptr == b'.') ||
+           (len == 2 && *name_ptr == b'.' && *name_ptr.add(1) == b'.') { return; }
+
+        let index = PATH_COMPLETION_COUNT;
+        for i in 0..len { PATH_COMPLETION_NAMES[index][i] = *name_ptr.add(i); }
+        PATH_COMPLETION_LENGTHS[index] = len as u8;
+        PATH_COMPLETION_DIRS[index] = is_dir;
+        PATH_COMPLETION_COUNT += 1;
+    }
+}
+
+fn complete_path_token(token: &[u8], output: &mut [u8; 128]) -> Option<usize> {
+    let mut leaf_start = 0;
+    let mut last_separator = None;
+    for (i, &byte) in token.iter().enumerate() {
+        if byte == b'/' || byte == b'\\' { last_separator = Some(i); }
+    }
+    let directory_path: &[u8] = if let Some(separator) = last_separator {
+        leaf_start = separator + 1;
+        if separator == 0 { &token[..1] } else { &token[..separator] }
+    } else {
+        &[]
+    };
+    if directory_path.len() >= 128 { return None; }
+
+    let mut directory = [0u8; 128];
+    for i in 0..directory_path.len() { directory[i] = directory_path[i]; }
+    directory[directory_path.len()] = 0;
+
+    unsafe {
+        PATH_COMPLETION_COUNT = 0;
+        let dir_ptr = if directory_path.is_empty() { core::ptr::null() } else { directory.as_ptr() };
+        if vfs_list_directory(dir_ptr, path_completion_callback) < 0 { return None; }
+
+        let prefix = &token[leaf_start..];
+        let mut first_match = None;
+        let mut match_count = 0usize;
+        let mut common_len = 0usize;
+        for index in 0..PATH_COMPLETION_COUNT {
+            let candidate_len = PATH_COMPLETION_LENGTHS[index] as usize;
+            if candidate_len < prefix.len() { continue; }
+            let mut matches = true;
+            for i in 0..prefix.len() {
+                if PATH_COMPLETION_NAMES[index][i].to_ascii_lowercase() !=
+                   prefix[i].to_ascii_lowercase() {
+                    matches = false;
+                    break;
+                }
+            }
+            if !matches { continue; }
+
+            if first_match.is_none() {
+                first_match = Some(index);
+                common_len = candidate_len;
+            } else {
+                let first = first_match.unwrap();
+                common_len = common_len.min(candidate_len);
+                let mut i = prefix.len();
+                while i < common_len &&
+                      PATH_COMPLETION_NAMES[first][i].to_ascii_lowercase() ==
+                      PATH_COMPLETION_NAMES[index][i].to_ascii_lowercase() {
+                    i += 1;
+                }
+                common_len = i;
+            }
+            match_count += 1;
+        }
+
+        let first = first_match?;
+        if match_count == 1 {
+            common_len = PATH_COMPLETION_LENGTHS[first] as usize;
+        }
+        // No common extension means Tab leaves the input untouched.
+        if match_count > 1 && common_len <= prefix.len() { return None; }
+
+        let suffix_len = if match_count == 1 { 1 } else { 0 };
+        if leaf_start + common_len + suffix_len > 127 { return None; }
+
+        let mut out_len = leaf_start;
+        for i in 0..leaf_start { output[i] = token[i]; }
+        for i in 0..common_len {
+            output[out_len] = PATH_COMPLETION_NAMES[first][i];
+            out_len += 1;
+        }
+        if match_count == 1 {
+            if PATH_COMPLETION_DIRS[first] != 0 {
+                output[out_len] = b'/';
+                out_len += 1;
+            } else {
+                output[out_len] = b' ';
+                out_len += 1;
+            }
+        }
+        Some(out_len)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn shell_main() -> ! {
     puts(b"\n========================================\n");
@@ -1789,31 +1901,58 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
             } else if c == b'\t' {
-                // Tab Autocompletion
+                // Complete the first token against command names, then resolve
+                // later tokens (or explicit paths) against the current VFS dir.
                 if line_len > 0 && cursor_pos == line_len {
                     unsafe {
-                        let prefix = &LINE_BUF[..line_len];
-                        let mut match_candidate: Option<&[u8]> = None;
-                        let mut match_count = 0;
-
-                        for &cand in AUTOCOMPLETE_LIST {
-                            if cand.len() >= prefix.len() && bytes_eq(&cand[..prefix.len()], prefix) {
-                                match_candidate = Some(cand);
-                                match_count += 1;
-                            }
+                        let mut token_start = line_len;
+                        while token_start > 0 && LINE_BUF[token_start - 1] != b' ' &&
+                              LINE_BUF[token_start - 1] != b'\t' {
+                            token_start -= 1;
                         }
+                        let token = &LINE_BUF[token_start..line_len];
+                        let explicit_path = token.iter().any(|&b| b == b'/' || b == b'\\');
 
-                        if match_count == 1 {
-                            if let Some(cand) = match_candidate {
-                                for i in 0..cand.len() { LINE_BUF[i] = cand[i]; }
-                                LINE_BUF[cand.len()] = b' ';
-                                let new_len = cand.len() + 1;
+                        if token_start > 0 || explicit_path {
+                            let mut completed = [0u8; 128];
+                            if let Some(completed_len) = complete_path_token(token, &mut completed) {
+                                if completed_len > token.len() {
+                                    let old_len = line_len;
+                                    for i in 0..completed_len {
+                                        LINE_BUF[token_start + i] = completed[i];
+                                    }
+                                    line_len = token_start + completed_len;
+                                    cursor_pos = line_len;
+                                    set_cursor_pos(start_x, start_y);
+                                    for i in 0..line_len { print_char(LINE_BUF[i]); }
+                                    for _ in line_len..old_len { print_char(b' '); }
+                                    set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                                }
+                            }
+                        } else {
+                            let prefix = &LINE_BUF[..line_len];
+                            let mut match_candidate: Option<&[u8]> = None;
+                            let mut match_count = 0;
 
-                                set_cursor_pos(start_x, start_y);
-                                for i in 0..new_len { print_char(LINE_BUF[i]); }
-                                line_len = new_len;
-                                cursor_pos = new_len;
-                                set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                            for &cand in AUTOCOMPLETE_LIST {
+                                if cand.len() >= prefix.len() && bytes_eq(&cand[..prefix.len()], prefix) {
+                                    match_candidate = Some(cand);
+                                    match_count += 1;
+                                }
+                            }
+
+                            if match_count == 1 {
+                                if let Some(cand) = match_candidate {
+                                    for i in 0..cand.len() { LINE_BUF[i] = cand[i]; }
+                                    LINE_BUF[cand.len()] = b' ';
+                                    let new_len = cand.len() + 1;
+
+                                    set_cursor_pos(start_x, start_y);
+                                    for i in 0..new_len { print_char(LINE_BUF[i]); }
+                                    line_len = new_len;
+                                    cursor_pos = new_len;
+                                    set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                                }
                             }
                         }
                     }
