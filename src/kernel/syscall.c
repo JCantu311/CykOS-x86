@@ -6,6 +6,7 @@
 #include "modload.h"
 #include "usercmd.h"
 #include "permissions.h"
+#include "paging.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
@@ -118,7 +119,10 @@ void syscall_close_process_fds(unsigned int owner) {
 
 static int syscall_absolute_path(const char* path, char output[128]) {
     if (!path || !path[0]) return -1;
-    unsigned int length = strlen(path);
+    /* Bound the scan so a malformed path cannot run into unrelated memory. */
+    unsigned int length = 0;
+    while (length < 128 && path[length]) length++;
+    if (length == 128) return -1;
     if (path[0] == '/' || path[0] == '\\') {
         if (length >= 128) return -1;
         memcpy(output, path, length + 1);
@@ -135,6 +139,103 @@ static int syscall_absolute_path(const char* path, char output[128]) {
     if (separator) output[offset++] = '/';
     memcpy(output + offset, path, length + 1);
     return 0;
+}
+
+static int syscall_user_range_valid(const registers_t* regs,
+                                    unsigned int address,
+                                    unsigned int length) {
+    if ((regs->cs & 3u) == 0) return 1; /* Legacy kernel-mode callers. */
+    return paging_user_range_valid(address, length);
+}
+
+static int syscall_user_string_valid(const registers_t* regs,
+                                     const char* string,
+                                     unsigned int maximum) {
+    if (!string) return 0;
+    if ((regs->cs & 3u) == 0) return 1;
+    unsigned int address = (unsigned int)string;
+    for (unsigned int i = 0; i < maximum; i++) {
+        if (address > 0xFFFFFFFFu - i ||
+            !paging_user_range_valid(address + i, 1)) return 0;
+        if (string[i] == '\0') return 1;
+    }
+    return 0;
+}
+
+static int syscall_validate_user_arguments(const registers_t* regs,
+                                          unsigned int number,
+                                          unsigned int a1,
+                                          unsigned int a2,
+                                          unsigned int a3,
+                                          unsigned int a4) {
+    if ((regs->cs & 3u) == 0) return 1;
+    switch (number) {
+        case SYS_PRINT_STRING:
+        case SYS_OPEN:
+        case SYS_UNLINK:
+        case SYS_CHDIR:
+        case SYS_MKDIR:
+        case SYS_RMDIR:
+        case SYS_FAT_READ:
+        case SYS_FAT_WRITE:
+        case SYS_FAT_DELETE:
+        case SYS_VFS_READ_FILE:
+        case SYS_VFS_WRITE_FILE:
+        case SYS_STAT:
+        case SYS_CHMOD:
+        case SYS_CHOWN:
+        case SYS_ACCESS:
+        case SYS_CYK_MKDIR:
+        case SYS_CYK_RMDIR:
+        case SYS_CYK_CHDIR:
+            if (!syscall_user_string_valid(regs, (const char*)a1,
+                    number == SYS_PRINT_STRING ? 4096u : 128u)) return 0;
+            break;
+        default:
+            break;
+    }
+
+    switch (number) {
+        case SYS_WAIT:
+            return !a1 || syscall_user_range_valid(regs, a1, sizeof(int));
+        case SYS_READ:
+        case SYS_WRITE:
+        case SYS_FAT_READ:
+        case SYS_FAT_WRITE:
+        case SYS_VFS_READ_FILE:
+        case SYS_VFS_WRITE_FILE:
+            return a3 <= SYS_FILE_IO_LIMIT &&
+                   (!a3 || syscall_user_range_valid(regs, a2, a3));
+        case SYS_GETCWD:
+        case SYS_CYK_GETCWD:
+            return a2 <= 128u && (!a2 || syscall_user_range_valid(regs, a1, a2));
+        case SYS_STAT:
+        case SYS_FSTAT:
+            return syscall_user_range_valid(regs, a2, 13u * sizeof(unsigned int));
+        case SYS_SOUND_PLAY_SAMPLE:
+            return a2 <= SYS_FILE_IO_LIMIT &&
+                   (!a2 || syscall_user_range_valid(regs, a1, a2));
+        case SYS_GFX_INFO:
+            return syscall_user_range_valid(regs, a1, 32u);
+        case SYS_GFX_BITMAP: {
+            if (!syscall_user_range_valid(regs, a2, sizeof(cyk_bitmap_t))) return 0;
+            const cyk_bitmap_t* bitmap = (const cyk_bitmap_t*)a2;
+            if (bitmap->height && bitmap->stride > 0xFFFFFFFFu / bitmap->height)
+                return 0;
+            unsigned int bytes = bitmap->stride * bitmap->height;
+            return bytes <= SYS_FILE_IO_LIMIT &&
+                   (!bytes || syscall_user_range_valid(regs,
+                       (unsigned int)bitmap->pixels, bytes));
+        }
+        case SYS_GFX_PALETTE: {
+            unsigned int count = a1 & 0xFFFFu;
+            return count <= 256u &&
+                   (!count || syscall_user_range_valid(regs, a2, count * 3u));
+        }
+        default:
+            (void)a4;
+            return 1;
+    }
 }
 
 void syscall_pipe_begin(const char* input, unsigned int input_len, char* output, unsigned int output_capacity) {
@@ -193,7 +294,75 @@ static void syscall_handler(registers_t* regs) {
     unsigned int arg4 = regs->esi;
     (void)arg4;
 
+    if (!syscall_validate_user_arguments(regs, syscall_num, arg1, arg2, arg3, arg4)) {
+        regs->eax = (unsigned int)-1;
+        return;
+    }
+
     switch (syscall_num) {
+        case SYS_PRINT_CHAR:
+            print_char((char)arg1);
+            regs->eax = 0;
+            break;
+
+        case SYS_PRINT_STRING: {
+            const char* string = (const char*)arg1;
+            unsigned int length = 0;
+            if (!syscall_user_string_valid(regs, string, 4096)) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            while (length < 4096 && string[length]) length++;
+            if (length == 4096) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            for (unsigned int i = 0; i < length; i++) print_char(string[i]);
+            regs->eax = length;
+            break;
+        }
+
+        case SYS_CLEAR_SCREEN:
+            clear_screen();
+            regs->eax = 0;
+            break;
+
+        case SYS_TEXT_WRITE_CELL: {
+            unsigned int col = arg1 & 0xFFFFu;
+            unsigned int row = arg1 >> 16;
+            if (col < VGA_WIDTH && row < VGA_HEIGHT) {
+                volatile unsigned short* vga =
+                    (volatile unsigned short*)VGA_ADDRESS;
+                vga[row * VGA_WIDTH + col] = (unsigned short)arg2;
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_VFS_READ_FILE:
+        case SYS_VFS_WRITE_FILE: {
+            char absolute_path[128];
+            int is_write = syscall_num == SYS_VFS_WRITE_FILE;
+            unsigned int limit = arg3;
+            int result = -1;
+            if (limit <= SYS_FILE_IO_LIMIT &&
+                syscall_user_string_valid(regs, (const char*)arg1, 128) &&
+                (!limit || syscall_user_range_valid(regs, arg2, limit)) &&
+                syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                (is_write
+                    ? (permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0 ||
+                       vfs_find_file(absolute_path, &(vfs_file_t){0}) != 0)
+                    : permissions_check(absolute_path, CYK_PERMISSION_READ) == 0)) {
+                result = is_write
+                    ? vfs_write_file(absolute_path, (const void*)arg2, limit)
+                    : vfs_read_file_by_name(absolute_path, (void*)arg2, limit);
+            }
+            regs->eax = (unsigned int)result;
+            break;
+        }
+
         case SYS_EXIT: {
             // arg1 = exit code
             // Return exit code in eax
@@ -216,6 +385,11 @@ static void syscall_handler(registers_t* regs) {
             const char* buf = (const char*)arg2;
             size_t count = (size_t)arg3;
 
+            if (count > SYS_FILE_IO_LIMIT ||
+                (count && !syscall_user_range_valid(regs, arg2, (unsigned int)count))) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
             if (!buf || count == 0) {
                 regs->eax = 0;
                 break;
@@ -296,6 +470,11 @@ static void syscall_handler(registers_t* regs) {
             char* buf = (char*)arg2;
             size_t count = (size_t)arg3;
 
+            if (count > SYS_FILE_IO_LIMIT ||
+                (count && !syscall_user_range_valid(regs, arg2, (unsigned int)count))) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
             if (!buf || count == 0) {
                 regs->eax = 0;
                 break;
@@ -450,7 +629,11 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_SET_CURSOR: {
             // arg1 = col, arg2 = row
-            unsigned short pos = (arg2 * 80 + arg1);
+            if (arg1 >= VGA_WIDTH || arg2 >= VGA_HEIGHT) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            unsigned short pos = (arg2 * VGA_WIDTH + arg1);
             outb(0x3D4, 0x0E);
             outb(0x3D5, (pos >> 8) & 0xFF);
             outb(0x3D4, 0x0F);
@@ -505,8 +688,10 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_MSLEEP: {
+            unsigned int start = idt_get_millis();
             asm volatile("sti" ::: "memory");
-            msecwait(arg1);
+            while ((unsigned int)(idt_get_millis() - start) < arg1)
+                asm volatile("hlt" ::: "memory");
             asm volatile("cli" ::: "memory");
             regs->eax = 0;
             break;
@@ -556,8 +741,10 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_RMDIR:
         case SYS_CYK_RMDIR: {
-            // arg1 = path
-            int res = vfs_rmdir((const char*)arg1);
+            char absolute_path[128];
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
+                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+                ? vfs_rmdir(absolute_path) : -1;
             regs->eax = (unsigned int)res;
             break;
         }
@@ -865,7 +1052,10 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_GFX_FRAMEBUF: {
             cyk_display_driver_t* dpy = modload_get_display_driver();
-            if (dpy && dpy->get_framebuffer) {
+            if ((regs->cs & 3u) != 0) {
+                /* Never hand a kernel-mapped device address to user code. */
+                regs->eax = 0;
+            } else if (dpy && dpy->get_framebuffer) {
                 regs->eax = (unsigned int)dpy->get_framebuffer();
             } else {
                 regs->eax = 0;
@@ -877,6 +1067,8 @@ static void syscall_handler(registers_t* regs) {
             cyk_display_driver_t* dpy = modload_get_display_driver();
             if (dpy && dpy->get_info && arg1) {
                 regs->eax = (unsigned int)dpy->get_info((cyk_display_info_t*)arg1);
+                if ((regs->cs & 3u) != 0)
+                    ((cyk_display_info_t*)arg1)->framebuffer = (unsigned char*)0;
             } else {
                 regs->eax = (unsigned int)-1;
             }

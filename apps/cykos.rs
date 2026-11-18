@@ -3,6 +3,10 @@
 
 #![no_std]
 
+/* App-local runtime helpers keep compiler support code inside the user image. */
+#[path = "../src/user/syscall.rs"]
+mod app_runtime;
+
 // =========================================================================
 // CykOS System Call Numbers
 // =========================================================================
@@ -379,7 +383,7 @@ pub fn getcwd(buf: &mut [u8]) -> Result<usize, i32> {
 pub fn exit(code: i32) -> ! {
     unsafe {
         syscall::syscall1(SYS_EXIT, code as u32);
-        loop { core::arch::asm!("hlt"); }
+        loop { core::arch::asm!("pause", options(nomem, nostack)); }
     }
 }
 

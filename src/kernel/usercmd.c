@@ -5,6 +5,8 @@
 #include "syscall.h"
 #include "modload.h"
 #include "exports.h"
+#include "paging.h"
+#include "gdt.h"
 
 #define USERCMDS_FILE     "/ETC/USERCMDS.LST"
 #define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
@@ -14,15 +16,17 @@
 #define LEGACY_BIN_DIR    "/CYKOS/"
 #define USER_APP_BASE     0x180000  // RAM arena above the BIOS/VGA memory hole
 #define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
-#define USER_DYNAMIC_APP_MAX_SIZE 0xC0000 // Larger PIC apps are loaded from the kernel heap
+#define USER_DYNAMIC_APP_BASE 0x300000
+#define USER_DYNAMIC_APP_MAX_SIZE 0xC0000
 #define USER_SHELL_MAX_SIZE 0x30000 // Preserve the shell's reserved 192 KB region
 #define USER_SHELL_STACK_BASE 0x210000
 #define USER_SHELL_STACK_SIZE 0x20000
 #define USER_APP_STACK_BASE 0x250000
 #define USER_APP_STACK_SIZE 0x40000 // Doom and other foreground apps get a 256 KiB stack.
-#define USER_APP_HEAP_MAX_SIZE 0x800000 // Bound app-owned heap arena to 8 MiB
-#define USER_APP_HEAP_MIN_SIZE 0x10000
-#define USER_APP_HEAP_STEP 0x40000
+#define USER_APP_STACK_GUARD_SIZE 16
+#define USER_APP_STACK_GUARD_VALUE 0xC7A55AFEu
+#define USER_APP_HEAP_MAX_SIZE 0x1000000 // Bound app-owned heap arena to 16 MiB
+#define USER_APP_HEAP_BASE 0x800000
 #define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
 
@@ -112,7 +116,8 @@ static int resolve_elf_relocations(unsigned int load_bias,
                                    unsigned int rel_vaddr, unsigned int rel_size,
                                    unsigned int rel_entry_size,
                                    unsigned int sym_vaddr, unsigned int sym_count,
-                                   unsigned int str_vaddr, unsigned int str_size) {
+                                   unsigned int str_vaddr, unsigned int str_size,
+                                   int* has_kernel_import) {
     if (rel_size == 0) return 0;
     if (rel_entry_size != sizeof(elf32_rel_t) || rel_size % rel_entry_size != 0 ||
         !image_range(rel_vaddr, rel_size, min_vaddr, max_vaddr)) return -1;
@@ -146,7 +151,7 @@ static int resolve_elf_relocations(unsigned int load_bias,
             if (kernel_export_resolve(strings + symbol->name, &symbol_address) != 0) {
                 if ((symbol->info >> 4) == ELF_STB_WEAK) symbol_address = 0;
                 else return -1;
-            }
+            } else if (has_kernel_import) *has_kernel_import = 1;
         } else if (symbol->shndx == ELF_SHN_ABS) {
             symbol_address = symbol->value;
         } else {
@@ -162,7 +167,8 @@ static int resolve_elf_relocations(unsigned int load_bias,
 }
 
 static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
-                              unsigned char* load_area, unsigned int* entry_out) {
+                              unsigned char* load_area, unsigned int* entry_out,
+                              int* has_kernel_import) {
     const elf32_ehdr_t* eh = (const elf32_ehdr_t*)file;
     if (file_size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' ||
         eh->ident[2] != 'L' || eh->ident[3] != 'F' || eh->ident[4] != 1 ||
@@ -244,12 +250,13 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
         !image_range(sym_vaddr, symbol_count * sizeof(elf32_sym_t), min_vaddr, max_vaddr)) return -1;
     if (plt_rel_size && (plt_rel_type != ELF_DT_REL || !plt_rel_vaddr)) return -1;
 
+    if (has_kernel_import) *has_kernel_import = 0;
     if (resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, rel_vaddr, rel_size,
                                 rel_entry_size, sym_vaddr, symbol_count,
-                                str_vaddr, str_size) != 0 ||
+                                str_vaddr, str_size, has_kernel_import) != 0 ||
         resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, plt_rel_vaddr, plt_rel_size,
                                 sizeof(elf32_rel_t), sym_vaddr, symbol_count,
-                                str_vaddr, str_size) != 0) return -1;
+                                str_vaddr, str_size, has_kernel_import) != 0) return -1;
 
     if (!image_range(eh->entry, 1, min_vaddr, max_vaddr)) return -1;
     *entry_out = load_bias + eh->entry;
@@ -335,14 +342,33 @@ static unsigned char g_usercmd_abort_stack[16384] __attribute__((aligned(16), us
 static volatile unsigned int g_usercmd_abort_vector;
 static volatile unsigned int g_usercmd_abort_eip;
 static volatile unsigned int g_usercmd_abort_error;
+static volatile unsigned int g_usercmd_abort_cr2;
+static registers_t* volatile g_usercmd_abort_regs;
+static unsigned int g_usercmd_image_base;
+static unsigned int g_usercmd_image_size;
+static volatile unsigned int g_usercmd_user_entry;
+static volatile unsigned int g_usercmd_user_esp;
+static volatile unsigned int g_usercmd_user_exit_trampoline;
+static volatile int g_usercmd_user_mode_active;
+static volatile int g_usercmd_user_mapping_active;
+static void usercmd_prepare_stack_guard(void) {
+    volatile unsigned int* guard =
+        (volatile unsigned int*)(USER_APP_STACK_BASE - USER_APP_STACK_GUARD_SIZE);
+    for (unsigned int i = 0; i < USER_APP_STACK_GUARD_SIZE / sizeof(unsigned int); i++)
+        guard[i] = USER_APP_STACK_GUARD_VALUE ^ i;
+}
 
-/*
- * Applications and their syscalls currently execute at ring 0, so they need
- * a private stack even before full privilege separation exists. The fixed app
- * arena ends at 0x210000; the standalone shell uses 0x210000-0x230000,
- * followed by a 128 KiB gap. Foreground apps use 0x250000-0x290000 and the
- * kernel heap starts above that reserved stack.
- */
+static int usercmd_stack_guard_intact(void) {
+    volatile unsigned int* guard =
+        (volatile unsigned int*)(USER_APP_STACK_BASE - USER_APP_STACK_GUARD_SIZE);
+    for (unsigned int i = 0; i < USER_APP_STACK_GUARD_SIZE / sizeof(unsigned int); i++)
+        if (guard[i] != (USER_APP_STACK_GUARD_VALUE ^ i)) return 0;
+    return 1;
+}
+
+/* The standalone shell retains its kernel-mode stack. User apps receive a
+ * separate stack and a page-isolated image/heap; legacy flat images and ELF
+ * images with direct kernel imports still use the compatibility call path. */
 static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
                                      char** argv, void* stack,
                                      unsigned int stack_size) {
@@ -364,6 +390,93 @@ static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
         : "m"(stack_top)
         : "ecx", "edx", "memory", "cc"
     );
+    return result;
+}
+
+static int usercmd_copy_arguments_to_app_stack(int argc, char** argv,
+                                                unsigned int stack_base,
+                                                unsigned int stack_size,
+                                                int* argc_out, char*** argv_out,
+                                                unsigned int* stack_top_out) {
+    unsigned int addresses[17];
+    if (argc < 0 || argc > 16 || !argc_out || !argv_out || !stack_top_out)
+        return -1;
+    unsigned int cursor = (stack_base + stack_size) & ~15u;
+    for (int i = argc - 1; i >= 0; i--) {
+        if (!argv[i]) return -1;
+        unsigned int length = (unsigned int)strlen(argv[i]) + 1u;
+        if (length > cursor - stack_base) return -1;
+        cursor -= length;
+        memcpy((void*)cursor, argv[i], length);
+        addresses[i] = cursor;
+    }
+    cursor &= ~3u;
+    unsigned int vector_bytes = ((unsigned int)argc + 1u) * sizeof(unsigned int);
+    if (vector_bytes > cursor - stack_base) return -1;
+    cursor -= vector_bytes;
+    unsigned int* user_argv = (unsigned int*)cursor;
+    for (int i = 0; i < argc; i++) user_argv[i] = addresses[i];
+    user_argv[argc] = 0;
+    *argc_out = argc;
+    *argv_out = (char**)user_argv;
+    *stack_top_out = (cursor - 16u) & ~15u;
+    return *stack_top_out >= stack_base ? 0 : -1;
+}
+
+static unsigned int usercmd_build_user_return_frame(int argc, char** argv,
+                                                     unsigned int stack_top) {
+    static const unsigned char trampoline[] = {
+        0x89, 0xC3,                         /* mov ebx,eax */
+        0xB8, 0x01, 0x00, 0x00, 0x00,     /* mov eax,SYS_EXIT */
+        0xCD, 0x80,                         /* int 0x80 */
+        0x0F, 0x0B                          /* ud2 if exit unexpectedly returns */
+    };
+    unsigned int trampoline_address = USER_APP_STACK_BASE + 16u;
+    memcpy((void*)trampoline_address, trampoline, sizeof(trampoline));
+    /* Match the i386 C ABI: ESP is 12 mod 16 at function entry. */
+    unsigned int user_esp = stack_top - 20u;
+    unsigned int* frame = (unsigned int*)user_esp;
+    frame[0] = trampoline_address;
+    frame[1] = (unsigned int)argc;
+    frame[2] = (unsigned int)argv;
+    g_usercmd_user_exit_trampoline = trampoline_address;
+    return user_esp;
+}
+
+static __attribute__((naked, noreturn)) void usercmd_enter_user_mode(void) {
+    __asm__ volatile(
+        "movw $0x23, %ax\n\t"
+        "movw %ax, %ds\n\t"
+        "movw %ax, %es\n\t"
+        "movw %ax, %fs\n\t"
+        "movw %ax, %gs\n\t"
+        "pushl $0x23\n\t"
+        "pushl g_usercmd_user_esp\n\t"
+        "pushl $0x202\n\t"
+        "pushl $0x1B\n\t"
+        "pushl g_usercmd_user_entry\n\t"
+        "iret\n"
+    );
+}
+
+int usercmd_redirect_user_irq(registers_t* regs) {
+    if (!regs || !g_usercmd_user_mode_active || !g_usercmd_user_exit_trampoline)
+        return 0;
+    regs->eip = g_usercmd_user_exit_trampoline;
+    regs->eax = 130;
+    regs->eflags &= ~(1u << 9);
+    return 1;
+}
+
+static int usercmd_set_app_memory_access(int user) {
+    int result = 0;
+    if (g_usercmd_image_size && paging_set_user_range(
+            g_usercmd_image_base, g_usercmd_image_size, user) != 0) result = -1;
+    if (paging_set_user_range(USER_APP_STACK_BASE, USER_APP_STACK_SIZE, user) != 0)
+        result = -1;
+    if (g_user_process.heap_capacity && paging_set_user_range(
+            USER_APP_HEAP_BASE, g_user_process.heap_capacity, user) != 0)
+        result = -1;
     return result;
 }
 
@@ -480,16 +593,16 @@ int exec_user_command(const char* cmd_name, const char* args) {
     volatile int app_ret = 0;
     unsigned char* staged_image = (unsigned char*)0;
     void* dest = (void*)USER_APP_BASE;
-    int dest_heap_allocated = 0;
     unsigned int entry_address = USER_APP_BASE;
+    int use_user_mode = 0;
 
     // Cover command lookup and disk loading too. Ctrl+C abandons this function
     // through usercmd_return_label, so capture its stable frame before work.
     asm volatile(
         "pushfl\n"
         "cli\n"
-        /* SYS_EXIT may abandon the child stack and resume this exact frame. */
-        "movl %%esp, %%eax\n"
+        /* Account for pushfl: resume with ESP restored by the following popfl. */
+        "leal 4(%%esp), %%eax\n"
         "movl %%eax, %0\n"
         "movl %%ebp, %1\n"
         "movl $1, %2\n"
@@ -633,33 +746,29 @@ int exec_user_command(const char* cmd_name, const char* args) {
         unsigned short elf_type = app_entry.size >= sizeof(elf32_ehdr_t)
             ? ((const elf32_ehdr_t*)staged_image)->type : 0;
         if (elf_type == ELF_ET_DYN) {
-            dest = malloc(USER_DYNAMIC_APP_MAX_SIZE);
-            if (!dest) {
-                free(staged_image);
-                staged_image = (unsigned char*)0;
-                g_usercmd_active = 0;
-                print_color_string("CykShell: not enough memory for dynamic app: ", VGA_RED);
-                print_string(target_file);
-                print_string("\n");
-                return 1;
-            }
-            dest_heap_allocated = 1;
+            dest = (void*)USER_DYNAMIC_APP_BASE;
         }
+        int has_kernel_import = 0;
         int load_result = elf_type == ELF_ET_DYN
-            ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
+            ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest,
+                                 &entry_address, &has_kernel_import)
             : elf_type == ELF_ET_EXEC
                 ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
                 : -1;
         if (load_result != 0) {
             free(staged_image);
             staged_image = (unsigned char*)0;
-            if (dest_heap_allocated) free(dest);
             g_usercmd_active = 0;
             print_color_string("CykShell: invalid ELF app or unresolved kernel import: ", VGA_RED);
             print_string(target_file);
             print_string("\n");
             return 1;
         }
+        use_user_mode = elf_type == ELF_ET_EXEC ||
+                        (elf_type == ELF_ET_DYN && !has_kernel_import);
+        g_usercmd_image_base = (unsigned int)dest;
+        g_usercmd_image_size = elf_type == ELF_ET_DYN
+            ? USER_DYNAMIC_APP_MAX_SIZE : USER_APP_MAX_SIZE;
     } else {
         if (app_entry.size > USER_APP_MAX_SIZE) {
             free(staged_image);
@@ -672,6 +781,8 @@ int exec_user_command(const char* cmd_name, const char* args) {
         }
         memset(dest, 0, USER_APP_MAX_SIZE);
         memcpy(dest, staged_image, app_entry.size);
+        g_usercmd_image_base = USER_APP_BASE;
+        g_usercmd_image_size = USER_APP_MAX_SIZE;
     }
     free(staged_image);
     staged_image = (unsigned char*)0;
@@ -723,6 +834,16 @@ int exec_user_command(const char* cmd_name, const char* args) {
     }
     s_argv[argc] = (void*)0; // NULL termination
 
+    int app_argc = 0;
+    char** app_argv = (char**)0;
+    unsigned int app_stack_top = 0;
+    if (usercmd_copy_arguments_to_app_stack(argc, s_argv, USER_APP_STACK_BASE,
+            USER_APP_STACK_SIZE, &app_argc, &app_argv, &app_stack_top) != 0) {
+        g_usercmd_active = 0;
+        print_color_string("CykShell: application arguments exceed its stack.\n", VGA_RED);
+        return 1;
+    }
+
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
     void* app_stack = (void*)USER_APP_STACK_BASE;
@@ -731,21 +852,54 @@ int exec_user_command(const char* cmd_name, const char* args) {
     g_user_process.state = USER_PROCESS_RUNNING;
     g_user_process.exit_code = 0;
     g_user_process.stack = app_stack;
-    g_user_process.heap_arena = (void*)0;
-    g_user_process.heap_capacity = 0;
+    g_user_process.heap_arena = (void*)USER_APP_HEAP_BASE;
+    unsigned int available = heap_get_usable_memory_end() > USER_APP_HEAP_BASE
+        ? heap_get_usable_memory_end() - USER_APP_HEAP_BASE : 0;
+    available &= ~0xFFFu;
+    g_user_process.heap_capacity = available < USER_APP_HEAP_MAX_SIZE
+        ? available : USER_APP_HEAP_MAX_SIZE;
     g_user_process.heap_break = 0;
     g_usercmd_app_started = 1;
     heap_set_allocation_owner(g_user_process.pid);
 
+    if (use_user_mode && usercmd_set_app_memory_access(1) != 0) {
+        (void)usercmd_set_app_memory_access(0);
+        g_usercmd_app_started = 0;
+        g_usercmd_active = 0;
+        heap_set_allocation_owner(0);
+        print_color_string("CykShell: failed to prepare protected app memory.\n", VGA_RED);
+        return 1;
+    }
+
+    g_usercmd_user_mapping_active = use_user_mode;
+
     app_main_fn entry = (app_main_fn)entry_address;
-    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv, app_stack,
-                                        USER_APP_STACK_SIZE);
+    usercmd_prepare_stack_guard();
+    if (use_user_mode) {
+        g_usercmd_user_entry = entry_address;
+        g_usercmd_user_esp = usercmd_build_user_return_frame(
+            app_argc, app_argv, app_stack_top);
+        g_usercmd_user_mode_active = 1;
+        usercmd_enter_user_mode();
+    } else {
+        app_ret = usercmd_call_on_app_stack(entry, app_argc, app_argv, app_stack,
+                                            app_stack_top - USER_APP_STACK_BASE);
+    }
+    if (!usercmd_stack_guard_intact()) {
+        print_color_string("Application stack overflow detected; process stopped.\n", VGA_RED);
+        app_ret = -11;
+    }
     if (g_user_process.state == USER_PROCESS_RUNNING) {
         g_user_process.exit_code = app_ret;
         g_user_process.state = USER_PROCESS_EXITED;
     }
 
     asm volatile("usercmd_return_label:\n");
+    if (g_usercmd_user_mapping_active) {
+        (void)usercmd_set_app_memory_access(0);
+        g_usercmd_user_mapping_active = 0;
+    }
+    g_usercmd_user_mode_active = 0;
     g_usercmd_active = 0;
     g_usercmd_app_started = 0;
     heap_set_allocation_owner(0);
@@ -755,7 +909,6 @@ int exec_user_command(const char* cmd_name, const char* args) {
     g_user_process.heap_arena = (void*)0;
     g_user_process.heap_capacity = 0;
     g_user_process.heap_break = 0;
-    if (dest_heap_allocated) free(dest);
     if (staged_image) {
         free(staged_image);
         staged_image = (unsigned char*)0;
@@ -772,6 +925,7 @@ void usercmd_terminate(int exit_code) {
     if (!g_usercmd_active || !g_usercmd_app_started) return;
     g_usercmd_active = 0;
     g_usercmd_app_started = 0;
+    g_usercmd_user_mode_active = 0;
     g_user_process.exit_code = exit_code;
     g_user_process.state = USER_PROCESS_EXITED;
 
@@ -799,6 +953,7 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_irq_impl(void) {
         for (;;) asm volatile("hlt");
     }
     g_usercmd_active = 0;
+    g_usercmd_user_mode_active = 0;
     if (g_usercmd_app_started) {
         g_user_process.exit_code = 130;
         g_user_process.state = USER_PROCESS_EXITED;
@@ -849,6 +1004,7 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(vo
         for (;;) asm volatile("cli; hlt");
     }
     g_usercmd_active = 0;
+    g_usercmd_user_mode_active = 0;
     if (g_usercmd_app_started) {
         g_user_process.exit_code = 128 + (int)vector;
         g_user_process.state = USER_PROCESS_EXITED;
@@ -863,6 +1019,33 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(vo
     usercmd_print_hex(eip);
     print_string(", error ");
     usercmd_print_hex(error_code);
+    if (vector == 14) {
+        print_string(", CR2 ");
+        usercmd_print_hex(g_usercmd_abort_cr2);
+        if (g_usercmd_abort_regs) {
+            print_string(", EAX "); usercmd_print_hex(g_usercmd_abort_regs->eax);
+            print_string(", EBX "); usercmd_print_hex(g_usercmd_abort_regs->ebx);
+            print_string(", ECX "); usercmd_print_hex(g_usercmd_abort_regs->ecx);
+            print_string(", EDX "); usercmd_print_hex(g_usercmd_abort_regs->edx);
+            print_string(", ESI "); usercmd_print_hex(g_usercmd_abort_regs->esi);
+            print_string(", EDI "); usercmd_print_hex(g_usercmd_abort_regs->edi);
+            print_string(", EBP "); usercmd_print_hex(g_usercmd_abort_regs->ebp);
+            print_string(", ESP ");
+            usercmd_print_hex((g_usercmd_abort_regs->cs & 3u)
+                ? g_usercmd_abort_regs->useresp : g_usercmd_abort_regs->esp_dummy);
+            if ((g_usercmd_abort_regs->cs & 3u) != 0 &&
+                paging_user_range_valid(g_usercmd_abort_regs->useresp,
+                                        8u * sizeof(unsigned int))) {
+                volatile const unsigned int* stack =
+                    (volatile const unsigned int*)g_usercmd_abort_regs->useresp;
+                print_string(", STACK");
+                for (unsigned int i = 0; i < 8; i++) {
+                    print_char(' ');
+                    usercmd_print_hex(stack[i]);
+                }
+            }
+        }
+    }
     print_string("; returned to shell.\n");
     asm volatile(
         "movl %0, %%esp\n"
@@ -876,11 +1059,10 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(vo
     __builtin_unreachable();
 }
 
-/* CPU exceptions also arrive on the application's stack while apps run at
- * ring 0. Preserve the exception details, then handle and report the fault
- * on the same safe kernel-owned abort stack used by Ctrl+C. */
+/* Preserve exception details before moving to the kernel-owned abort stack.
+ * From CPL3, the CPU first switches to the TSS interrupt stack. */
 __attribute__((naked, noreturn)) void usercmd_abort_from_exception(
-    unsigned int, unsigned int, unsigned int) {
+    unsigned int, unsigned int, unsigned int, registers_t*) {
     __asm__ volatile(
         "movl 4(%esp), %eax\n"
         "movl %eax, g_usercmd_abort_vector\n"
@@ -888,6 +1070,10 @@ __attribute__((naked, noreturn)) void usercmd_abort_from_exception(
         "movl %eax, g_usercmd_abort_eip\n"
         "movl 12(%esp), %eax\n"
         "movl %eax, g_usercmd_abort_error\n"
+        "movl %cr2, %eax\n"
+        "movl %eax, g_usercmd_abort_cr2\n"
+        "movl 16(%esp), %eax\n"
+        "movl %eax, g_usercmd_abort_regs\n"
         "movl $g_usercmd_abort_stack+16384, %esp\n"
         "andl $-16, %esp\n"
         "call usercmd_abort_from_exception_impl\n"
@@ -911,20 +1097,15 @@ static int usercmd_ensure_app_heap(unsigned int minimum_capacity) {
     if (g_user_process.heap_arena) {
         return minimum_capacity <= g_user_process.heap_capacity ? 0 : -1;
     }
-
-    unsigned int capacity = USER_APP_HEAP_MAX_SIZE;
-    while (capacity >= minimum_capacity && capacity >= USER_APP_HEAP_MIN_SIZE) {
-        void* arena = malloc(capacity);
-        if (arena) {
-            g_user_process.heap_arena = arena;
-            g_user_process.heap_capacity = capacity;
-            g_user_process.heap_break = 0;
-            return 0;
-        }
-        if (capacity < USER_APP_HEAP_MIN_SIZE + USER_APP_HEAP_STEP) break;
-        capacity -= USER_APP_HEAP_STEP;
-    }
-    return -1;
+    unsigned int available = heap_get_usable_memory_end() > USER_APP_HEAP_BASE
+        ? heap_get_usable_memory_end() - USER_APP_HEAP_BASE : 0;
+    available &= ~0xFFFu;
+    if (available > USER_APP_HEAP_MAX_SIZE) available = USER_APP_HEAP_MAX_SIZE;
+    if (minimum_capacity > available) return -1;
+    g_user_process.heap_arena = (void*)USER_APP_HEAP_BASE;
+    g_user_process.heap_capacity = available;
+    g_user_process.heap_break = 0;
+    return 0;
 }
 
 void* usercmd_app_sbrk(int increment) {
@@ -933,6 +1114,7 @@ void* usercmd_app_sbrk(int increment) {
     if (usercmd_ensure_app_heap(minimum) != 0) return (void*)-1;
 
     unsigned int previous = g_user_process.heap_break;
+    if (previous > g_user_process.heap_capacity) return (void*)-1;
     if (increment > 0) {
         if ((unsigned int)increment > g_user_process.heap_capacity - previous)
             return (void*)-1;

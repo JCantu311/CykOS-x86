@@ -91,6 +91,4 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> i32 {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop { unsafe { core::arch::asm!("hlt"); } }
-}
+fn panic(_info: &PanicInfo) -> ! { exit(101) }

@@ -1,6 +1,8 @@
 #ifndef USERCMD_H
 #define USERCMD_H
 
+#include "idt.h"
+
 /**
  * Searches /ETC/USERCMDS.LST for a command alias mapping.
  * Format of USERCMDS.LST:  one line per alias = "<alias> <binary_filename>"
@@ -30,9 +32,11 @@ void usercmd_terminate(int exit_code);
 __attribute__((noreturn)) void usercmd_abort_from_irq(void);
 __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
                                                              unsigned int eip,
-                                                             unsigned int error_code);
+                                                             unsigned int error_code,
+                                                             registers_t* regs);
 int usercmd_is_running(void);
 int usercmd_is_app_started(void);
+int usercmd_redirect_user_irq(registers_t* regs);
 unsigned int usercmd_current_pid(void);
 void* usercmd_app_sbrk(int increment);
 unsigned int usercmd_app_brk(unsigned int requested);

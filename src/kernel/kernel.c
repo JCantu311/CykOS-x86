@@ -8,6 +8,8 @@
 #include "heap.h"
 #include "usercmd.h"
 #include "permissions.h"
+#include "paging.h"
+#include "gdt.h"
 
 // Level 3 CykShell Entry Point (implemented in shell.rs)
 extern void shell_main(void);
@@ -71,18 +73,25 @@ static void run_memory_test(void) {
 }
 
 void kernel_main(void) {
+    gdt_init();
+    run_memory_test();
+    heap_init();
+    /* Paging starts with an identity map, preserving the boot-time addresses. */
+    if (paging_init() != 0) {
+        print_color_string("[MEM] Paging structures unavailable; stopping before app startup.\n",
+                           VGA_RED);
+        for (;;) asm volatile("cli; hlt");
+    }
     clear_screen();
     enable_hardware_cursor();
 
     // 1. Initialize CPU Interrupt Descriptor Table (Catches exceptions, prevents Triple Faults)
     idt_init();
 
-    char msg_init[] = "CykOS Kernel Init (IDT + Heap + Syscalls [OK])\n";
+    char msg_init[] = "CykOS Kernel Init (GDT + Paging + IDT + Syscalls [OK])\n";
     char msg_pass[] = "PASS\n";
     char msg_fail[] = "FAIL\n";
 
-    run_memory_test();
-    heap_init();
     syscall_init();
 
     print_string(msg_init);

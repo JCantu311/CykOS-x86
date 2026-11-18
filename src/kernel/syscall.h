@@ -50,6 +50,12 @@
 #define SYS_GFX_PALETTE   199 // arg1 = packed first/count, arg2 = RGB8 triples
 #define SYS_TRY_KEY_EVENT 200 // Non-blocking keydown/keyup event for interactive apps
 #define SYS_GET_TICKS_MS  201 // Monotonic milliseconds from the PIT clock
+#define SYS_PRINT_CHAR    202 // Write one character to stdout
+#define SYS_PRINT_STRING  203 // Write a NUL-terminated string to stdout (max 4 KiB)
+#define SYS_CLEAR_SCREEN  204 // Clear the text console
+#define SYS_VFS_READ_FILE 205 // Read a file by path into an application buffer
+#define SYS_VFS_WRITE_FILE 206 // Write a file by path from an application buffer
+#define SYS_TEXT_WRITE_CELL 207 // Write one text cell at (col,row), packed args
 #define SYS_CHMOD         15
 #define SYS_CHOWN         182
 #define SYS_ACCESS        33

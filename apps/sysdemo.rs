@@ -2,6 +2,8 @@
 #![no_main]
 
 use core::panic::PanicInfo;
+#[path = "../src/user/syscall.rs"]
+mod syscall_runtime;
 
 #[no_mangle]
 #[link_section = ".entry"]
@@ -189,7 +191,8 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe { core::arch::asm!("hlt"); }
+    unsafe {
+        core::arch::asm!("int 0x80", in("eax") 1u32, in("ebx") 101u32, options(nostack));
+        loop { core::arch::asm!("pause", options(nomem, nostack)); }
     }
 }

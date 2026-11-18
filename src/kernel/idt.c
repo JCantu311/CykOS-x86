@@ -54,8 +54,12 @@ static void keyboard_irq_handler(registers_t* regs) {
 
     if (g_irq_ctrl_down && scancode == 0x2E && usercmd_is_running()) {
         keyboard_queue_clear();
-        regs->eflags &= ~(1u << 9);
-        regs->eip = (unsigned int)usercmd_abort_from_irq;
+        if ((regs->cs & 3u) != 0 && usercmd_redirect_user_irq(regs)) {
+            /* Return to a user-mapped exit trampoline, then terminate by syscall. */
+        } else {
+            regs->eflags &= ~(1u << 9);
+            regs->eip = (unsigned int)usercmd_abort_from_irq;
+        }
     } else {
         keyboard_queue_push(scancode);
     }
@@ -146,8 +150,9 @@ void fault_handler(registers_t* regs) {
 
     // Recover from faults in a loaded app instead of disabling all interrupts
     // and trapping the machine on the kernel panic screen.
-    if (usercmd_is_running()) {
-        usercmd_abort_from_exception(regs->int_no, regs->eip, regs->err_code);
+    if (usercmd_is_app_started()) {
+        usercmd_abort_from_exception(regs->int_no, regs->eip, regs->err_code,
+                                     regs);
     }
 
     // Unhandled CPU Exception: Display Blue Screen / Crash Dump
@@ -285,8 +290,8 @@ __asm__(
     "    pushl %esp\n"        // Pass pointer to registers_t as argument
     "    call fault_handler\n"
     "    addl $4, %esp\n"
-    "    movl 32(%esp), %eax\n" // Load updated eax from registers_t.eax (offset 32 from esp)
-    "    movl %eax, 28(%esp)\n" // Store into pusha eax slot (offset 28 from esp: 4 for popped eax + 7 regs)
+    "    movl 32(%esp), %eax\n" // Load updated eax from registers_t.eax.
+    "    movl %eax, 32(%esp)\n" // Update the saved PUSHA EAX slot; offset 28 is saved ECX.
     "    popl %eax\n"
     "    movw %ax, %ds\n"
     "    movw %ax, %es\n"

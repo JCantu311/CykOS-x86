@@ -29,6 +29,7 @@ typedef struct heap_block {
 
 static unsigned int g_heap_break = HEAP_START_ADDR;
 static unsigned int g_heap_max_addr = HEAP_FALLBACK_MAX_ADDR;
+static unsigned int g_usable_memory_end = 0x01000000u;
 static heap_block_t* g_head = (void*)0;
 static unsigned int g_heap_allocation_owner;
 static int g_heap_corrupt;
@@ -114,14 +115,15 @@ void heap_free_allocations_by_owner(unsigned int owner) {
     }
 }
 
-static unsigned int detect_heap_max_addr(void) {
+static unsigned int detect_contiguous_usable_end(unsigned int limit,
+                                                 unsigned int fallback) {
     volatile unsigned int* count_ptr = (volatile unsigned int*)E820_COUNT_ADDRESS;
     heap_e820_entry_t* entries = (heap_e820_entry_t*)E820_MAP_ADDRESS;
     unsigned int count = *count_ptr;
     unsigned int covered = HEAP_START_ADDR;
 
     if (count > E820_ENTRY_LIMIT) count = E820_ENTRY_LIMIT;
-    if (count == 0) return HEAP_FALLBACK_MAX_ADDR;
+    if (count == 0) return fallback;
 
     // Extend only across contiguous usable ranges. This avoids allocating
     // through an E820 reserved hole when firmware splits the memory map.
@@ -135,21 +137,25 @@ static unsigned int detect_heap_max_addr(void) {
             unsigned int start = entry->base_low;
             unsigned int end;
             if (entry->length_high != 0 || entry->length_low > 0xFFFFFFFFu - start)
-                end = HEAP_MAX_ADDR;
+                end = limit;
             else
                 end = start + entry->length_low;
 
-            if (end > HEAP_MAX_ADDR) end = HEAP_MAX_ADDR;
+            if (end > limit) end = limit;
             if (start <= covered && end > covered) covered = end;
         }
-        if (covered == previous || covered >= HEAP_MAX_ADDR) break;
+        if (covered == previous || covered >= limit) break;
     }
 
-    return covered > HEAP_START_ADDR ? covered : HEAP_FALLBACK_MAX_ADDR;
+    return covered > HEAP_START_ADDR ? covered : fallback;
 }
 
 unsigned int heap_get_max_addr(void) {
     return g_heap_max_addr;
+}
+
+unsigned int heap_get_usable_memory_end(void) {
+    return g_usable_memory_end;
 }
 
 void heap_init(void) {
@@ -159,7 +165,10 @@ void heap_init(void) {
         g_heap_corrupt = 1;
         return;
     }
-    g_heap_max_addr = detect_heap_max_addr();
+    g_usable_memory_end = detect_contiguous_usable_end(0x02000000u, 0x01000000u);
+    g_heap_max_addr = detect_contiguous_usable_end(HEAP_MAX_ADDR,
+                                                    HEAP_FALLBACK_MAX_ADDR);
+    if (g_heap_max_addr > HEAP_MAX_ADDR) g_heap_max_addr = HEAP_MAX_ADDR;
     if (g_heap_max_addr < HEAP_START_ADDR + 65536)
         g_heap_max_addr = HEAP_FALLBACK_MAX_ADDR;
     g_heap_break = HEAP_START_ADDR;

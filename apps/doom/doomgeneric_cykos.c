@@ -10,12 +10,12 @@
 
 #define SYS_MSLEEP       186
 #define SYS_GFX_MODE     187
-#define SYS_GFX_FRAMEBUF 191
+#define SYS_GFX_BITMAP   197
 #define SYS_TRY_KEY_EVENT 200
+#define SYS_GET_TICKS_MS 201
 #define SYS_GFX_PALETTE  199
 #define GFX_MODE_320X200   2
 
-static uint32_t elapsed_ms;
 static int palette_needs_upload = 1;
 static int input_debug_enabled;
 static unsigned int input_debug_events;
@@ -54,6 +54,18 @@ static inline uint32_t cykos_syscall2(uint32_t number, uint32_t a, uint32_t b)
     return eax;
 }
 
+static inline uint32_t cykos_syscall3(uint32_t number, uint32_t a, uint32_t b,
+                                     uint32_t c)
+{
+    register uint32_t eax __asm__("eax") = number;
+    register uint32_t ebx __asm__("ebx") = a;
+    register uint32_t ecx __asm__("ecx") = b;
+    register uint32_t edx __asm__("edx") = c;
+    __asm__ volatile("int $0x80" : "+a"(eax) : "b"(ebx), "c"(ecx), "d"(edx)
+                     : "memory", "cc");
+    return eax;
+}
+
 static void cykos_upload_doom_palette(void)
 {
     unsigned char rgb[256 * 3];
@@ -86,24 +98,30 @@ void DG_DrawFrame(void)
     if (palette_needs_upload || palette_changed)
         cykos_upload_doom_palette();
 
-    volatile unsigned char *vram =
-        (volatile unsigned char *)cykos_syscall0(SYS_GFX_FRAMEBUF);
-    const unsigned char *src = (const unsigned char *)DG_ScreenBuffer;
-    if (vram == NULL) return;
-    for (unsigned int i = 0; i < DOOMGENERIC_RESX * DOOMGENERIC_RESY; ++i)
-        vram[i] = src[i];
+    /* Keep the VGA address in the kernel. The bitmap syscall validates and
+       copies this bounded app buffer through the display driver. */
+    struct cyk_bitmap {
+        uint32_t width;
+        uint32_t height;
+        uint32_t stride;
+        uint32_t format;
+        const unsigned char *pixels;
+    } frame = {
+        DOOMGENERIC_RESX, DOOMGENERIC_RESY, DOOMGENERIC_RESX, 1,
+        (const unsigned char *)DG_ScreenBuffer
+    };
+    (void)cykos_syscall3(SYS_GFX_BITMAP, 0, (uint32_t)&frame, 0);
 }
 
 void DG_SleepMs(uint32_t ms)
 {
     if (ms == 0) return;
     (void)cykos_syscall1(SYS_MSLEEP, ms);
-    elapsed_ms += ms;
 }
 
 uint32_t DG_GetTicksMs(void)
 {
-    return elapsed_ms;
+    return cykos_syscall0(SYS_GET_TICKS_MS);
 }
 
 static unsigned char cykos_scancode_to_doom(unsigned int scan)
@@ -239,9 +257,25 @@ int main(int argc, char **argv)
     printf("[DOOM] Starting DoomGeneric initialization.\n");
     doomgeneric_Create(game_argc, game_argv);
     printf("[DOOM] Initialization complete; entering game loop.\n");
+    uint32_t deadline = DG_GetTicksMs();
+    uint32_t frame_remainder = 0;
     for (;;) {
         doomgeneric_Tick();
-        DG_SleepMs(1);
+        deadline += 1000u / 35u;
+        frame_remainder += 1000u % 35u;
+        if (frame_remainder >= 35u) {
+            deadline++;
+            frame_remainder -= 35u;
+        }
+        uint32_t now = DG_GetTicksMs();
+        int32_t remaining = (int32_t)(deadline - now);
+        if (remaining > 0) {
+            DG_SleepMs((uint32_t)remaining);
+        } else {
+            /* Drop late frames instead of running a catch-up burst. */
+            deadline = now;
+            frame_remainder = 0;
+        }
     }
     return 0;
 }

@@ -2,12 +2,9 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-
-extern "C" {
-    fn print_string(s: *const u8);
-    fn print_char(c: u8);
-    fn vfs_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
-}
+#[path = "../src/user/syscall.rs"]
+mod syscall;
+use syscall::{print_char, print_string, vfs_read_file_by_name};
 
 static mut FILE_BUF: [u8; 65536] = [0; 65536];
 
@@ -89,7 +86,5 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe { core::arch::asm!("hlt"); }
-    }
+    unsafe { syscall::exit(101) }
 }

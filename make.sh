@@ -94,7 +94,7 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -174,7 +174,7 @@ if command -v rustc &> /dev/null; then
         mode=$(app_link_mode "$app_upper" static) || return 1
         if [ "$mode" = "static" ]; then
             $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker -s \
-                -u main bin/kernel_syms.ld "$input" -o "$output"
+                -u main "$input" -o "$output"
         else
             $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \
                 -e main -s "$input" -o "$output"
@@ -315,8 +315,8 @@ if [ -d apps ]; then
             $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \
                 -e _start -u _start "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
         else
-            $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
-                bin/kernel_syms.ld "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+            $LD -m elf_i386 -T src/user/static_elf.ld -e _start --gc-sections -u _start \
+                "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
         fi
         echo "  -> $app_upper link mode: $app_mode"
         rm -f "bin/${app_name}.o"
@@ -339,8 +339,8 @@ if [ -d third_party/lua ] && [ -f ports/lua/main.c ]; then
     done
     "$CC" $LUA_CFLAGS -c ports/lua/cykos_compat.c -o bin/lua_objs/cykos_compat.o
     "$CC" $LUA_CFLAGS -c ports/lua/main.c -o bin/lua_objs/main.o
-    $LD -m elf_i386 -T src/user/user.ld --gc-sections -u _start \
-        bin/kernel_syms.ld bin/lua_objs/*.o bin/libc.a -o bin/LUA.BIN
+    $LD -m elf_i386 -T src/user/static_elf.ld -e _start --gc-sections -u _start \
+        bin/lua_objs/*.o bin/libc.a -o bin/LUA.BIN
     lua_size=$(wc -c < bin/LUA.BIN)
     echo "  -> Created: bin/LUA.BIN ($lua_size bytes)"
     if [ "$lua_size" -gt 524288 ]; then

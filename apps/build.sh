@@ -72,7 +72,7 @@ build_rust_app() {
 
     if [ "$mode" = "static" ]; then
         $LD -m elf_i386 -T src/user/static_elf.ld --gc-sections --no-dynamic-linker -s \
-            -u main bin/kernel_syms.ld "apps/bin/${name}.o" -o "$out_bin"
+            -u main "apps/bin/${name}.o" -o "$out_bin"
     else
         $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e main -s \
             "apps/bin/${name}.o" -o "$out_bin"

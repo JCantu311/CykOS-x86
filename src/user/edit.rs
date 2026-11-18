@@ -5,24 +5,16 @@
 #![allow(unused_variables)]
 
 use core::panic::PanicInfo;
-
-// =========================================================================
-// Kernel C ABI Imports
-// =========================================================================
-extern "C" {
-    fn clear_screen();
-    fn print_char(c: u8);
-    fn print_string(s: *const u8);
-    fn get_char() -> u8;
-    fn has_key() -> i32;
-    fn fat16_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
-    fn fat16_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
-}
+#[path = "syscall.rs"]
+mod syscall;
+use syscall::{clear_screen, get_char,
+              set_cursor as syscall_set_cursor,
+              write_text_cell, exit,
+              fat16_read_file_by_name, fat16_write_file};
 
 // =========================================================================
 // Configuration & Constants
 // =========================================================================
-const VGA_MEM: *mut u8 = 0xB8000 as *mut u8;
 const SCREEN_COLS: usize = 80;
 const TEXT_ROWS: usize = 24; // Rows 0..23 for text editing; Row 24 for status & commands
 const MAX_LINES: usize = 256;
@@ -148,23 +140,13 @@ pub extern "C" fn user_edit(argc: isize, argv: *const *const u8) -> i32 {
 // =========================================================================
 #[inline(always)]
 fn set_cursor(col: usize, row: usize) {
-    let pos = (row * SCREEN_COLS + col) as u16;
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Eu8, options(nomem, nostack));
-        core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") ((pos >> 8) & 0xFF) as u8, options(nomem, nostack));
-        core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Fu8, options(nomem, nostack));
-        core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") (pos & 0xFF) as u8, options(nomem, nostack));
-    }
+    let _ = unsafe { syscall_set_cursor(col as u32, row as u32) };
 }
 
 #[inline(always)]
 fn vga_write_cell(col: usize, row: usize, ch: u8, attr: u8) {
     if col < SCREEN_COLS && row < 25 {
-        let offset = (row * SCREEN_COLS + col) * 2;
-        unsafe {
-            *VGA_MEM.add(offset) = ch;
-            *VGA_MEM.add(offset + 1) = attr;
-        }
+        let _ = unsafe { write_text_cell(col as u32, row as u32, ch, attr) };
     }
 }
 
@@ -670,9 +652,5 @@ fn run_editor() -> i32 {
 // Panic Handler for freestanding environment
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe {
-            core::arch::asm!("hlt");
-        }
-    }
+    unsafe { exit(101) }
 }
