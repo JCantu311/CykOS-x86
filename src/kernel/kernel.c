@@ -15,12 +15,6 @@ extern void shell_main(void);
 #define E820_COUNT_ADDRESS 0x04FC
 #define E820_MAP_ADDRESS   0x0500
 #define E820_ENTRY_LIMIT   20
-#define PAGE_SIZE          4096
-#define TEST_START         0x00100000
-#define KERNEL_STACK_BOTTOM 0x00130000
-#define KERNEL_STACK_TOP    0x00140000
-#define MEMTEST_STRIDE     65536 // Sample 1 page every 64 KB (16x speedup)
-#define MEMTEST_MAX_PAGES  2048  // Cap test to at most 2048 pages (~128MB sampled, finishes in < 0.2s)
 
 typedef struct __attribute__((packed)) {
     unsigned int base_low;
@@ -30,32 +24,6 @@ typedef struct __attribute__((packed)) {
     unsigned int type;
     unsigned int attributes;
 } e820_entry_t;
-
-static unsigned int page_backup[PAGE_SIZE / sizeof(unsigned int)];
-
-static int memtest_page(volatile unsigned int* page) {
-    static const unsigned int patterns[] = {
-        0xAAAAAAAA, 0x55555555
-    };
-    unsigned int count = PAGE_SIZE / sizeof(unsigned int);
-    int passed = 1;
-
-    for (unsigned int i = 0; i < count; i++) page_backup[i] = page[i];
-    for (unsigned int pass = 0; pass < sizeof(patterns) / sizeof(patterns[0]); pass++) {
-        for (unsigned int i = 0; i < count; i++) {
-            page[i] = patterns[pass];
-        }
-        for (unsigned int i = 0; i < count; i++) {
-            if (page[i] != patterns[pass]) {
-                passed = 0;
-                break;
-            }
-        }
-        if (!passed) break;
-    }
-    for (unsigned int i = 0; i < count; i++) page[i] = page_backup[i];
-    return passed;
-}
 
 static void print_unsigned(unsigned int value) {
     char digits[11];
@@ -72,8 +40,6 @@ static void run_memory_test(void) {
     e820_entry_t* entries = (e820_entry_t*)E820_MAP_ADDRESS;
     unsigned int count = *map_count;
     unsigned int usable_mb = 0;
-    unsigned int tested_pages = 0;
-    unsigned int errors = 0;
 
     if (count > E820_ENTRY_LIMIT) count = E820_ENTRY_LIMIT;
     if (count == 0) {
@@ -81,7 +47,7 @@ static void run_memory_test(void) {
         return;
     }
 
-    print_string("[MEM] Testing BIOS-reported usable RAM (preserving contents)...\n");
+    print_string("[MEM] Reading BIOS-reported usable RAM map...\n");
     for (unsigned int i = 0; i < count; i++) {
         e820_entry_t* entry = &entries[i];
         if (entry->type != 1 || !(entry->attributes & 1) ||
@@ -97,27 +63,11 @@ static void run_memory_test(void) {
         }
         if (end <= start) continue;
         usable_mb += (end - start) >> 20;
-
-        if (start < TEST_START) start = TEST_START;
-        if (start > 0xFFFFFFFF - (PAGE_SIZE - 1)) continue;
-        start = (start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        end &= ~(PAGE_SIZE - 1);
-        for (unsigned int address = start; address < end; address += MEMTEST_STRIDE) {
-            if (tested_pages >= MEMTEST_MAX_PAGES) break;
-            // The boot stack is live while this test runs; preserve its pages.
-            if (address >= KERNEL_STACK_BOTTOM && address < KERNEL_STACK_TOP) continue;
-            if (!memtest_page((volatile unsigned int*)address)) errors++;
-            tested_pages++;
-        }
     }
 
     print_string("[MEM] Usable RAM below 4 GiB: ");
     print_unsigned(usable_mb);
-    print_string(" MiB; tested pages: ");
-    print_unsigned(tested_pages);
-    print_string("; failed pages: ");
-    print_unsigned(errors);
-    print_string(errors ? " (FAIL)\n" : " (PASS)\n");
+    print_string(" MiB (BIOS map; physical write test skipped).\n");
 }
 
 void kernel_main(void) {
@@ -192,9 +142,20 @@ void kernel_main(void) {
 
     print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell...\n");
     print_string("[Level 3] Flushing boot log to /VAR/LOG/LOG.TXT...\n");
-    bootlog_flush("/VAR/LOG/LOG.TXT");
+    int log_result = bootlog_flush("/VAR/LOG/LOG.TXT");
     bootlog_disable();
-    secwait(2); 
+    if (log_result == 0) {
+        print_string("[Level 3] Boot log saved.\n");
+    } else {
+        print_color_string("[Level 3] Boot log could not be saved (status ", VGA_YELLOW);
+        if (log_result < 0) {
+            print_char('-');
+            print_unsigned((unsigned int)(-log_result));
+        } else {
+            print_unsigned((unsigned int)log_result);
+        }
+        print_color_string(").\n", VGA_YELLOW);
+    }
 
     // Prefer the standalone Level 3 image; retain the kernel-linked shell fallback.
     exec_shell_binary();

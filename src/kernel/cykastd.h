@@ -69,7 +69,7 @@ void* calloc(size_t num, size_t size);
 // Boot Logging System
 void bootlog_append_char(char c);
 void bootlog_append_string(const char* str);
-void bootlog_flush(const char* filepath);
+int bootlog_flush(const char* filepath);
 void bootlog_disable(void);
 
 // POSIX-standard keyboard driver interface.

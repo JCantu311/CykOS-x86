@@ -335,7 +335,9 @@ if __name__ == "__main__":
     sample_files = {
         "KERNEL.BIN": kernel_bytes,
         "USR/SHARE/DOC/README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
-        "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n/BOOT/DRIVERS/CYSOUND.DRV\n/BOOT/DRIVERS/CYHDA.DRV\n/BOOT/DRIVERS/CYDISPLAY.DRV\n",
+        "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n/BOOT/DRIVERS/CYSOUND.DRV\n/BOOT/DRIVERS/CYHDA.DRV\n/BOOT/DRIVERS/CYDISPLA.DRV\n",
+        # Create the log entry at format time; boot then overwrites this file.
+        "VAR/LOG/LOG.TXT": "",
     }
 
     lua_smoke_path = os.path.join("ports", "lua", "tests", "smoke.lua")

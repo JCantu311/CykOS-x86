@@ -491,6 +491,11 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_GET_TICKS_MS: {
+            regs->eax = idt_get_millis();
+            break;
+        }
+
         case SYS_SLEEP: {
             asm volatile("sti" ::: "memory");
             secwait(arg1);

@@ -182,7 +182,10 @@ wad_file_t *W_AddFile (char *filename)
     else 
     {
     	// WAD file
-        W_Read(wad_file, 0, &header, sizeof(header));
+		if (W_Read(wad_file, 0, &header, sizeof(header)) != sizeof(header))
+		{
+		    I_Error("Wad file %s: failed to read header", filename);
+		}
 
 		if (strncmp(header.identification,"IWAD",4))
 		{
@@ -198,10 +201,22 @@ wad_file_t *W_AddFile (char *filename)
 
 		header.numlumps = LONG(header.numlumps);
 		header.infotableofs = LONG(header.infotableofs);
+		if (header.numlumps <= 0 || header.infotableofs < 0 ||
+		    (unsigned int)header.numlumps > (unsigned int)wad_file->length / sizeof(filelump_t) ||
+		    (unsigned int)header.infotableofs > (unsigned int)wad_file->length ||
+		    (unsigned int)header.numlumps >
+		        ((unsigned int)wad_file->length - (unsigned int)header.infotableofs) / sizeof(filelump_t))
+		{
+		    I_Error("Wad file %s: invalid lump directory", filename);
+		}
 		length = header.numlumps*sizeof(filelump_t);
 		fileinfo = Z_Malloc(length, PU_STATIC, 0);
 
-        W_Read(wad_file, header.infotableofs, fileinfo, length);
+		if (W_Read(wad_file, header.infotableofs, fileinfo, length) != (size_t)length)
+		{
+		    Z_Free(fileinfo);
+		    I_Error("Wad file %s: failed to read lump directory", filename);
+		}
         newnumlumps += header.numlumps;
     }
 
@@ -275,23 +290,19 @@ int W_CheckNumForName (char* name)
                 return lump_p - lumpinfo;
             }
         }
-    } 
-    else
-    {
-        // We don't have a hash table generate yet. Linear search :-(
-        // 
-        // scan backwards so patch lump files take precedence
+    }
 
-        for (i=numlumps-1; i >= 0; --i)
+    // Keep lookups correct if a damaged or incomplete hash chain misses an
+    // entry. Search backwards to preserve WAD patch precedence.
+    for (i=(int)numlumps-1; i >= 0; --i)
+    {
+        if (!strncasecmp(lumpinfo[i].name, name, 8))
         {
-            if (!strncasecmp(lumpinfo[i].name, name, 8))
-            {
-                return i;
-            }
+            return i;
         }
     }
 
-    // TFB. Not found.
+    // Not found.
 
     return -1;
 }

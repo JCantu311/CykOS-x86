@@ -184,6 +184,11 @@ int ata_write_sectors(unsigned int lba, unsigned char count, const unsigned shor
         }
     }
 
+    // The device remains busy while it commits the PIO data. Do not issue
+    // another command until that transfer has completed (VirtualBox PIIX3
+    // rejects FLUSH CACHE while BSY is still set).
+    if (ata_wait_ready(base, control) != 0) return -1;
+
     // 5. Commit data to disk and wait until controller is ready
     outb(base + 7, ATA_CMD_CACHE_FLUSH);
     if (ata_wait_ready(base, control) != 0) return -1;

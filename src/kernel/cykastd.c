@@ -30,10 +30,10 @@ void bootlog_disable(void) {
     g_boot_log_enabled = 0;
 }
 
-void bootlog_flush(const char* filepath) {
-    if (!filepath || g_boot_log_len == 0) return;
+int bootlog_flush(const char* filepath) {
+    if (!filepath || g_boot_log_len == 0) return -1;
     g_boot_log_buf[g_boot_log_len] = '\0';
-    vfs_write_file(filepath, g_boot_log_buf, g_boot_log_len);
+    return vfs_write_file(filepath, g_boot_log_buf, g_boot_log_len);
 }
 
 static int cursor_x = 0;

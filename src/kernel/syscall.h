@@ -49,6 +49,7 @@
 #define SYS_TRY_GET_KEY   198 // non-blocking translated keyboard input; -1 if none
 #define SYS_GFX_PALETTE   199 // arg1 = packed first/count, arg2 = RGB8 triples
 #define SYS_TRY_KEY_EVENT 200 // Non-blocking keydown/keyup event for interactive apps
+#define SYS_GET_TICKS_MS  201 // Monotonic milliseconds from the PIT clock
 #define SYS_CHMOD         15
 #define SYS_CHOWN         182
 #define SYS_ACCESS        33

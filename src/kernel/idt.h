@@ -28,6 +28,7 @@ typedef void (*isr_handler_t)(registers_t* regs);
 
 // Public Functions
 void idt_init(void);
+unsigned int idt_get_millis(void);
 void idt_set_gate(unsigned char num, unsigned int base, unsigned short sel, unsigned char flags);
 void register_interrupt_handler(unsigned char n, isr_handler_t handler);
 

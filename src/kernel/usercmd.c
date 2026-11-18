@@ -16,8 +16,10 @@
 #define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
 #define USER_DYNAMIC_APP_MAX_SIZE 0xC0000 // Larger PIC apps are loaded from the kernel heap
 #define USER_SHELL_MAX_SIZE 0x30000 // Preserve the shell's reserved 192 KB region
-#define USER_APP_STACK_BASE 0x210000
-#define USER_APP_STACK_SIZE 0x20000 // Keep the existing 128 KiB app stack size
+#define USER_SHELL_STACK_BASE 0x210000
+#define USER_SHELL_STACK_SIZE 0x20000
+#define USER_APP_STACK_BASE 0x250000
+#define USER_APP_STACK_SIZE 0x40000 // Doom and other foreground apps get a 256 KiB stack.
 #define USER_APP_HEAP_MAX_SIZE 0x800000 // Bound app-owned heap arena to 8 MiB
 #define USER_APP_HEAP_MIN_SIZE 0x10000
 #define USER_APP_HEAP_STEP 0x40000
@@ -329,20 +331,26 @@ static volatile unsigned int g_usercmd_app_saved_esp = 0;
 static volatile unsigned int g_usercmd_app_entry = 0;
 static volatile unsigned int g_usercmd_app_argc = 0;
 static volatile unsigned int g_usercmd_app_argv = 0;
+static unsigned char g_usercmd_abort_stack[16384] __attribute__((aligned(16), used));
+static volatile unsigned int g_usercmd_abort_vector;
+static volatile unsigned int g_usercmd_abort_eip;
+static volatile unsigned int g_usercmd_abort_error;
 
 /*
  * Applications and their syscalls currently execute at ring 0, so they need
  * a private stack even before full privilege separation exists. The fixed app
- * arena ends at 0x210000; each foreground app receives the reserved stack at
- * 0x210000-0x230000, and the kernel heap starts at 0x250000.
+ * arena ends at 0x210000; the standalone shell uses 0x210000-0x230000,
+ * followed by a 128 KiB gap. Foreground apps use 0x250000-0x290000 and the
+ * kernel heap starts above that reserved stack.
  */
 static int usercmd_call_on_app_stack(int (*entry)(int, char**), int argc,
-                                     char** argv, void* stack) {
+                                     char** argv, void* stack,
+                                     unsigned int stack_size) {
     int result;
     g_usercmd_app_entry = (unsigned int)entry;
     g_usercmd_app_argc = (unsigned int)argc;
     g_usercmd_app_argv = (unsigned int)argv;
-    unsigned int stack_top = (unsigned int)stack + USER_APP_STACK_SIZE;
+    unsigned int stack_top = (unsigned int)stack + stack_size;
     asm volatile(
         "movl %%esp, g_usercmd_app_saved_esp\n"
         "movl %1, %%esp\n"
@@ -480,7 +488,8 @@ int exec_user_command(const char* cmd_name, const char* args) {
     asm volatile(
         "pushfl\n"
         "cli\n"
-        "leal 4(%%esp), %%eax\n"
+        /* SYS_EXIT may abandon the child stack and resume this exact frame. */
+        "movl %%esp, %%eax\n"
         "movl %%eax, %0\n"
         "movl %%ebp, %1\n"
         "movl $1, %2\n"
@@ -729,7 +738,8 @@ int exec_user_command(const char* cmd_name, const char* args) {
     heap_set_allocation_owner(g_user_process.pid);
 
     app_main_fn entry = (app_main_fn)entry_address;
-    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv, app_stack);
+    app_ret = usercmd_call_on_app_stack(entry, argc, s_argv, app_stack,
+                                        USER_APP_STACK_SIZE);
     if (g_user_process.state == USER_PROCESS_RUNNING) {
         g_user_process.exit_code = app_ret;
         g_user_process.state = USER_PROCESS_EXITED;
@@ -779,10 +789,12 @@ void usercmd_terminate(int exit_code) {
         "jmp usercmd_return_label\n"
         :
         : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "memory"
     );
+    __builtin_unreachable();
 }
 
-__attribute__((noreturn)) void usercmd_abort_from_irq(void) {
+static __attribute__((noreturn, used)) void usercmd_abort_from_irq_impl(void) {
     if (!g_usercmd_active) {
         for (;;) asm volatile("hlt");
     }
@@ -810,6 +822,17 @@ __attribute__((noreturn)) void usercmd_abort_from_irq(void) {
     __builtin_unreachable();
 }
 
+/* IRQ redirection enters without a C call frame. Move off the interrupted
+ * application stack before calling code that touches kernel subsystems. */
+__attribute__((naked, noreturn)) void usercmd_abort_from_irq(void) {
+    __asm__ volatile(
+        "movl $g_usercmd_abort_stack+16384, %esp\n"
+        "andl $-16, %esp\n"
+        "call usercmd_abort_from_irq_impl\n"
+        "ud2\n"
+    );
+}
+
 static void usercmd_print_hex(unsigned int value) {
     static const char digits[] = "0123456789ABCDEF";
     char output[11] = "0x00000000";
@@ -818,9 +841,10 @@ static void usercmd_print_hex(unsigned int value) {
     print_string(output);
 }
 
-__attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
-                                                             unsigned int eip,
-                                                             unsigned int error_code) {
+static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(void) {
+    unsigned int vector = g_usercmd_abort_vector;
+    unsigned int eip = g_usercmd_abort_eip;
+    unsigned int error_code = g_usercmd_abort_error;
     if (!g_usercmd_active) {
         for (;;) asm volatile("cli; hlt");
     }
@@ -850,6 +874,25 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
         : "memory"
     );
     __builtin_unreachable();
+}
+
+/* CPU exceptions also arrive on the application's stack while apps run at
+ * ring 0. Preserve the exception details, then handle and report the fault
+ * on the same safe kernel-owned abort stack used by Ctrl+C. */
+__attribute__((naked, noreturn)) void usercmd_abort_from_exception(
+    unsigned int, unsigned int, unsigned int) {
+    __asm__ volatile(
+        "movl 4(%esp), %eax\n"
+        "movl %eax, g_usercmd_abort_vector\n"
+        "movl 8(%esp), %eax\n"
+        "movl %eax, g_usercmd_abort_eip\n"
+        "movl 12(%esp), %eax\n"
+        "movl %eax, g_usercmd_abort_error\n"
+        "movl $g_usercmd_abort_stack+16384, %esp\n"
+        "andl $-16, %esp\n"
+        "call usercmd_abort_from_exception_impl\n"
+        "ud2\n"
+    );
 }
 
 int usercmd_is_running(void) {
@@ -946,7 +989,10 @@ int exec_shell_binary(void) {
     }
 
     typedef int (*shell_main_fn)(int, char**);
-    ((shell_main_fn)shell_base)(0, (char**)0);
+    // Keep the standalone shell away from the kernel's small boot stack and
+    // separate from the foreground app stack used by nested commands.
+    usercmd_call_on_app_stack((shell_main_fn)shell_base, 0, (char**)0,
+                              (void*)USER_SHELL_STACK_BASE, USER_SHELL_STACK_SIZE);
     return 1;
 }
 

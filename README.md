@@ -20,7 +20,7 @@ For VirtualBox or VMware, create a 32-bit x86 virtual machine with BIOS/Legacy b
 
 QEMU remains available with `./run.sh qemu`.
 
-The startup memory check uses the BIOS E820 map and tests addressable usable RAM above 1 MiB while saving and restoring each tested page. The disk check reads and compares representative sectors; it does not write to the disk.
+Startup reports usable RAM from the BIOS E820 map without writing to arbitrary physical addresses; the write test is skipped for firmware and emulator compatibility. The disk check reads and compares representative sectors; it does not write to the disk.
 
 ## Filesystems
 
@@ -123,4 +123,4 @@ Bitmap drawing accepts pitched `INDEX8`, `RGB332`, `RGB24`, and `RGBA32` data. `
 
 ## DoomGeneric
 
-The `doom` command builds the stock DoomGeneric sources with its upstream Makefile, using a separate CykOS platform shim, the CykOS libc, and a static i386 link. The fixed application arena and private application stack have dedicated non-overlapping memory ranges; the kernel heap can grow from 0x250000 up to 16 MiB, limited by contiguous usable RAM reported by BIOS E820 (with an 8 MiB fallback). Doom uses VGA mode 13h (320x200 indexed color), the CykOS graphics, keyboard, and millisecond-sleep syscalls. The shareware `DOOM1.WAD` is bundled under `/USR/SHARE/GAMES/DOOM`; the CykOS platform shim supplies that path by default. Run `doom -iwad /path/to/game.wad` to select another compatible IWAD. The build is driven by `apps/doom/build.sh` and is also part of `make.sh`.
+The `doom` command builds the stock DoomGeneric sources with its upstream Makefile, using a separate CykOS platform shim, the CykOS libc, and a static i386 link. The fixed application arena, shell stack, foreground app stack, and guard gap have separate memory ranges; the kernel heap can grow from 0x290000 up to 16 MiB, limited by contiguous usable RAM reported by BIOS E820 (with an 8 MiB fallback). Doom uses VGA mode 13h (320x200 indexed color), the CykOS graphics, keyboard, and millisecond-sleep syscalls. The shareware `DOOM1.WAD` is bundled under `/USR/SHARE/GAMES/DOOM`; the CykOS platform shim supplies that path by default. Run `doom -iwad /path/to/game.wad` to select another compatible IWAD. The build is driven by `apps/doom/build.sh` and is also part of `make.sh`.

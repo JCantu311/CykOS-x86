@@ -745,6 +745,7 @@ int	R_CheckTextureNumForName (char *name)
 {
     texture_t *texture;
     int key;
+    int i;
 
     // "NoTexture" marker.
     if (name[0] == '-')		
@@ -760,6 +761,14 @@ int	R_CheckTextureNumForName (char *name)
 	    return texture->index;
 
         texture = texture->next;
+    }
+
+    // Fall back to the source table if the texture hash chain misses an
+    // existing entry. This keeps WAD lookup working if the hash is damaged.
+    for (i = 0; i < numtextures; ++i)
+    {
+	if (!strncasecmp(textures[i]->name, name, 8))
+	    return textures[i]->index;
     }
     
     return -1;

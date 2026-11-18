@@ -371,9 +371,11 @@ if [ -f "DRIVERS.LST" ]; then
         [ -z "$driver_file" ] && continue
         # Extract just the filename (remove any directory path keeping only the .drv name)
         driver_filename="${driver_file##*/}"
-        # Convert .drv extension to .DRV uppercase
-        driver_file_upper="${driver_filename%.drv}.DRV"
-        driver_file_upper=$(echo "$driver_file_upper" | tr '[:lower:]' '[:upper:]')
+        # FAT16 uses 8.3 names. Match the base-name truncation performed by
+        # mkfat16.py so module paths resolve to the directory entries on disk.
+        driver_stem_upper=$(echo "${driver_filename%.*}" | tr '[:lower:]' '[:upper:]')
+        driver_ext_upper=$(echo "${driver_filename##*.}" | tr '[:lower:]' '[:upper:]')
+        driver_file_upper="${driver_stem_upper:0:8}.${driver_ext_upper}"
         printf "/BOOT/DRIVERS/%s\n" "$driver_file_upper" >> bin/MODULES.CFG
     done < DRIVERS.LST
 else
@@ -384,7 +386,7 @@ else
 /BOOT/DRIVERS/CYKDISK.DRV
 /BOOT/DRIVERS/CYSOUND.DRV
 /BOOT/DRIVERS/CYHDA.DRV
-/BOOT/DRIVERS/CYDISPLAY.DRV
+/BOOT/DRIVERS/CYDISPLA.DRV
 MODULES_EOF
 fi
 

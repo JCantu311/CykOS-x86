@@ -34,10 +34,19 @@ DOOM_CFLAGS=(
     -I../../../libc/include -I.
 )
 
+# Doom's allocator must go through libc's malloc/free implementation. Those
+# functions use SYS_SBRK, which gives the app a bounded private heap. If the
+# kernel versions are linked as imports, Doom allocates each block directly
+# from the kernel heap and bypasses the app heap arena.
+DOOM_KERNEL_SYMS="$ROOT/bin/doom_kernel_syms.ld"
+awk '$1 != "malloc" && $1 != "free" && $1 != "realloc" && \
+     $1 != "calloc" && $1 != "sbrk"' "$ROOT/bin/kernel_syms.ld" > "$DOOM_KERNEL_SYMS"
+trap 'rm -f "$DOOM_KERNEL_SYMS"' EXIT
+
 # The compiler driver selects its i386 libgcc for -m32. -nostdlib disables
-# host startup objects and host libc; only the explicit CykOS archives and the
-# target's static compiler-runtime archive are linked.
-LIBS="../../../bin/kernel_syms.ld ../../../bin/libc.a -lgcc"
+# host startup objects and host libc; only the filtered kernel imports, CykOS
+# libc, and the target's static compiler-runtime archive are linked.
+LIBS="../../../bin/doom_kernel_syms.ld ../../../bin/libc.a -lgcc"
 
 echo "  -> Building and linking with DoomGeneric's stock Makefile"
 make -C "$DOOM_DIR" -f Makefile \

@@ -7,6 +7,12 @@
 static idt_entry_t g_idt[IDT_ENTRIES];
 static idt_ptr_t   g_idtp;
 static isr_handler_t g_interrupt_handlers[IDT_ENTRIES];
+static volatile unsigned int g_pit_ticks;
+
+unsigned int idt_get_millis(void) {
+    /* PIT is configured for 1 kHz, so each interrupt represents 1 ms. */
+    return g_pit_ticks;
+}
 
 #define KEYBOARD_QUEUE_SIZE 256
 #define KEYBOARD_QUEUE_MASK (KEYBOARD_QUEUE_SIZE - 1)
@@ -56,7 +62,13 @@ static void keyboard_irq_handler(registers_t* regs) {
     outb(0x20, 0x20);
 }
 
-static void pic_init_keyboard_only(void) {
+static void pit_irq_handler(registers_t* regs) {
+    (void)regs;
+    g_pit_ticks++;
+    outb(0x20, 0x20);
+}
+
+static void pic_init(void) {
     outb(0x20, 0x11); outb(0x80, 0);
     outb(0xA0, 0x11); outb(0x80, 0);
     outb(0x21, 0x20); outb(0x80, 0);
@@ -65,8 +77,8 @@ static void pic_init_keyboard_only(void) {
     outb(0xA1, 0x02); outb(0x80, 0);
     outb(0x21, 0x01); outb(0x80, 0);
     outb(0xA1, 0x01); outb(0x80, 0);
-    // Only IRQ1 is enabled until handlers for the other IRQs exist.
-    outb(0x21, 0xFD);
+    // Enable PIT IRQ0 and keyboard IRQ1.
+    outb(0x21, 0xFC);
     outb(0xA1, 0xFF);
 }
 
@@ -193,6 +205,7 @@ extern void isr16(void); extern void isr17(void); extern void isr18(void); exter
 extern void isr20(void); extern void isr21(void); extern void isr22(void); extern void isr23(void);
 extern void isr24(void); extern void isr25(void); extern void isr26(void); extern void isr27(void);
 extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
+extern void isr32(void);  // IRQ0: PIT timer
 extern void isr33(void);  // IRQ1: keyboard
 extern void isr128(void); // Vector 0x80: Syscall Gate
 
@@ -252,7 +265,8 @@ __asm__(
     "ISR_NOERRCODE 30\n"
     "ISR_NOERRCODE 31\n"
 
-    // Remapped master PIC IRQ1 (keyboard)
+    // Remapped master PIC IRQ0 (PIT timer) and IRQ1 (keyboard)
+    "ISR_NOERRCODE 32\n"
     "ISR_NOERRCODE 33\n"
 
     // Syscall 0x80 (128)
@@ -289,6 +303,7 @@ void idt_init(void) {
 
     memset(&g_idt, 0, sizeof(g_idt));
     memset(&g_interrupt_handlers, 0, sizeof(g_interrupt_handlers));
+    g_pit_ticks = 0;
 
     // Install CPU Exception Handlers (0..31) - Ring 0 interrupt gates (0x8E)
     idt_set_gate(0,  (unsigned int)isr0,  0x08, 0x8E);
@@ -324,6 +339,8 @@ void idt_init(void) {
     idt_set_gate(30, (unsigned int)isr30, 0x08, 0x8E);
     idt_set_gate(31, (unsigned int)isr31, 0x08, 0x8E);
 
+    idt_set_gate(32, (unsigned int)isr32, 0x08, 0x8E);
+    register_interrupt_handler(32, pit_irq_handler);
     idt_set_gate(33, (unsigned int)isr33, 0x08, 0x8E);
     register_interrupt_handler(33, keyboard_irq_handler);
 
@@ -332,6 +349,10 @@ void idt_init(void) {
 
     // Load IDT into CPU register
     asm volatile("lidt %0" : : "m"(g_idtp));
-    pic_init_keyboard_only();
+    pic_init();
+    /* PIT channel 0 at 1 kHz; channel 2 remains available for PC speaker. */
+    outb(0x43, 0x36);
+    outb(0x40, 1193 & 0xFF);
+    outb(0x40, (1193 >> 8) & 0xFF);
     asm volatile("sti");
 }

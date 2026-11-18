@@ -3,9 +3,9 @@
 
 #include "cykastd.h"
 
-// Fixed app images: 0x180000-0x210000; foreground app stack: 0x210000-0x230000.
-// Leave the heap start above both reserved application regions.
-#define HEAP_START_ADDR       0x250000
+// Fixed app images: 0x180000-0x210000. Reserve separate shell/app stacks and
+// a guard gap before the kernel heap so an app stack overrun cannot hit it.
+#define HEAP_START_ADDR       0x290000
 #define HEAP_MAX_ADDR         0x1000000 // 16 MiB maximum heap window
 #define HEAP_FALLBACK_MAX_ADDR 0x800000 // Safe ceiling if E820 is unavailable
 
