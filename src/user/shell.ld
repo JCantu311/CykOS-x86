@@ -1,9 +1,11 @@
 OUTPUT_FORMAT("binary")
 ENTRY(main)
+INCLUDE config/memory_layout.ld
 
 SECTIONS
 {
-    . = 0x100000;
+    . = SHELL_IMAGE_BASE;
+    __shell_image_base = .;
 
     .text : {
         KEEP(*(.entry))
@@ -23,6 +25,11 @@ SECTIONS
         *(.bss*)
         *(COMMON)
     }
+
+    __shell_image_end = .;
+    __shell_image_limit = SHELL_IMAGE_END;
+    ASSERT(__shell_image_end <= __shell_image_limit,
+        "Standalone shell exceeds its reserved memory region")
 
     /DISCARD/ : {
         *(.gcc_except_table*)

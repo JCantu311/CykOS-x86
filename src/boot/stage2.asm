@@ -193,5 +193,7 @@ pm_entry:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0x140000
+    ; Keep the downward-growing kernel stack above the shell load area. The
+    ; kernel heap starts at 0x400000 and grows upward from this boundary.
+    mov esp, 0x400000
     jmp 0x00010000

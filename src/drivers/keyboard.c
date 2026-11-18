@@ -99,6 +99,13 @@ static int g_caps_lock = 0;
 static int g_extended = 0;
 static unsigned char g_pressed_keys[256];
 
+static void keyboard_reset_state(void) {
+    g_shift_state = 0;
+    g_ctrl_state = 0;
+    g_extended = 0;
+    memset(g_pressed_keys, 0, sizeof(g_pressed_keys));
+}
+
 // Standard US QWERTY Scancode Set 1 Lookup Tables
 static const char scancode_normal[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -308,4 +315,5 @@ const cyk_keyboard_driver_t cyk_keyboard_driver = {
     .has_key = keyboard_has_key,
     .get_char = keyboard_get_char,
     .try_get_char = keyboard_try_get_char,
+    .reset_state = keyboard_reset_state,
 };

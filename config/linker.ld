@@ -1,5 +1,9 @@
 ENTRY(init_32bit_protected)
 OUTPUT_FORMAT("binary")
+INCLUDE config/memory_layout.ld
+
+__shell_image_base = SHELL_IMAGE_BASE;
+__shell_image_limit = SHELL_IMAGE_END;
 
 SECTIONS
 {

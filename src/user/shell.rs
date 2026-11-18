@@ -335,6 +335,9 @@ static mut SHELL_FILE_BUF: [u8; 32768] = [0; 32768];
 static mut SCRIPT_BUF: [u8; 32768] = [0; 32768];
 static mut SCRIPT_ACTIVE: bool = false;
 static mut PIPE_BUFFERS: [[u8; 32768]; 2] = [[0; 32768]; 2];
+static mut REDIRECT_PATH: [u8; 64] = [0; 64];
+static mut REDIRECT_ACTIVE: bool = false;
+static mut REDIRECT_APPEND: bool = false;
 
 // Built-in Command: touch (Create or touch an empty file)
 fn cmd_touch(args: &[u8]) {
@@ -1150,6 +1153,56 @@ fn cmd_cat(args: &[u8]) {
     }
 }
 
+fn cmd_echo(args: &[u8]) {
+    puts(args);
+    print_char(b'\n');
+}
+
+fn cmd_filter(args: &[u8], mode: u8) {
+    let trimmed = trim_slice(args);
+    let (pattern, filename) = if mode == b'g' {
+        let split = trimmed.iter().position(|&b| b == b' ' || b == b'\t').unwrap_or(trimmed.len());
+        if split == trimmed.len() { (trimmed, &b""[..]) } else { (&trimmed[..split], trim_slice(&trimmed[split..])) }
+    } else { (&b""[..], trimmed) };
+    if mode == b'g' && pattern.is_empty() {
+        puts(b"Usage: grep <text> [file]\n"); return;
+    }
+    let bytes = unsafe {
+        if filename.is_empty() { syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768) }
+        else {
+            let mut path = [0u8; 64]; let n = filename.len().min(63);
+            path[..n].copy_from_slice(&filename[..n]); path[n] = 0;
+            vfs_read_file_by_name(path.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768)
+        }
+    };
+    if bytes < 0 { puts(b"grep: cannot read input\n"); return; }
+    let mut start = 0usize; let mut i = 0usize; let mut shown = 0usize;
+    while i <= bytes as usize {
+        if i == bytes as usize || unsafe { SHELL_FILE_BUF[i] == b'\n' } {
+            let line = unsafe { &SHELL_FILE_BUF[start..i] };
+            let keep = if mode == b'g' { line.windows(pattern.len()).any(|w| bytes_eq(w, pattern)) }
+                       else if mode == b'h' { shown < 10 } else { true };
+            if keep { puts(line); print_char(b'\n'); shown += 1; }
+            start = i + 1;
+        }
+        i += 1;
+    }
+}
+
+fn cmd_grep(args: &[u8]) { cmd_filter(args, b'g'); }
+fn cmd_head(args: &[u8]) { cmd_filter(args, b'h'); }
+fn cmd_tail(args: &[u8]) {
+    let filename = trim_slice(args);
+    let bytes = unsafe {
+        if filename.is_empty() { syscall_pipe_read(SHELL_FILE_BUF.as_mut_ptr(), 32768) }
+        else { let mut path=[0u8;64]; let n=filename.len().min(63); path[..n].copy_from_slice(&filename[..n]); path[n]=0; vfs_read_file_by_name(path.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(),32768) }
+    };
+    if bytes < 0 { puts(b"Usage: tail [file]\n"); return; }
+    let mut lines=0usize; let mut i=bytes as usize;
+    while i>0 { i-=1; if unsafe { SHELL_FILE_BUF[i]==b'\n' } { lines+=1; if lines==10 { i+=1; break; } } }
+    unsafe { for j in i..bytes as usize { print_char(SHELL_FILE_BUF[j]); } }
+}
+
 // Built-in Command: help
 fn cmd_help(_args: &[u8]) {
     puts(b"\nAvailable CykShell Commands:\n");
@@ -1418,6 +1471,14 @@ pub static COMMANDS: &[Command] = &[
         description: b"Concatenate and print files (e.g. cat file.txt)",
         handler: cmd_cat,
     },
+    Command { name: b"echo", description: b"Print text (e.g. echo hello)", handler: cmd_echo },
+    Command { name: b"ECHO", description: b"", handler: cmd_echo },
+    Command { name: b"grep", description: b"Print lines containing text (grep text [file])", handler: cmd_grep },
+    Command { name: b"GREP", description: b"", handler: cmd_grep },
+    Command { name: b"head", description: b"Print the first 10 lines (head [file])", handler: cmd_head },
+    Command { name: b"HEAD", description: b"", handler: cmd_head },
+    Command { name: b"tail", description: b"Print the last 10 lines (tail [file])", handler: cmd_tail },
+    Command { name: b"TAIL", description: b"", handler: cmd_tail },
     Command {
         name: b"CAT",
         description: b"",
@@ -1581,10 +1642,10 @@ fn dispatch_single_command(raw_line: &[u8]) -> bool {
 const MAX_PIPE_STAGES: usize = 8;
 const PIPE_BUFFER_CAPACITY: usize = 32768;
 
-fn dispatch_command(raw_line: &[u8]) {
+fn dispatch_pipeline(raw_line: &[u8]) -> bool {
     let trimmed = trim_slice(raw_line);
     if trimmed.is_empty() {
-        return;
+        return true;
     }
 
     let mut stages = [(0usize, 0usize); MAX_PIPE_STAGES];
@@ -1596,11 +1657,11 @@ fn dispatch_command(raw_line: &[u8]) {
         if index == trimmed.len() {
             if quote != 0 {
                 puts(b"CykShell: unterminated quote in pipeline\n");
-                return;
+                return false;
             }
             if stage_count == MAX_PIPE_STAGES {
                 puts(b"CykShell: pipeline supports at most 8 commands\n");
-                return;
+                return false;
             }
             stages[stage_count] = (stage_start, index);
             stage_count += 1;
@@ -1617,7 +1678,7 @@ fn dispatch_command(raw_line: &[u8]) {
         } else if byte == b'|' {
             if stage_count == MAX_PIPE_STAGES - 1 {
                 puts(b"CykShell: pipeline supports at most 8 commands\n");
-                return;
+                return false;
             }
             stages[stage_count] = (stage_start, index);
             stage_count += 1;
@@ -1626,25 +1687,28 @@ fn dispatch_command(raw_line: &[u8]) {
         index += 1;
     }
 
-    if stage_count == 1 {
-        dispatch_single_command(trimmed);
-        return;
+    if stage_count == 1 && unsafe { !REDIRECT_ACTIVE } {
+        return dispatch_single_command(trimmed);
     }
 
     for &(start, end) in &stages[..stage_count] {
         if trim_slice(&trimmed[start..end]).is_empty() {
             puts(b"CykShell: empty command in pipeline\n");
-            return;
+            return false;
         }
     }
 
     let mut input_ptr = core::ptr::null();
     let mut input_len = 0u32;
+    let mut final_output_len = 0u32;
+    let mut command_ok = true;
     for stage_index in 0..stage_count {
         let (start, end) = stages[stage_index];
         let stage = trim_slice(&trimmed[start..end]);
         let output_ptr = if stage_index + 1 < stage_count {
             unsafe { PIPE_BUFFERS[stage_index % 2].as_mut_ptr() }
+        } else if unsafe { REDIRECT_ACTIVE } {
+            unsafe { PIPE_BUFFERS[stage_count % 2].as_mut_ptr() }
         } else {
             core::ptr::null_mut()
         };
@@ -1658,16 +1722,75 @@ fn dispatch_command(raw_line: &[u8]) {
             );
             PIPE_CAPTURE_ACTIVE = !output_ptr.is_null();
         }
-        dispatch_single_command(stage);
+        if !dispatch_single_command(stage) { command_ok = false; }
         let output_len = unsafe {
             PIPE_CAPTURE_ACTIVE = false;
             syscall_pipe_end()
         };
+        if stage_index + 1 == stage_count { final_output_len = output_len; }
 
         if stage_index + 1 < stage_count {
             input_ptr = unsafe { PIPE_BUFFERS[stage_index % 2].as_ptr() };
             input_len = output_len;
         }
+    }
+    unsafe {
+        if REDIRECT_ACTIVE {
+            let out = PIPE_BUFFERS[stage_count % 2].as_ptr();
+            let mut out_len = final_output_len as usize;
+            if REDIRECT_APPEND {
+                let old_len = vfs_read_file_by_name(REDIRECT_PATH.as_ptr(), SHELL_FILE_BUF.as_mut_ptr(), 32768);
+                if old_len > 0 {
+                    let copy = (old_len as usize).min(32768usize.saturating_sub(out_len));
+                    let mut j = out_len;
+                    while j > 0 { j -= 1; PIPE_BUFFERS[stage_count % 2][j + copy] = *out.add(j); }
+                    PIPE_BUFFERS[stage_count % 2][..copy].copy_from_slice(&SHELL_FILE_BUF[..copy]);
+                    out_len += copy;
+                }
+            }
+            if vfs_write_file(REDIRECT_PATH.as_ptr(), out, out_len as u32) != 0 { puts(b"shell: redirection write failed\n"); }
+            REDIRECT_ACTIVE = false;
+            REDIRECT_APPEND = false;
+        }
+    }
+    command_ok
+}
+
+fn dispatch_command(raw_line: &[u8]) {
+    let line = trim_slice(raw_line);
+    let mut start = 0usize;
+    let mut quote = 0u8;
+    let mut previous_ok = true;
+    let mut next_condition = 0u8;
+    let mut i = 0usize;
+    while i <= line.len() {
+        let end = i == line.len();
+        let op = if end { 0 } else if quote == 0 && line[i] == b'&' && i+1 < line.len() && line[i+1] == b'&' { b'&' }
+                 else if quote == 0 && line[i] == b'|' && i+1 < line.len() && line[i+1] == b'|' { b'|' } else { 0 };
+        if !end && quote == 0 && (line[i] == b'\'' || line[i] == b'"') { quote = line[i]; }
+        else if !end && quote != 0 && line[i] == quote { quote = 0; }
+        if end || op != 0 {
+            let mut segment = trim_slice(&line[start..i]);
+            let should_run = next_condition == 0 || (next_condition == b'&' && previous_ok) || (next_condition == b'|' && !previous_ok);
+            if segment.is_empty() { puts(b"CykShell: missing command near conditional operator\n"); return; }
+            let mut redirect_pos = None; let mut q = 0u8; let mut k=0;
+            while k<segment.len() { let c=segment[k]; if q!=0 { if c==q {q=0;} } else if c==b'\''||c==b'"' {q=c;} else if c==b'>' { redirect_pos=Some((k, k+1<segment.len() && segment[k+1]==b'>')); break; } k+=1; }
+            if should_run { if let Some((pos, append)) = redirect_pos {
+                let mut name_start=pos+if append {2} else {1};
+                let command=trim_slice(&segment[..pos]);
+                while name_start<segment.len() && (segment[name_start]==b' '||segment[name_start]==b'\t') {name_start+=1;}
+                let name=trim_slice(&segment[name_start..]);
+                if command.is_empty() || name.is_empty() || name.len()>63 { puts(b"Usage: command >|>> file\n"); return; }
+                unsafe { REDIRECT_PATH=[0;64]; REDIRECT_PATH[..name.len()].copy_from_slice(name); REDIRECT_PATH[name.len()]=0; REDIRECT_ACTIVE=true; REDIRECT_APPEND=append; }
+                segment=command;
+            } }
+            if should_run { previous_ok = dispatch_pipeline(segment); }
+            if end { break; }
+            next_condition = op;
+            i += 1;
+            start = i + 1;
+        }
+        i += 1;
     }
 }
 

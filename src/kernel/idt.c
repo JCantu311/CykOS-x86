@@ -37,6 +37,11 @@ static void keyboard_queue_clear(void) {
     g_keyboard_tail = g_keyboard_head;
 }
 
+void keyboard_irq_reset_state(void) {
+    keyboard_queue_clear();
+    g_irq_ctrl_down = 0;
+}
+
 static void keyboard_queue_push(unsigned char scancode) {
     unsigned char head = g_keyboard_head;
     unsigned char next = (unsigned char)((head + 1) & KEYBOARD_QUEUE_MASK);
@@ -56,9 +61,17 @@ static void keyboard_irq_handler(registers_t* regs) {
         keyboard_queue_clear();
         if ((regs->cs & 3u) != 0 && usercmd_redirect_user_irq(regs)) {
             /* Return to a user-mapped exit trampoline, then terminate by syscall. */
+        } else if (!usercmd_is_app_started()) {
+            /* The loader is still executing on the kernel stack. Let it unwind
+             * normally instead of replacing EIP inside a kernel C call. */
+            usercmd_request_cancel();
         } else {
-            regs->eflags &= ~(1u << 9);
-            regs->eip = (unsigned int)usercmd_abort_from_irq;
+            /* Let kernel syscall frames unwind before redirecting to user mode. */
+            usercmd_request_app_abort();
+            /* A blocking SYS_GET_KEY/SYS_READ may be the kernel frame that
+             * was interrupted. Feed it ETX so it can unwind immediately. */
+            keyboard_queue_push(0x1D); /* Ctrl make */
+            keyboard_queue_push(0x2E); /* C make -> ETX in the keyboard driver */
         }
     } else {
         keyboard_queue_push(scancode);

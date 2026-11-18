@@ -33,6 +33,7 @@ typedef struct {
     int (*has_key)(void);       // Non-blocking: 1 if key available in hardware buffer, 0 otherwise
     char (*get_char)(void);     // Blocking: wait for a printable ASCII keypress
     int (*try_get_char)(void);  // Non-blocking: ASCII/ETX byte, or -1 when no character is ready
+    void (*reset_state)(void);  // Clear held-key/modifier state after an app exits
 } cyk_keyboard_driver_t;
 
 // Sound capability flags (bitmask returned by get_caps())
@@ -47,6 +48,7 @@ typedef struct {
 // Kernel IRQ1 keyboard queue consumed by the modular keyboard driver.
 int keyboard_irq_has_scancode(void);
 int keyboard_irq_read_scancode(void);
+void keyboard_irq_reset_state(void);
 
 // Level 2 Sound Driver Interface Table (standardized for game porting)
 // Matches the audio abstraction expected by doomgeneric and similar software:

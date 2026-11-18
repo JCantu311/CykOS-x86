@@ -22,6 +22,8 @@ QEMU remains available with `./run.sh qemu`.
 
 Startup reports usable RAM from the BIOS E820 map without writing to arbitrary physical addresses; the write test is skipped for firmware and emulator compatibility. The disk check reads and compares representative sectors; it does not write to the disk.
 
+The flat standalone shell has a reserved physical-memory window configured in `config/memory_layout.ld`. Both the shell linker script and kernel loader use linker symbols for the window's base and limit, and the linker rejects a shell image that exceeds it. The reservation is between the shell/app stacks and the dynamic-app arena, separate from the low-memory driver slots and fixed-address app image region.
+
 ## Filesystems
 
 The root filesystem uses a Unix-like layout: `/bin` contains the standalone shell, `/usr/bin` contains apps, `/boot/drivers` and `/boot/MODULES.CFG` hold boot drivers, `/etc` contains command configuration, `/usr/share/doc` contains documentation, `/home/user` is the user home, `/tmp` is for temporary files, `/var/log` is reserved for logs, and `/mnt` is the virtual mount point for additional volumes. Existing `/CYKOS` images and `/drive` paths remain readable for compatibility.
@@ -29,6 +31,8 @@ The root filesystem uses a Unix-like layout: `/bin` contains the standalone shel
 CykShell's Tab completion resolves command names in the first token and file or directory names in later tokens. It uses the mounted VFS directory listing, compares names case-insensitively, appends `/` for a directory, and adds a space after a completed file.
 
 CykShell reads the optional `/ETC/AUTOEXEC.SHE` file after its startup banner and before showing the first prompt. It uses the existing `.SHE` script parser: one normal shell command per line, with `#` comments. The image builder installs the repository's `AUTOEXEC.SHE` template at that path; edit the template to select startup commands.
+
+CykShell supports up to eight commands in a pipeline (`cat file | grep text`), conditional command lists (`cmd && next` and `cmd || fallback`), and output redirection (`echo hello > file`, `cat file >> log`). `&&` and `||` use whether the command was found as their current success signal; built-in command failure statuses and application exit codes are not yet propagated. Added text tools include `echo`, `grep`, `head`, and `tail`; `grep` performs a literal, case-sensitive substring match, and `head`/`tail` show ten lines.
 
 The VFS probes registered filesystem drivers and mounts the first supported boot volume. FAT16 and FAT32 are registered built-in backends. Both support 8.3 path lookup, directory listing/navigation, and file reads; FAT32 also supports file create/replace/delete and empty-directory create/remove. Long file names are skipped. FAT32 is a single-volume implementation and does not yet support FSInfo updates, timestamps, permissions, symbolic links, or crash-safe journaling.
 

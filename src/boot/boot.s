@@ -167,7 +167,7 @@ init_32bit_protected:
     mov gs, ax
     mov ss, ax
 
-    mov esp, 0x140000       ; Kernel stack above kernel modules and user app arenas
+    mov esp, 0x400000       ; Kernel stack grows down; heap starts here and grows up
 
     ; Zero out the .bss section in RAM (vital for clean global state)
     mov edi, __bss_start

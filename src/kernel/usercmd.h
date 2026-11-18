@@ -36,6 +36,9 @@ __attribute__((noreturn)) void usercmd_abort_from_exception(unsigned int vector,
                                                              registers_t* regs);
 int usercmd_is_running(void);
 int usercmd_is_app_started(void);
+void usercmd_request_cancel(void);
+void usercmd_request_app_abort(void);
+void usercmd_apply_pending_app_abort(registers_t* regs);
 int usercmd_redirect_user_irq(registers_t* regs);
 unsigned int usercmd_current_pid(void);
 void* usercmd_app_sbrk(int increment);

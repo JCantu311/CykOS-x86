@@ -767,17 +767,30 @@ int fat16_read_file_at(const fat16_entry_t* entry, unsigned int offset, void* bu
         unsigned int sector_index = cluster_offset / g_fat16.bytes_per_sector;
         unsigned int sector_offset = cluster_offset % g_fat16.bytes_per_sector;
         while (sector_index < g_fat16.sectors_per_cluster && bytes_remaining > 0) {
-            if (ata_read_sectors(cluster_lba + sector_index, 1, g_sector_buf) != 0) {
-                return -1;
+            if (sector_offset == 0 && bytes_remaining >= g_fat16.bytes_per_sector) {
+                unsigned int whole_sectors = bytes_remaining / g_fat16.bytes_per_sector;
+                unsigned int cluster_sectors = g_fat16.sectors_per_cluster - sector_index;
+                if (whole_sectors > cluster_sectors) whole_sectors = cluster_sectors;
+                if (whole_sectors > 255u) whole_sectors = 255u;
+                if (whole_sectors == 0 || ata_read_sectors(
+                        cluster_lba + sector_index, (unsigned char)whole_sectors,
+                        (unsigned short*)(dest + total_read)) != 0) return -1;
+                unsigned int chunk = whole_sectors * g_fat16.bytes_per_sector;
+                total_read += chunk;
+                bytes_remaining -= chunk;
+                sector_index += whole_sectors;
+            } else {
+                if (ata_read_sectors(cluster_lba + sector_index, 1, g_sector_buf) != 0)
+                    return -1;
+                unsigned int chunk = g_fat16.bytes_per_sector - sector_offset;
+                if (chunk > bytes_remaining) chunk = bytes_remaining;
+                memcpy(dest + total_read,
+                       (unsigned char*)g_sector_buf + sector_offset, chunk);
+                total_read += chunk;
+                bytes_remaining -= chunk;
+                sector_index++;
+                sector_offset = 0;
             }
-
-            unsigned int chunk = g_fat16.bytes_per_sector - sector_offset;
-            if (chunk > bytes_remaining) chunk = bytes_remaining;
-            memcpy(dest + total_read, (unsigned char*)g_sector_buf + sector_offset, chunk);
-            total_read += chunk;
-            bytes_remaining -= chunk;
-            sector_index++;
-            sector_offset = 0;
         }
 
         cluster_offset = 0;

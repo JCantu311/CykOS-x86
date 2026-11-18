@@ -1106,6 +1106,9 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
     }
+    /* Ctrl+C may interrupt this syscall at CPL0. Apply the pending abort to
+     * the intact ring-3 return frame after the syscall body has unwound. */
+    usercmd_apply_pending_app_abort(regs);
 }
 
 void syscall_init(void) {

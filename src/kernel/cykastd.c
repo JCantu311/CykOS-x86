@@ -209,20 +209,36 @@ size_t strlen(const char* str) {
 }
 
 void* memcpy(void* dest, const void* src, size_t n) {
-    unsigned char* d = (unsigned char*)dest;
-    const unsigned char* s = (const unsigned char*)src;
-    for (size_t i = 0; i < n; i++) {
-        d[i] = s[i];
-    }
-    return dest;
+    void* result = dest;
+    size_t words = n / sizeof(unsigned int);
+    size_t tail = n % sizeof(unsigned int);
+    asm volatile("cld; rep movsl"
+                 : "+D"(dest), "+S"(src), "+c"(words)
+                 :
+                 : "memory");
+    asm volatile("rep movsb"
+                 : "+D"(dest), "+S"(src), "+c"(tail)
+                 :
+                 : "memory");
+    return result;
 }
 
 void* memset(void* dest, int val, size_t n) {
-    unsigned char* d = (unsigned char*)dest;
-    for (size_t i = 0; i < n; i++) {
-        d[i] = (unsigned char)val;
-    }
-    return dest;
+    void* result = dest;
+    unsigned int fill = (unsigned char)val;
+    fill |= fill << 8;
+    fill |= fill << 16;
+    size_t words = n / sizeof(unsigned int);
+    size_t tail = n % sizeof(unsigned int);
+    asm volatile("cld; rep stosl"
+                 : "+D"(dest), "+c"(words)
+                 : "a"(fill)
+                 : "memory");
+    asm volatile("rep stosb"
+                 : "+D"(dest), "+c"(tail)
+                 : "a"((unsigned char)val)
+                 : "memory");
+    return result;
 }
 
 void* memmove(void* dest, const void* src, size_t n) {

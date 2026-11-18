@@ -18,7 +18,6 @@
 #define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
 #define USER_DYNAMIC_APP_BASE 0x300000
 #define USER_DYNAMIC_APP_MAX_SIZE 0xC0000
-#define USER_SHELL_MAX_SIZE 0x30000 // Preserve the shell's reserved 192 KB region
 #define USER_SHELL_STACK_BASE 0x210000
 #define USER_SHELL_STACK_SIZE 0x20000
 #define USER_APP_STACK_BASE 0x250000
@@ -29,6 +28,13 @@
 #define USER_APP_HEAP_BASE 0x800000
 #define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
 #define USER_PATH_MAX     64
+static volatile int g_usercmd_cancel_requested;
+static volatile int g_usercmd_abort_requested;
+
+/* Absolute linker symbols keep the flat shell at its linked address while
+ * sharing the reserved image window with src/user/shell.ld. */
+extern unsigned char __shell_image_base[];
+extern unsigned char __shell_image_limit[];
 
 #define ELF_ET_DYN        3
 #define ELF_ET_EXEC       2
@@ -109,6 +115,43 @@ typedef struct __attribute__((packed)) {
 static int image_range(unsigned int vaddr, unsigned int length,
                        unsigned int min_vaddr, unsigned int max_vaddr) {
     return vaddr >= min_vaddr && vaddr <= max_vaddr && length <= max_vaddr - vaddr;
+}
+
+static int zero_elf_bss(const elf32_phdr_t* ph, unsigned int count,
+                        unsigned int load_bias) {
+    for (unsigned int i = 0; i < count; i++) {
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz <= ph[i].filesz) continue;
+        unsigned int bss_start = load_bias + ph[i].vaddr + ph[i].filesz;
+        unsigned int remaining = ph[i].memsz - ph[i].filesz;
+        while (remaining) {
+            if (g_usercmd_cancel_requested) return -1;
+            unsigned int chunk = remaining > 4096u ? 4096u : remaining;
+            memset((void*)bss_start, 0, chunk);
+            bss_start += chunk;
+            remaining -= chunk;
+        }
+    }
+    return 0;
+}
+
+static int copy_elf_load_segments(const unsigned char* file,
+                                  const elf32_phdr_t* ph, unsigned int count,
+                                  unsigned int load_bias) {
+    for (unsigned int i = 0; i < count; i++) {
+        if (ph[i].type != ELF_PT_LOAD || !ph[i].memsz) continue;
+        unsigned int destination = load_bias + ph[i].vaddr;
+        unsigned int source = ph[i].offset;
+        unsigned int remaining = ph[i].filesz;
+        while (remaining) {
+            if (g_usercmd_cancel_requested) return -1;
+            unsigned int chunk = remaining > 4096u ? 4096u : remaining;
+            memcpy((void*)destination, file + source, chunk);
+            destination += chunk;
+            source += chunk;
+            remaining -= chunk;
+        }
+    }
+    return 0;
 }
 
 static int resolve_elf_relocations(unsigned int load_bias,
@@ -206,11 +249,8 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     if (load_bias > 0xFFFFFFFFu - max_vaddr ||
         load_bias + max_vaddr > load_base + USER_DYNAMIC_APP_MAX_SIZE) return -1;
 
-    memset(load_area, 0, USER_DYNAMIC_APP_MAX_SIZE);
-    for (unsigned int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != ELF_PT_LOAD) continue;
-        memcpy((void*)(load_bias + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
-    }
+    if (zero_elf_bss(ph, eh->phnum, load_bias) != 0 ||
+        copy_elf_load_segments(file, ph, eh->phnum, load_bias) != 0) return -1;
 
     unsigned int hash_vaddr = 0, sym_vaddr = 0, str_vaddr = 0;
     unsigned int str_size = 0, sym_entry_size = 0;
@@ -302,11 +342,8 @@ static int load_static_elf32(const unsigned char* file, unsigned int file_size,
     if (load_bias > 0xFFFFFFFFu - max_vaddr ||
         load_bias + max_vaddr > load_base + USER_APP_MAX_SIZE) return -1;
 
-    memset(load_area, 0, USER_APP_MAX_SIZE);
-    for (unsigned int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != ELF_PT_LOAD || !ph[i].memsz) continue;
-        memcpy((void*)(load_bias + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
-    }
+    if (zero_elf_bss(ph, eh->phnum, load_bias) != 0) return -1;
+    if (copy_elf_load_segments(file, ph, eh->phnum, load_bias) != 0) return -1;
     *entry_out = load_bias + eh->entry;
     return 0;
 }
@@ -334,6 +371,9 @@ static user_process_t g_user_process;
 static unsigned int g_next_user_pid = 1;
 static unsigned int g_usercmd_saved_esp = 0;
 static unsigned int g_usercmd_saved_ebp = 0;
+static unsigned int g_usercmd_saved_ebx = 0;
+static unsigned int g_usercmd_saved_esi = 0;
+static unsigned int g_usercmd_saved_edi = 0;
 static volatile unsigned int g_usercmd_app_saved_esp = 0;
 static volatile unsigned int g_usercmd_app_entry = 0;
 static volatile unsigned int g_usercmd_app_argc = 0;
@@ -346,11 +386,59 @@ static volatile unsigned int g_usercmd_abort_cr2;
 static registers_t* volatile g_usercmd_abort_regs;
 static unsigned int g_usercmd_image_base;
 static unsigned int g_usercmd_image_size;
+static void usercmd_print_hex(unsigned int value);
 static volatile unsigned int g_usercmd_user_entry;
 static volatile unsigned int g_usercmd_user_esp;
 static volatile unsigned int g_usercmd_user_exit_trampoline;
 static volatile int g_usercmd_user_mode_active;
 static volatile int g_usercmd_user_mapping_active;
+static int usercmd_set_app_memory_access(int user);
+
+static void usercmd_reset_keyboard_state(void) {
+    keyboard_irq_reset_state();
+    cyk_keyboard_driver_t* keyboard = modload_get_keyboard_driver();
+    if (keyboard && keyboard->reset_state) keyboard->reset_state();
+}
+
+void usercmd_request_cancel(void) {
+    if (g_usercmd_active && !g_usercmd_app_started)
+        g_usercmd_cancel_requested = 1;
+}
+
+void usercmd_request_app_abort(void) {
+    if (g_usercmd_active && g_usercmd_app_started && g_usercmd_user_mode_active)
+        g_usercmd_abort_requested = 1;
+}
+
+void usercmd_apply_pending_app_abort(registers_t* regs) {
+    if (!regs || (regs->cs & 3u) == 0 || !g_usercmd_abort_requested) return;
+    g_usercmd_abort_requested = 0;
+    (void)usercmd_redirect_user_irq(regs);
+}
+
+static int usercmd_cancel_loading(unsigned char** staged_image) {
+    if (!g_usercmd_cancel_requested) return 0;
+    g_usercmd_cancel_requested = 0;
+    g_usercmd_abort_requested = 0;
+    if (staged_image && *staged_image) {
+        free(*staged_image);
+        *staged_image = (unsigned char*)0;
+    }
+    g_usercmd_active = 0;
+    g_usercmd_app_started = 0;
+    g_usercmd_user_mode_active = 0;
+    if (g_usercmd_user_mapping_active) {
+        (void)usercmd_set_app_memory_access(0);
+        g_usercmd_user_mapping_active = 0;
+    }
+    g_user_process.exit_code = 130;
+    g_user_process.state = USER_PROCESS_EXITED;
+    heap_set_allocation_owner(0);
+    usercmd_reset_keyboard_state();
+    print_string("^C\n");
+    return 1;
+}
+
 static void usercmd_prepare_stack_guard(void) {
     volatile unsigned int* guard =
         (volatile unsigned int*)(USER_APP_STACK_BASE - USER_APP_STACK_GUARD_SIZE);
@@ -590,6 +678,10 @@ static void shell_output_char(char ch) {
 int exec_user_command(const char* cmd_name, const char* args) {
     if (!cmd_name || cmd_name[0] == '\0') return 0;
     g_usercmd_app_started = 0;
+    g_usercmd_cancel_requested = 0;
+    g_usercmd_user_mode_active = 0;
+    g_usercmd_user_mapping_active = 0;
+    g_user_process.exit_code = 0;
     volatile int app_ret = 0;
     unsigned char* staged_image = (unsigned char*)0;
     void* dest = (void*)USER_APP_BASE;
@@ -605,9 +697,14 @@ int exec_user_command(const char* cmd_name, const char* args) {
         "leal 4(%%esp), %%eax\n"
         "movl %%eax, %0\n"
         "movl %%ebp, %1\n"
-        "movl $1, %2\n"
+        "movl %%ebx, %2\n"
+        "movl %%esi, %3\n"
+        "movl %%edi, %4\n"
+        "movl $1, %5\n"
         "popfl\n"
-        : "=m"(g_usercmd_saved_esp), "=m"(g_usercmd_saved_ebp), "=m"(g_usercmd_active)
+        : "=m"(g_usercmd_saved_esp), "=m"(g_usercmd_saved_ebp),
+          "=m"(g_usercmd_saved_ebx), "=m"(g_usercmd_saved_esi),
+          "=m"(g_usercmd_saved_edi), "=m"(g_usercmd_active)
         :
         : "eax", "memory"
     );
@@ -740,6 +837,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
         print_string("\n");
         return 1;
     }
+    if (usercmd_cancel_loading(&staged_image)) return 1;
 
     if (app_entry.size >= 4 && staged_image[0] == 0x7F && staged_image[1] == 'E' &&
         staged_image[2] == 'L' && staged_image[3] == 'F') {
@@ -755,6 +853,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
             : elf_type == ELF_ET_EXEC
                 ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
                 : -1;
+        if (usercmd_cancel_loading(&staged_image)) return 1;
         if (load_result != 0) {
             free(staged_image);
             staged_image = (unsigned char*)0;
@@ -859,7 +958,6 @@ int exec_user_command(const char* cmd_name, const char* args) {
     g_user_process.heap_capacity = available < USER_APP_HEAP_MAX_SIZE
         ? available : USER_APP_HEAP_MAX_SIZE;
     g_user_process.heap_break = 0;
-    g_usercmd_app_started = 1;
     heap_set_allocation_owner(g_user_process.pid);
 
     if (use_user_mode && usercmd_set_app_memory_access(1) != 0) {
@@ -875,13 +973,22 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     app_main_fn entry = (app_main_fn)entry_address;
     usercmd_prepare_stack_guard();
+    if (g_usercmd_cancel_requested && usercmd_cancel_loading(&staged_image)) return 1;
     if (use_user_mode) {
         g_usercmd_user_entry = entry_address;
         g_usercmd_user_esp = usercmd_build_user_return_frame(
             app_argc, app_argv, app_stack_top);
         g_usercmd_user_mode_active = 1;
+        asm volatile("cli" ::: "memory");
+        if (g_usercmd_cancel_requested) {
+            asm volatile("sti" ::: "memory");
+            if (usercmd_cancel_loading(&staged_image)) return 1;
+        }
+        g_usercmd_app_started = 1;
         usercmd_enter_user_mode();
     } else {
+        if (usercmd_cancel_loading(&staged_image)) return 1;
+        g_usercmd_app_started = 1;
         app_ret = usercmd_call_on_app_stack(entry, app_argc, app_argv, app_stack,
                                             app_stack_top - USER_APP_STACK_BASE);
     }
@@ -899,6 +1006,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
         (void)usercmd_set_app_memory_access(0);
         g_usercmd_user_mapping_active = 0;
     }
+    usercmd_reset_keyboard_state();
     g_usercmd_user_mode_active = 0;
     g_usercmd_active = 0;
     g_usercmd_app_started = 0;
@@ -935,14 +1043,20 @@ void usercmd_terminate(int exit_code) {
         dpy->set_mode(0);
     }
     syscall_flush_deferred_console();
+    usercmd_reset_keyboard_state();
 
     asm volatile(
         "movl %0, %%esp\n"
         "movl %1, %%ebp\n"
+        "movl %2, %%ebx\n"
+        "movl %3, %%esi\n"
+        "movl %4, %%edi\n"
         "sti\n"
         "jmp usercmd_return_label\n"
         :
-        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp),
+          "m"(g_usercmd_saved_ebx), "m"(g_usercmd_saved_esi),
+          "m"(g_usercmd_saved_edi)
         : "memory"
     );
     __builtin_unreachable();
@@ -964,14 +1078,20 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_irq_impl(void) {
         dpy->set_mode(0);
     }
     syscall_flush_deferred_console();
+    usercmd_reset_keyboard_state();
     print_string("^C\n");
     asm volatile(
         "movl %0, %%esp\n"
         "movl %1, %%ebp\n"
+        "movl %2, %%ebx\n"
+        "movl %3, %%esi\n"
+        "movl %4, %%edi\n"
         "sti\n"
         "jmp usercmd_return_label\n"
         :
-        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp),
+          "m"(g_usercmd_saved_ebx), "m"(g_usercmd_saved_esi),
+          "m"(g_usercmd_saved_edi)
         : "memory"
     );
     __builtin_unreachable();
@@ -1013,6 +1133,7 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(vo
     cyk_display_driver_t* dpy = modload_get_display_driver();
     if (dpy && dpy->get_mode && dpy->get_mode() != 0) dpy->set_mode(0);
     syscall_flush_deferred_console();
+    usercmd_reset_keyboard_state();
     print_color_string("Application stopped after CPU exception: vector ", VGA_RED);
     usercmd_print_hex(vector);
     print_string(", EIP ");
@@ -1050,10 +1171,15 @@ static __attribute__((noreturn, used)) void usercmd_abort_from_exception_impl(vo
     asm volatile(
         "movl %0, %%esp\n"
         "movl %1, %%ebp\n"
+        "movl %2, %%ebx\n"
+        "movl %3, %%esi\n"
+        "movl %4, %%edi\n"
         "sti\n"
         "jmp usercmd_return_label\n"
         :
-        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp)
+        : "m"(g_usercmd_saved_esp), "m"(g_usercmd_saved_ebp),
+          "m"(g_usercmd_saved_ebx), "m"(g_usercmd_saved_esi),
+          "m"(g_usercmd_saved_edi)
         : "memory"
     );
     __builtin_unreachable();
@@ -1149,16 +1275,21 @@ int exec_shell_binary(void) {
     const char* shell_path = "/BIN/SHELL.BIN";
     if (vfs_find_file(shell_path, &shell_entry) != 0) {
         shell_path = "/CYKOS/SHELL.BIN";
-        if (vfs_find_file(shell_path, &shell_entry) != 0) return 0;
+        if (vfs_find_file(shell_path, &shell_entry) != 0) {
+            print_color_string("CykShell: standalone shell image not found.\n", VGA_RED);
+            return 0;
+        }
     }
-    if (shell_entry.size == 0 || shell_entry.size > USER_SHELL_MAX_SIZE) {
+    unsigned int shell_base_address = (unsigned int)__shell_image_base;
+    unsigned int shell_image_capacity = (unsigned int)__shell_image_limit - shell_base_address;
+    if (shell_entry.size == 0 || shell_entry.size > shell_image_capacity) {
         print_color_string("CykShell: invalid shell image size\n", VGA_RED);
         return -1;
     }
 
-    void* shell_base = (void*)0x100000;
-    memset(shell_base, 0, USER_SHELL_MAX_SIZE);
-    int bytes_read = vfs_read_at(&shell_entry, 0, shell_base, USER_SHELL_MAX_SIZE);
+    void* shell_base = (void*)shell_base_address;
+    memset(shell_base, 0, shell_image_capacity);
+    int bytes_read = vfs_read_at(&shell_entry, 0, shell_base, shell_image_capacity);
     if (bytes_read <= 0) {
         print_color_string("CykShell: failed to load standalone shell image\n", VGA_RED);
         return -1;
