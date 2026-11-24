@@ -10,9 +10,10 @@
 #define MODULE_TYPE_DISPLAY   0x02
 #define MODULE_TYPE_MOUSE     0x03
 #define MODULE_TYPE_SOUND     0x04
+#define MODULE_TYPE_USB       0x05
 
 #ifndef MODULE_LOAD_ADDRESS
-#define MODULE_LOAD_ADDRESS   0x90000
+#define MODULE_LOAD_ADDRESS   0
 #endif
 
 // Generic Level 2 Module Header (Must reside at byte offset 0 of every .drv module)
@@ -21,7 +22,7 @@ typedef struct {
     char name[16];              // Module name (e.g., "cykeyboard")
     unsigned int version;       // Driver version (e.g., 0x00010000 = v1.0)
     unsigned int type;          // Module type (MODULE_TYPE_*)
-    unsigned int load_address;  // Fixed address the module was linked for
+    unsigned int load_address;  // Runtime address assigned by the module loader
     int (*init)(void);          // Initialization entry point (returns 0 on success)
 } cyk_module_header_t;
 
@@ -36,6 +37,18 @@ typedef struct {
     void (*reset_state)(void);  // Clear held-key/modifier state after an app exits
 } cyk_keyboard_driver_t;
 
+/* USB host module interface. Kernel subsystems call through this table so
+ * controller code remains loadable and replaceable as a Level 2 module. */
+typedef struct {
+    cyk_module_header_t header;
+    void (*poll)(void);
+    int (*storage_present)(unsigned int device);
+    int (*storage_read_sectors)(unsigned int device, unsigned int lba,
+                                unsigned char count, void* buffer);
+    int (*storage_write_sectors)(unsigned int device, unsigned int lba,
+                                 unsigned char count, const void* buffer);
+} cyk_usb_driver_t;
+
 // Sound capability flags (bitmask returned by get_caps())
 #define SOUND_CAP_NONE     0x00   // No audio capability
 #define SOUND_CAP_TONE     0x01   // Can play tone(freq, ms) via PC speaker or similar
@@ -49,6 +62,7 @@ typedef struct {
 int keyboard_irq_has_scancode(void);
 int keyboard_irq_read_scancode(void);
 void keyboard_irq_reset_state(void);
+void keyboard_irq_inject_scancode(unsigned char scancode);
 
 // Level 2 Sound Driver Interface Table (standardized for game porting)
 // Matches the audio abstraction expected by doomgeneric and similar software:

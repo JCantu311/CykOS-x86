@@ -4,6 +4,7 @@
 
 extern const vfs_driver_t fat16_vfs_driver;
 extern const vfs_driver_t fat32_vfs_driver;
+extern const vfs_driver_t ext2_vfs_driver;
 
 static const vfs_driver_t* g_drivers[VFS_MAX_DRIVERS];
 static unsigned int g_driver_count;
@@ -20,7 +21,8 @@ int vfs_register_driver(const vfs_driver_t* driver) {
 
 int vfs_mount_root(void) {
     g_root_driver = 0;
-    if (vfs_register_driver(&fat16_vfs_driver) != 0 ||
+    if (vfs_register_driver(&ext2_vfs_driver) != 0 ||
+        vfs_register_driver(&fat16_vfs_driver) != 0 ||
         vfs_register_driver(&fat32_vfs_driver) != 0) return -1;
     for (unsigned int i = 0; i < g_driver_count; i++) {
         if (g_drivers[i]->mount_root() == 0) {

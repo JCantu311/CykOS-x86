@@ -34,6 +34,7 @@ void* sbrk(intptr_t increment);
 int brk(void* addr);
 unsigned int sleep(unsigned int seconds);
 int isatty(int fd);
+pid_t getpid(void);
 uid_t getuid(void);
 uid_t geteuid(void);
 gid_t getgid(void);

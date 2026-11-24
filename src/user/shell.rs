@@ -1949,6 +1949,19 @@ fn complete_path_token(token: &[u8], output: &mut [u8; 128]) -> Option<usize> {
     }
 }
 
+fn print_shell_prompt() {
+    let mut cwd_buf = [0u8; 128];
+    let cwd_len = unsafe { vfs_getcwd(cwd_buf.as_mut_ptr(), 128) };
+    if cwd_len > 0 {
+        for &byte in &cwd_buf[..cwd_len as usize] {
+            print_char(byte);
+        }
+    } else {
+        puts(b"/");
+    }
+    puts(b"] # ");
+}
+
 #[no_mangle]
 pub extern "C" fn shell_main() -> ! {
     puts(b"\n========================================\n");
@@ -1959,17 +1972,7 @@ pub extern "C" fn shell_main() -> ! {
     run_startup_script();
 
     loop {
-        let mut cwd_buf = [0u8; 128];
-        let cwd_len = unsafe { vfs_getcwd(cwd_buf.as_mut_ptr(), 128) };
-        if cwd_len > 0 {
-            let ulen = cwd_len as usize;
-            for i in 0..ulen {
-                unsafe { print_char(cwd_buf[i]); }
-            }
-        } else {
-            puts(b"/");
-        }
-        puts(b"] # ");
+        print_shell_prompt();
 
         let mut start_x: i32 = 0;
         let mut start_y: i32 = 0;
@@ -1989,6 +1992,14 @@ pub extern "C" fn shell_main() -> ! {
                 line_len = 0;
                 cursor_pos = 0;
                 break;
+            } else if c == 0x0C { // Ctrl+L: same clear action, then restore prompt and edit line
+                cmd_clear(b"");
+                print_shell_prompt();
+                unsafe {
+                    get_cursor_pos(&mut start_x, &mut start_y);
+                    for i in 0..line_len { print_char(LINE_BUF[i]); }
+                    set_cursor_pos(start_x + cursor_pos as i32, start_y);
+                }
             } else if c == b'\n' || c == b'\r' {
                 unsafe { print_char(b'\n'); }
                 break;

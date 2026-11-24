@@ -52,6 +52,7 @@ fi
 
 # 3. Assemble unified module
 nasm -f elf32 src/boot/boot.s -o bin/boot.o
+nasm -f elf32 src/boot/uefi_entry.asm -o bin/uefi_entry.o
 nasm -f bin src/boot/mbr.asm -o bin/mbr.bin
 nasm -f bin src/boot/stage2.asm -o bin/stage2.bin
 
@@ -94,7 +95,28 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/fat16.o bin/fat32.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
+
+# Build an ELF32 Multiboot2 entry for GRUB's x86_64 UEFI loader. The BIOS
+# image remains the flat binary above; both entry paths share the kernel C code.
+$LD -m elf_i386 -T config/uefi-linker.ld --gc-sections --no-dynamic-linker -no-pie \
+    -Map bin/kernel-uefi.map bin/uefi_entry.o bin/boot.o bin/cykastd.o bin/ata.o \
+    bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o \
+    bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o \
+    bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB \
+    -o bin/KERNEL.ELF
+if command -v grub-file &> /dev/null; then
+    grub-file --is-x86-multiboot2 bin/KERNEL.ELF
+fi
+if command -v grub-mkstandalone &> /dev/null; then
+    grub-mkstandalone --format=x86_64-efi --output=bin/BOOTX64.EFI \
+        --compress=xz --locales='' --fonts='' --themes='' \
+        --install-modules="part_msdos fat multiboot2 normal terminal efi_gop video video_fb gfxterm font" \
+        --modules="part_msdos fat multiboot2 normal terminal efi_gop video video_fb gfxterm font" \
+        "boot/grub/grub.cfg=tools/grub-uefi.cfg"
+else
+    echo "WARNING: grub-mkstandalone missing; the disk will not be UEFI-bootable."
+fi
 
 # 8. Export Kernel Symbols for User-Space Applications
 if [ -f bin/kernel.map ]; then
@@ -359,7 +381,7 @@ echo "Building MODULES.CFG from DRIVERS.LST manifest..."
 if [ -f "DRIVERS.LST" ]; then
     echo "  -> Generating MODULES.CFG from DRIVERS.LST..."
     # Shell-based parsing of DRIVERS.LST
-    # Format: each line is "source output load_address"
+    # Format: each line is "source output"; modules are relocated at runtime.
     # Extract driver output filenames and generate MODULES.CFG entries
     printf "# CykOS Boot-Time Kernel Module List\n" > bin/MODULES.CFG
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -372,7 +394,7 @@ if [ -f "DRIVERS.LST" ]; then
         # Extract just the filename (remove any directory path keeping only the .drv name)
         driver_filename="${driver_file##*/}"
         # FAT16 uses 8.3 names. Match the base-name truncation performed by
-        # mkfat16.py so module paths resolve to the directory entries on disk.
+        # makeext2.py so module paths resolve to the directory entries on disk.
         driver_stem_upper=$(echo "${driver_filename%.*}" | tr '[:lower:]' '[:upper:]')
         driver_ext_upper=$(echo "${driver_filename##*.}" | tr '[:lower:]' '[:upper:]')
         driver_file_upper="${driver_stem_upper:0:8}.${driver_ext_upper}"
@@ -387,11 +409,12 @@ else
 /BOOT/DRIVERS/CYSOUND.DRV
 /BOOT/DRIVERS/CYHDA.DRV
 /BOOT/DRIVERS/CYDISPLA.DRV
+/BOOT/DRIVERS/CYKUSB.DRV
 MODULES_EOF
 fi
 
 # Ensure BOOT/DRIVERS directory exists in the image
-# (mkfat16.py will handle injection, but we verify drivers exist)
+# (makeext2.py will handle injection, but we verify drivers exist)
 if [ -d bin/DRIVERS ]; then
     echo "  -> Verifying driver files for MODULES.CFG..."
     while IFS= read -r driver_line; do
@@ -406,13 +429,13 @@ if [ -d bin/DRIVERS ]; then
     done < bin/MODULES.CFG
 fi
 
-# 10. Format FAT16 partition and package Level 2 drivers, Level 4 apps & configuration
+# 10. Build FAT16 BIOS boot + ext2 root partitions and package the OS tree
 mkdir -p bin/images
 if command -v python3 &> /dev/null; then
-    python3 mkfat16.py bin/images/os_image.bin
+    python3 makeext2.py bin/images/os_image.bin
     python3 install_bios.py bin/images/os_image.bin
 elif command -v python &> /dev/null; then
-    python mkfat16.py bin/images/os_image.bin
+    python makeext2.py bin/images/os_image.bin
     python install_bios.py bin/images/os_image.bin
 else
     truncate -s 16777216 bin/images/os_image.bin 2>/dev/null || truncate -s 16m bin/images/os_image.bin
@@ -435,5 +458,18 @@ if command -v qemu-img &> /dev/null; then
     fi
 fi
 
+# Build the BIOS El Torito live/installer CD. Live mode loads the kernel from
+# the ISO and uses IDE ATAPI to stage the embedded disk image in RAM; install
+# mode writes that image through BIOS EDD. xorriso is optional for normal builds.
+if command -v xorriso &> /dev/null && command -v python3 &> /dev/null; then
+    echo "Building BIOS/UEFI CD installer ISO..."
+    python3 tools/build-installer-iso.py \
+        --image bin/images/os_image.bin \
+        --kernel-elf bin/KERNEL.ELF \
+        --output bin/images/cykos-installer.iso
+else
+    echo "WARNING: Skipping BIOS CD installer ISO (requires xorriso and python3)."
+fi
+
 echo "----------------------------------------"
-echo "Build successful! Disk images are in bin/images (raw BIN, IMG, and available VDI, VMDK, VHD)."
+echo "Build successful! Disk images and, when available, cykos-installer.iso are in bin/images."

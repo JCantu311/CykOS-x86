@@ -1,30 +1,7 @@
-OUTPUT_FORMAT("binary")
-
-SECTIONS
-{
-    . = __MODULE_LINK_BASE__;
-
-    .text : {
-        *(.header*)              /* cyk_module_header_t MUST be at byte 0 */
-        *(.text*)                /* Driver routines */
-        . = ALIGN(4);
-        *(.rodata*)              /* Constants, lookup tables, and strings */
-        *(.rdata*)
-        . = ALIGN(4);
-        *(.data*)                /* Driver state */
-        *(.data.rel.ro*)
-        *(.data.rel.ro.local*)
-    }
-
-    .bss (NOLOAD) : {
-        . = ALIGN(4);
-        *(.bss*)
-        *(COMMON)
-    }
-
-    /DISCARD/ : {
-        *(.eh_frame)
-        *(.note*)
-        *(.comment)
-    }
-}
+/*
+ * Retired linker script.
+ *
+ * Driver modules are now linked as ELF32 ET_DYN images by drivers/build.sh.
+ * Their PT_LOAD segments and relocations are mapped into heap allocations by
+ * module_elf32_load() at boot; no fixed module base address is used.
+ */

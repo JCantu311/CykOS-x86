@@ -6,6 +6,9 @@ int ata_read_sectors(unsigned int lba, unsigned char count, unsigned short* targ
 int ata_write_sectors(unsigned int lba, unsigned char count, const unsigned short* source_buf);
 int ata_select_drive(unsigned char drive);
 int ata_probe_drive(unsigned char drive);
+int ata_probe_atapi_drive(unsigned char drive);
+int ata_read_atapi_block(unsigned char drive, unsigned int lba, unsigned short* target_buf);
+int ata_read_atapi_blocks(unsigned char drive, unsigned int lba, unsigned char count, unsigned short* target_buf);
 int disk_test(void);
 
 #endif // ATA_H

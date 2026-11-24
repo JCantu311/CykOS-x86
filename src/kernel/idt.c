@@ -52,6 +52,10 @@ static void keyboard_queue_push(unsigned char scancode) {
     g_keyboard_head = next;
 }
 
+void keyboard_irq_inject_scancode(unsigned char scancode) {
+    keyboard_queue_push(scancode);
+}
+
 static void keyboard_irq_handler(registers_t* regs) {
     unsigned char scancode = inb(0x60);
     if (scancode == 0x1D) g_irq_ctrl_down = 1;

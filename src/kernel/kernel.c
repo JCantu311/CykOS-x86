@@ -10,6 +10,8 @@
 #include "permissions.h"
 #include "paging.h"
 #include "gdt.h"
+#include "exports.h"
+#include "ext2.h"
 
 // Level 3 CykShell Entry Point (implemented in shell.rs)
 extern void shell_main(void);
@@ -73,6 +75,7 @@ static void run_memory_test(void) {
 }
 
 void kernel_main(void) {
+    kernel_module_services_keepalive();
     gdt_init();
     run_memory_test();
     heap_init();
@@ -82,6 +85,7 @@ void kernel_main(void) {
                            VGA_RED);
         for (;;) asm volatile("cli; hlt");
     }
+    uefi_console_init();
     clear_screen();
     enable_hardware_cursor();
 
@@ -115,11 +119,18 @@ void kernel_main(void) {
     print_color_string(welcome_message, VGA_GREEN);
 
     print_string("\n[Level 1] Initializing root filesystem through VFS...\n");
+    volatile unsigned int* live_boot_info = (volatile unsigned int*)0x04F0;
+    if (live_boot_info[0] == 0x534F4B43u)
+        print_string("[LIVE] Preparing a temporary root filesystem from the CD...\n");
     if (vfs_mount_root() == 0) {
         permissions_init();
         print_string("VFS mounted root with ");
         print_string(vfs_current_driver());
         print_string(".\n");
+        if (ext2_live_status() == 2)
+            print_string("[LIVE] Root is writable in RAM. All changes are lost at shutdown.\n");
+        else if (ext2_live_status() == 1)
+            print_string("[LIVE] RAM is insufficient for a writable root; using the CD read-only.\n");
 
         print_string("[Level 1] Verifying File Read [/USR/SHARE/DOC/README.TXT]...\n");
         vfs_file_t readme_file;
@@ -148,6 +159,10 @@ void kernel_main(void) {
     } else {
         print_color_string("[Level 2] Warning: No Level 2 modules loaded.\n", VGA_RED);
     }
+
+    /* USB host discovery runs from the USB Level 2 module init hook. */
+    /* The USB mass-storage backend now participates in FAT volume discovery. */
+    (void)fat16_mount_extra_drives();
 
     print_string("\n[Level 3] Boot sequence complete. Transitioning to CykShell...\n");
     print_string("[Level 3] Flushing boot log to /VAR/LOG/LOG.TXT...\n");

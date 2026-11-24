@@ -19,6 +19,10 @@
  */
 int exec_user_command(const char* cmd_name, const char* args);
 
+/* Load and relocate an ELF32 ET_DYN kernel module into caller-owned RAM. */
+int module_elf32_load(const unsigned char* file, unsigned int file_size,
+                      void* load_area, unsigned int capacity);
+
 /** Load and invoke the standalone Level 3 shell image from /BIN/SHELL.BIN. */
 int exec_shell_binary(void);
 

@@ -7,6 +7,8 @@
 #define PAGE_WRITE   0x002u
 #define PAGE_USER    0x004u
 #define PAGE_LARGE   0x080u
+#define PAGE_PWT     0x008u
+#define PAGE_PCD     0x010u
 #define LARGE_PAGE_SIZE 0x400000u
 #define MANAGED_LIMIT 0x02000000u
 
@@ -90,6 +92,54 @@ int paging_init(void) {
     cr0 |= (1u << 31) | (1u << 16); /* PG and supervisor write protection. */
     __asm__ volatile("movl %0, %%cr0" : : "r"(cr0) : "memory");
     g_paging_ready = 1;
+    return 0;
+}
+
+int paging_map_identity_range(unsigned int address, unsigned int length) {
+    if (!g_paging_ready || !length || address > 0xFFFFFFFFu - length) return -1;
+    unsigned int first_directory = address / LARGE_PAGE_SIZE;
+    unsigned int last_directory = (address + length - 1u) / LARGE_PAGE_SIZE;
+    for (unsigned int directory = first_directory; directory <= last_directory; directory++) {
+        unsigned int pde = g_page_directory[directory];
+        if (pde & PAGE_PRESENT) continue;
+        unsigned int* table = (unsigned int*)malloc(PAGE_SIZE);
+        if (!table) return -1;
+        unsigned int base = directory * LARGE_PAGE_SIZE;
+        for (unsigned int page = 0; page < 1024; page++)
+            table[page] = (base + page * PAGE_SIZE) | PAGE_PRESENT | PAGE_WRITE;
+        g_page_directory[directory] = (unsigned int)table | PAGE_PRESENT | PAGE_WRITE;
+    }
+    paging_flush_tlb();
+    return 0;
+}
+
+/* Split large identity pages where needed and map device registers uncached. */
+int paging_map_mmio_range(unsigned int address, unsigned int length) {
+    if (!g_paging_ready || !length || address > 0xFFFFFFFFu - length) return -1;
+    unsigned int first = address & PAGE_MASK;
+    unsigned int last = (address + length - 1u) & PAGE_MASK;
+    for (unsigned int page_address = first;; page_address += PAGE_SIZE) {
+        unsigned int directory = page_address / LARGE_PAGE_SIZE;
+        unsigned int page = (page_address % LARGE_PAGE_SIZE) / PAGE_SIZE;
+        unsigned int pde = g_page_directory[directory];
+        unsigned int* table;
+        if (pde & PAGE_LARGE) {
+            void* allocation = malloc(PAGE_SIZE * 2u - 1u);
+            if (!allocation) return -1;
+            unsigned int table_address = ((unsigned int)allocation + PAGE_SIZE - 1u) & PAGE_MASK;
+            table = (unsigned int*)table_address;
+            unsigned int base = directory * LARGE_PAGE_SIZE;
+            for (unsigned int i = 0; i < 1024; ++i)
+                table[i] = (base + i * PAGE_SIZE) | PAGE_PRESENT | PAGE_WRITE;
+            g_page_directory[directory] = table_address | PAGE_PRESENT | PAGE_WRITE;
+        } else {
+            if (!(pde & PAGE_PRESENT)) return -1;
+            table = (unsigned int*)(pde & PAGE_MASK);
+        }
+        table[page] |= PAGE_PWT | PAGE_PCD;
+        if (page_address == last) break;
+    }
+    paging_flush_tlb();
     return 0;
 }
 

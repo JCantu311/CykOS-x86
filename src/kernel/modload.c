@@ -2,19 +2,24 @@
 #include "fat16.h"
 #include "vfs.h"
 #include "cykastd.h"
+#include "usb.h"
+#include "usercmd.h"
+#include "heap.h"
 
 #define MAX_MODULES 8
-#define MODULE_SLOT_SIZE 0x4000
-#define MODULE_BASE_ADDR 0x90000
+#define MODULE_FILE_MAX_SIZE 0x00080000u
+#define MODULE_IMAGE_CAPACITY 0x00040000u
+#define MODULE_PAGE_SIZE 4096u
 
 static cyk_module_header_t* g_loaded_modules[MAX_MODULES];
-static unsigned char g_used_slots[MAX_MODULES];
+static void* g_module_allocations[MAX_MODULES];
 static int g_loaded_count = 0;
 static cyk_keyboard_driver_t* g_keyboard_driver = (void*)0;
 static cyk_sound_driver_t* g_sound_drivers[MAX_MODULES];
 static int g_sound_driver_count = 0;
 static int g_selected_sound_index = 0;
 static cyk_display_driver_t* g_display_driver = (void*)0;
+static cyk_usb_driver_t* g_usb_driver = (void*)0;
 static const char* parse_next_token(const char* p, char* out_token, int max_len) {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     if (*p == '\0') return (void*)0;
@@ -27,12 +32,13 @@ static const char* parse_next_token(const char* p, char* out_token, int max_len)
 int modload_load_all(void) {
     g_loaded_count = 0;
     memset(g_loaded_modules, 0, sizeof(g_loaded_modules));
-    memset(g_used_slots, 0, sizeof(g_used_slots));
+    memset(g_module_allocations, 0, sizeof(g_module_allocations));
     g_keyboard_driver = (void*)0;
     g_sound_driver_count = 0;
     g_selected_sound_index = 0;
     memset(g_sound_drivers, 0, sizeof(g_sound_drivers));
     g_display_driver = (void*)0;
+    g_usb_driver = (void*)0;
 
     print_string("[MODLOAD] Checking for /BOOT/MODULES.CFG...\n");
 
@@ -69,55 +75,77 @@ int modload_load_all(void) {
             print_color_string(" -> Error: File not found on filesystem!\n", VGA_RED);
             continue;
         }
+        print_string(" -> Module file found; staging image...\n");
 
-        if (mod_entry.size < sizeof(cyk_module_header_t) || mod_entry.size > MODULE_SLOT_SIZE) {
-            print_color_string(" -> Error: Module size is outside the supported slot size.\n", VGA_RED);
+        if (mod_entry.size < 52u || mod_entry.size > MODULE_FILE_MAX_SIZE) {
+            print_color_string(" -> Error: Module file size is outside the supported range.\n", VGA_RED);
             continue;
         }
 
-        cyk_module_header_t preview;
-        memset(&preview, 0, sizeof(preview));
-        if (vfs_read_at(&mod_entry, 0, &preview, sizeof(preview)) != (int)sizeof(preview) ||
-            preview.magic != CYKOS_MODULE_MAGIC) {
-            print_color_string(" -> Error: Invalid module header.\n", VGA_RED);
+        unsigned char* file_image = (unsigned char*)malloc(mod_entry.size);
+        void* allocation = malloc(MODULE_IMAGE_CAPACITY + MODULE_PAGE_SIZE - 1u);
+        if (!file_image || !allocation) {
+            if (file_image) free(file_image);
+            if (allocation) free(allocation);
+            print_color_string(" -> Error: Not enough memory for module.\n", VGA_RED);
             continue;
         }
-
-        if (preview.load_address < MODULE_BASE_ADDR ||
-            (preview.load_address - MODULE_BASE_ADDR) % MODULE_SLOT_SIZE != 0) {
-            print_color_string(" -> Error: Module load address is not a valid slot.\n", VGA_RED);
+        int mod_bytes = vfs_read_at(&mod_entry, 0, file_image, mod_entry.size);
+        if (mod_bytes != (int)mod_entry.size) {
+            free(file_image);
+            free(allocation);
+            print_color_string(" -> Error: Failed to read complete module file.\n", VGA_RED);
             continue;
         }
-        unsigned int slot_index = (preview.load_address - MODULE_BASE_ADDR) / MODULE_SLOT_SIZE;
-        if (slot_index >= MAX_MODULES) {
-            print_color_string(" -> Error: Module load address is outside the module region.\n", VGA_RED);
+        print_string(" -> File staged; applying ELF relocations...\n");
+
+        unsigned int aligned = ((unsigned int)allocation + MODULE_PAGE_SIZE - 1u) & ~(MODULE_PAGE_SIZE - 1u);
+        void* image = (void*)aligned;
+        memset(image, 0, MODULE_IMAGE_CAPACITY);
+        int load_result = module_elf32_load(file_image, mod_entry.size, image,
+                                            MODULE_IMAGE_CAPACITY);
+        free(file_image);
+        if (load_result != 0) {
+            free(allocation);
+            print_color_string(" -> Error: Invalid or unsupported ELF module.\n", VGA_RED);
             continue;
         }
-        if (g_used_slots[slot_index]) {
-            print_color_string(" -> Error: Module slot is already occupied.\n", VGA_RED);
+        print_string(" -> ELF relocated; validating module header...\n");
+
+        cyk_module_header_t* header = (cyk_module_header_t*)0;
+        for (unsigned int offset = 0; offset + sizeof(cyk_module_header_t) <= MODULE_IMAGE_CAPACITY;
+             offset += 4u) {
+            cyk_module_header_t* candidate = (cyk_module_header_t*)(aligned + offset);
+            if (candidate->magic == CYKOS_MODULE_MAGIC) {
+                header = candidate;
+                break;
+            }
+        }
+        unsigned int image_end = aligned + MODULE_IMAGE_CAPACITY;
+        int name_terminated = 0;
+        if (header) {
+            for (unsigned int i = 0; i < sizeof(header->name); i++)
+                if (!header->name[i]) { name_terminated = 1; break; }
+        }
+        if (!header || !header->name[0] ||
+            !name_terminated ||
+            (header->type != MODULE_TYPE_UNKNOWN && header->type != MODULE_TYPE_KEYBOARD &&
+             header->type != MODULE_TYPE_DISPLAY &&
+             header->type != MODULE_TYPE_SOUND && header->type != MODULE_TYPE_USB) ||
+            !header->init || (unsigned int)header->init < aligned ||
+            (unsigned int)header->init >= image_end) {
+            free(allocation);
+            print_color_string(" -> Error: Relocated image has no valid module header.\n", VGA_RED);
             continue;
         }
+        header->load_address = (unsigned int)header;
 
-        void* target_dest = (void*)preview.load_address;
-        memset(target_dest, 0, MODULE_SLOT_SIZE);
-
-        int mod_bytes = vfs_read_at(&mod_entry, 0, target_dest, MODULE_SLOT_SIZE);
-        if (mod_bytes <= 0) {
-            print_color_string(" -> Error: Failed to read module binary!\n", VGA_RED);
-            continue;
-        }
-
-        cyk_module_header_t* header = (cyk_module_header_t*)target_dest;
-        if (header->magic != CYKOS_MODULE_MAGIC || header->load_address != preview.load_address) {
-            print_color_string(" -> Error: Module header changed while loading.\n", VGA_RED);
-            continue;
-        }
-
-        g_used_slots[slot_index] = 1;
-
+        print_string(" -> Initializing module...\n");
         if (header->init != (void*)0) {
             int init_res = header->init();
             if (init_res != 0) {
+                /* Initialization can register IRQ callbacks or claim hardware;
+                 * leave the allocation resident if init reports failure. */
                 print_color_string(" -> Error: Module init() returned failure!\n", VGA_RED);
                 continue;
             }
@@ -131,8 +159,11 @@ int modload_load_all(void) {
             }
         } else if (header->type == MODULE_TYPE_DISPLAY) {
             g_display_driver = (cyk_display_driver_t*)header;
+        } else if (header->type == MODULE_TYPE_USB) {
+            g_usb_driver = (cyk_usb_driver_t*)header;
         }
 
+        g_module_allocations[g_loaded_count] = allocation;
         g_loaded_modules[g_loaded_count] = header;
         g_loaded_count++;
 
@@ -168,7 +199,31 @@ int modload_load_all(void) {
         print_char('\n');
     }
 
+    /* Keep the module API shim in the kernel symbol map for other modules. */
+    usb_poll();
+
     return g_loaded_count;
+}
+
+void usb_poll(void) {
+    if (g_usb_driver && g_usb_driver->poll) g_usb_driver->poll();
+}
+
+int usb_storage_present(unsigned int device) {
+    return g_usb_driver && g_usb_driver->storage_present
+        ? g_usb_driver->storage_present(device) : 0;
+}
+
+int usb_storage_read_sectors(unsigned int device, unsigned int lba,
+                             unsigned char count, void* buffer) {
+    return g_usb_driver && g_usb_driver->storage_read_sectors
+        ? g_usb_driver->storage_read_sectors(device, lba, count, buffer) : -1;
+}
+
+int usb_storage_write_sectors(unsigned int device, unsigned int lba,
+                              unsigned char count, const void* buffer) {
+    return g_usb_driver && g_usb_driver->storage_write_sectors
+        ? g_usb_driver->storage_write_sectors(device, lba, count, buffer) : -1;
 }
 cyk_keyboard_driver_t* modload_get_keyboard_driver(void) {
     return g_keyboard_driver;

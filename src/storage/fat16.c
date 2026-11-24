@@ -188,10 +188,17 @@ static void fat16_make_mount_name(fat16_state_t* volume, unsigned char drive, un
         volume->mount_name[length++] = ch;
     }
     if (length == 0) {
-        volume->mount_name[length++] = 'A';
-        volume->mount_name[length++] = 'T';
-        volume->mount_name[length++] = 'A';
-        volume->mount_name[length++] = (char)('0' + drive);
+        if (drive >= 4) {
+            volume->mount_name[length++] = 'U';
+            volume->mount_name[length++] = 'S';
+            volume->mount_name[length++] = 'B';
+            volume->mount_name[length++] = (char)('0' + drive - 4);
+        } else {
+            volume->mount_name[length++] = 'A';
+            volume->mount_name[length++] = 'T';
+            volume->mount_name[length++] = 'A';
+            volume->mount_name[length++] = (char)('0' + drive);
+        }
         volume->mount_name[length++] = 'P';
         volume->mount_name[length++] = (char)('0' + partition);
     }
@@ -335,11 +342,10 @@ int fat16_init(void) {
 }
 
 int fat16_mount_extra_drives(void) {
-    if (g_volume_count == 0) return -1;
     int mounted = 0;
     unsigned int scan_offsets[] = {64, 128, 2048, 32};
 
-    for (unsigned char drive = 0; drive < 4; drive++) {
+    for (unsigned char drive = 0; drive < 4 + 8; drive++) {
         if (!ata_probe_drive(drive)) continue;
         if (ata_select_drive(drive) != 0 || ata_read_sectors(0, 1, g_sector_buf) != 0) continue;
 

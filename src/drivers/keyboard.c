@@ -1,12 +1,10 @@
 #include "module.h"
 #include "cykastd.h"
 
-// Hardware I/O Port Definitions
 #define KBD_DATA_PORT    0x60
 #define KBD_STATUS_PORT  0x64
 #define KEY_SHIFT_EVENT  0x8A
 
-// Internal port access (keeps driver 100% self-contained)
 static inline unsigned char kbd_inb(unsigned short port) {
     unsigned char result;
     asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
@@ -18,9 +16,8 @@ static inline void kbd_outb(unsigned short port, unsigned char data) {
 }
 
 static int kbd_wait_input_empty(void) {
-    for (unsigned int i = 0; i < 100000; ++i) {
+    for (unsigned int i = 0; i < 100000; ++i)
         if ((kbd_inb(KBD_STATUS_PORT) & 0x02u) == 0) return 0;
-    }
     return -1;
 }
 
@@ -51,44 +48,35 @@ static int kbd_send_with_ack(unsigned char value) {
         unsigned char response;
         if (kbd_write_data(value) != 0 || kbd_wait_output_full(&response) != 0)
             return -1;
-        if (response == 0xFA) return 0; // ACK
-        if (response != 0xFE) return -1; // RESEND is the only retry response
+        if (response == 0xFA) return 0;
+        if (response != 0xFE) return -1;
     }
     return -1;
 }
 
-// Ask the keyboard for Set-2 and enable the i8042's Set-2-to-Set-1
-// translation. The OS event parser consumes Set-1 make/break codes. Every
-// controller wait is bounded because some VMs and machines lack an i8042.
+/* Configure the PS/2 keyboard to emit set 1 scan codes through the i8042.
+ * IRQ1 is disabled during the controller/device command exchange so ACKs are
+ * consumed here instead of mistaken for key events by the IRQ handler. */
 static void kbd_configure_set1_stream(void) {
     unsigned int saved_flags;
     asm volatile("pushfl; popl %0; cli" : "=r"(saved_flags) :: "memory");
-
     unsigned char command_byte = 0;
     unsigned char response;
     int have_command_byte = 0;
 
     if (kbd_write_command(0x20) == 0 && kbd_wait_output_full(&command_byte) == 0) {
         have_command_byte = 1;
-        // Turn off IRQ1 during direct ACK polling; enable translation and
-        // keep the first PS/2 port enabled.
         command_byte = (unsigned char)((command_byte | 0x40u) & ~0x11u);
         if (kbd_write_command(0x60) == 0 && kbd_write_data(command_byte) == 0) {
-            if (kbd_send_with_ack(0xF0) == 0)
-                (void)kbd_send_with_ack(0x02); // Keyboard scan-code set 2
-            (void)kbd_send_with_ack(0xF4);     // Enable scanning
+            if (kbd_send_with_ack(0xF0) == 0) (void)kbd_send_with_ack(0x02);
+            (void)kbd_send_with_ack(0xF4);
         }
     }
-
-    if (have_command_byte) {
-        // Re-read to preserve unrelated controller flags, then enable IRQ1
-        // and translation while leaving the keyboard port active.
-        if (kbd_write_command(0x20) == 0 && kbd_wait_output_full(&response) == 0) {
-            response = (unsigned char)((response | 0x41u) & ~0x10u);
-            if (kbd_write_command(0x60) == 0) (void)kbd_write_data(response);
-        }
+    if (have_command_byte && kbd_write_command(0x20) == 0 &&
+        kbd_wait_output_full(&response) == 0) {
+        response = (unsigned char)((response | 0x41u) & ~0x10u);
+        if (kbd_write_command(0x60) == 0) (void)kbd_write_data(response);
     }
-
     if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
 }
 
@@ -131,13 +119,26 @@ static const char scancode_shifted[128] = {
 
 // Check if keyboard buffer has data ready to read (non-blocking)
 static int keyboard_has_key(void) {
-    return keyboard_irq_has_scancode();
+    return keyboard_irq_has_scancode() || (kbd_inb(KBD_STATUS_PORT) & 0x01u);
 }
 
-// Blocking read of next raw scancode
+/* Consume the IRQ queue first, then poll the i8042 as a fallback. Polling is
+ * done with IRQ1 briefly disabled so the interrupt handler cannot race the
+ * read from port 0x60 and lose a scancode. */
+static int keyboard_try_read_scancode(void) {
+    unsigned int saved_flags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(saved_flags) :: "memory");
+    int scancode = keyboard_irq_read_scancode();
+    if (scancode < 0 && (kbd_inb(KBD_STATUS_PORT) & 0x01u))
+        scancode = kbd_inb(KBD_DATA_PORT);
+    if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
+    return scancode;
+}
+
+// Blocking read of next raw scancode, using IRQ buffering or controller polling.
 static char keyboard_get_scancode(void) {
     int scancode;
-    while ((scancode = keyboard_irq_read_scancode()) < 0) {
+    while ((scancode = keyboard_try_read_scancode()) < 0) {
         asm volatile("pause");
     }
     return (char)scancode;
@@ -253,7 +254,7 @@ static char keyboard_scancode_to_ascii(unsigned char scancode) {
     int event = keyboard_scancode_to_event(scancode);
     // Preserve control keys expected by the shell and POSIX line input.
     if (event == '\b' || event == '\t' || event == '\n' || event == '\r' ||
-        event == 0x03 || event == 0x1B ||
+        event == 0x03 || event == 0x0C || event == 0x1B ||
         (event >= 0x80 && event <= 0x89)) return (char)event;
     if (event >= 0x20 && event < 0x7F) return (char)event;
     return 0;
@@ -273,7 +274,7 @@ static char keyboard_get_char(void) {
 // Non-blocking character read for games and other frame-based applications.
 static int keyboard_try_get_char(void) {
     int scancode;
-    while ((scancode = keyboard_irq_read_scancode()) >= 0) {
+    while ((scancode = keyboard_try_read_scancode()) >= 0) {
         char character = keyboard_scancode_to_ascii((unsigned char)scancode);
         if (character != 0) return (unsigned char)character;
     }
@@ -282,19 +283,22 @@ static int keyboard_try_get_char(void) {
 
 // Hardware Driver Initialization
 static int keyboard_init(void) {
-    // 1. Drain the controller output buffer
-    while (kbd_inb(KBD_STATUS_PORT) & 0x01) {
-        kbd_inb(KBD_DATA_PORT);
+    /* Clear stale controller output before negotiating the PS/2 scan set. */
+    unsigned int saved_flags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(saved_flags) :: "memory");
+    /* Some emulators/controllers can leave OBF asserted after a read. Never
+     * let stale-output cleanup trap the boot process in an unbounded loop. */
+    for (unsigned int drain = 0; drain < 32u; ++drain) {
+        if (!(kbd_inb(KBD_STATUS_PORT) & 0x01u)) break;
+        (void)kbd_inb(KBD_DATA_PORT);
     }
-
     kbd_configure_set1_stream();
-
-    // 2. Reset internal states
     g_shift_state = 0;
     g_ctrl_state = 0;
     g_caps_lock = 0;
     g_extended = 0;
     memset(g_pressed_keys, 0, sizeof(g_pressed_keys));
+    if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
 
     return 0; // Success
 }

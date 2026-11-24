@@ -49,5 +49,7 @@ void pci_write_config_dword(unsigned char bus, unsigned char slot, unsigned char
 void pci_write_config_word(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset, unsigned short val);
 
 int pci_find_audio_device(pci_device_t* out_dev);
+int pci_find_class_device(unsigned char class_id, unsigned char subclass_id,
+                          unsigned char prog_if, pci_device_t* out_dev);
 
 #endif // PCI_H

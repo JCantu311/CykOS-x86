@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-mkfat16.py - Generates / formats a FAT16 partition on an OS disk image.
-Can also inject files (e.g. README.TXT, drivers, binaries) into the FAT16 filesystem.
+makeext2.py - Builds a FAT16 BIOS boot partition and ext2 CykOS root partition.
+KERNEL.BIN is installed on FAT16; the complete filesystem tree is installed on ext2.
 """
 
 import sys
 import os
 import struct
+import tempfile
+import subprocess
+import shutil
 
 def strip_elf_unloaded_tail(content):
     """Drop trailing ELF section/debug metadata while keeping all PT_LOAD bytes.
@@ -55,11 +58,13 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
     if directories_to_add is None:
         directories_to_add = []
 
-    TOTAL_SIZE_MB = 16
-    TOTAL_SECTORS = TOTAL_SIZE_MB * 1024 * 1024 // 512  # 32,768 sectors
+    TOTAL_SIZE_MB = 80
+    TOTAL_SECTORS = TOTAL_SIZE_MB * 1024 * 1024 // 512
 
     PARTITION_START_LBA = 2048  # 1 MB offset
-    PARTITION_SECTORS = TOTAL_SECTORS - PARTITION_START_LBA # 30,720 sectors
+    PARTITION_SECTORS = 32768   # 16 MiB FAT16 boot volume; stage2 uses fixed FAT LBAs
+    EXT2_START_LBA = PARTITION_START_LBA + PARTITION_SECTORS
+    EXT2_SECTORS = TOTAL_SECTORS - EXT2_START_LBA
 
     BYTES_PER_SECTOR = 512
     SECTORS_PER_CLUSTER = 4     # 2 KB clusters
@@ -119,6 +124,28 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
         directory_entry_counts[parent] += 1
         normalized_files["/".join(parts)] = file_data
 
+    # Keep the BIOS payload and UEFI fallback loader on FAT16. The complete
+    # runtime tree is written to ext2 below and mounted as the root filesystem.
+    root_files = normalized_files
+    root_directories = directories
+    if "KERNEL.BIN" not in root_files:
+        raise ValueError("FAT16 boot volume requires KERNEL.BIN")
+    boot_paths = {"KERNEL.BIN", "KERNEL.ELF", "EFI/BOOT/BOOTX64.EFI"}
+    normalized_files = {path: data for path, data in root_files.items() if path in boot_paths}
+    directories = {"/"}
+    directory_entry_counts = {"/": 0}
+    for file_path in normalized_files:
+        parts = file_path.split("/")
+        parent = "/"
+        for component in parts[:-1]:
+            directory = (parent.rstrip("/") + "/" + component) if parent != "/" else "/" + component
+            if directory not in directories:
+                directories.add(directory)
+                directory_entry_counts[directory] = 2  # '.' and '..'
+                directory_entry_counts[parent] += 1
+            parent = directory
+        directory_entry_counts[parent] += 1
+
     if directory_entry_counts["/"] > ROOT_ENTRIES:
         raise ValueError(f"FAT16 root directory supports {ROOT_ENTRIES} entries, got {directory_entry_counts['/']}")
 
@@ -146,12 +173,19 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
             "<B3sB3sII",
             0x80,                      # Bootable status
             b"\x00\x02\x00",           # CHS start
-            0x06,                      # Partition Type: FAT16
+            0xEF,                      # Partition Type: EFI System / FAT16 BIOS volume
             b"\xff\xff\xff",           # CHS end
             PARTITION_START_LBA,       # LBA Start
             PARTITION_SECTORS          # Sector Count
         )
         f.write(mbr_entry)
+
+        # The kernel still boots from FAT16, then mounts this ext2 partition as /
+        ext2_entry = struct.pack(
+            "<B3sB3sII", 0x00, b"\xff\xff\xff", 0x83, b"\xff\xff\xff",
+            EXT2_START_LBA, EXT2_SECTORS
+        )
+        f.write(ext2_entry)
 
         # Ensure MBR signature at byte 510
         f.seek(510)
@@ -324,8 +358,55 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
         f.seek(root_dir_offset)
         f.write(root_dir)
 
-    print(f"[mkfat16] FAT16 volume formatted at LBA {PARTITION_START_LBA} ({PARTITION_SECTORS} sectors).")
-    print(f"[mkfat16] Injected {len(files_to_add)} file(s). Total image size: {TOTAL_SIZE_MB}MB.")
+    # Build the ext2 root partition from the exact same logical tree. mke2fs and
+    # debugfs operate on a temporary filesystem image, which is then embedded at
+    # the Linux partition's LBA so host-side tools never mount the disk image.
+    if not shutil.which("mke2fs") or not shutil.which("debugfs"):
+        raise RuntimeError("ext2 image creation requires mke2fs and debugfs (e2fsprogs)")
+    with tempfile.TemporaryDirectory(prefix="cykos-ext2-") as temp_dir:
+        ext2_path = os.path.join(temp_dir, "root.ext2")
+        with open(ext2_path, "wb") as ext2_file:
+            ext2_file.truncate(EXT2_SECTORS * BYTES_PER_SECTOR)
+        subprocess.run([
+            "mke2fs", "-q", "-F", "-t", "ext2", "-b", "1024", "-I", "256",
+            "-O", "filetype,sparse_super,large_file,^dir_index", ext2_path
+        ], check=True)
+        command_file = os.path.join(temp_dir, "debugfs.cmd")
+        commands = []
+        for directory in sorted(root_directories, key=lambda item: (item.count("/"), item)):
+            if directory != "/":
+                commands.append(f"mkdir {directory}")
+        ext2_files = dict(root_files)
+        for file_path, file_data in root_files.items():
+            parent, _, leaf = file_path.rpartition("/")
+            stem, suffix = os.path.splitext(leaf)
+            if suffix == ".DRV" and len(stem) > 8:
+                short_leaf = stem[:8] + suffix
+                ext2_files[(parent + "/" if parent else "") + short_leaf] = file_data
+        for index, (file_path, file_data) in enumerate(ext2_files.items()):
+            host_path = os.path.join(temp_dir, f"file-{index}")
+            with open(host_path, "wb") as staged:
+                staged.write(file_data.encode("utf-8") if isinstance(file_data, str) else file_data)
+            commands.append(f"write {host_path} /{file_path}")
+        with open(command_file, "w", encoding="utf-8") as command_stream:
+            command_stream.write("\n".join(commands) + "\n")
+        result = subprocess.run(
+            ["debugfs", "-w", "-f", command_file, ext2_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        if result.returncode != 0 or "Could not" in result.stdout or "File not found" in result.stdout:
+            raise RuntimeError(f"debugfs failed while populating ext2 root:\n{result.stdout}")
+        with open(ext2_path, "rb") as ext2_file, open(image_path, "r+b") as disk:
+            disk.seek(EXT2_START_LBA * BYTES_PER_SECTOR)
+            while True:
+                chunk = ext2_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                disk.write(chunk)
+
+    print(f"[makeext2] FAT16 boot volume: LBA {PARTITION_START_LBA}, {PARTITION_SECTORS} sectors.")
+    print(f"[makeext2] ext2 root volume: LBA {EXT2_START_LBA}, {EXT2_SECTORS} sectors.")
+    print(f"[makeext2] FAT16 contains BIOS and UEFI boot files; ext2 contains {len(root_files)} root file(s). Total image size: {TOTAL_SIZE_MB}MB.")
 
 if __name__ == "__main__":
     target_img = sys.argv[1] if len(sys.argv) > 1 else "bin/images/os_image.bin"
@@ -334,11 +415,19 @@ if __name__ == "__main__":
         kernel_bytes = kernel_file.read()
     sample_files = {
         "KERNEL.BIN": kernel_bytes,
-        "USR/SHARE/DOC/README.TXT": "Welcome to CykOS!\nFAT16 Filesystem initialized successfully.\n",
+        "USR/SHARE/DOC/README.TXT": "Welcome to CykOS!\next2 root filesystem initialized successfully.\n",
         "BOOT/MODULES.CFG": "# CykOS Boot-Time Kernel Module List\n/BOOT/DRIVERS/CYKEYBRD.DRV\n/BOOT/DRIVERS/CYKDISK.DRV\n/BOOT/DRIVERS/CYSOUND.DRV\n/BOOT/DRIVERS/CYHDA.DRV\n/BOOT/DRIVERS/CYDISPLA.DRV\n",
         # Create the log entry at format time; boot then overwrites this file.
         "VAR/LOG/LOG.TXT": "",
     }
+
+    uefi_kernel_path = os.path.join("bin", "KERNEL.ELF")
+    uefi_loader_path = os.path.join("bin", "BOOTX64.EFI")
+    if os.path.isfile(uefi_kernel_path) and os.path.isfile(uefi_loader_path):
+        with open(uefi_kernel_path, "rb") as uefi_kernel:
+            sample_files["KERNEL.ELF"] = uefi_kernel.read()
+        with open(uefi_loader_path, "rb") as uefi_loader:
+            sample_files["EFI/BOOT/BOOTX64.EFI"] = uefi_loader.read()
 
     lua_smoke_path = os.path.join("ports", "lua", "tests", "smoke.lua")
     if os.path.isfile(lua_smoke_path):
@@ -387,35 +476,43 @@ if __name__ == "__main__":
                         continue
                     ext = os.path.splitext(fname)[1].upper()
                     if ext in [".BIN", ".COM", ".DRV", ".WAD"]:
+                        if ext == ".WAD":
+                            destination = f"USR/SHARE/GAMES/DOOM/{target_name}"
+                        elif ext == ".DRV":
+                            destination = f"BOOT/DRIVERS/{target_name}"
+                        elif target_name == "SHELL.BIN":
+                            destination = f"BIN/{target_name}"
+                        elif target_name in test_binaries:
+                            destination = f"USR/BIN/TESTS/{target_name}"
+                        else:
+                            destination = f"USR/BIN/{target_name}"
+
+                        # bin/ contains artifacts from this clean build. Keep
+                        # them when the legacy apps/bin directory also has an
+                        # older copy with the same installed path.
+                        if destination in sample_files:
+                            print(f"[makeext2] Keeping earlier build artifact for {destination}; skipping {fpath}")
+                            continue
+
                         with open(fpath, "rb") as bf:
                             content = bf.read()
                             if ext in [".BIN", ".COM"] and len(content) > 524288:
                                 original_size = len(content)
                                 content = strip_elf_unloaded_tail(content)
                                 if len(content) < original_size:
-                                    print(f"[mkfat16] Removed non-loadable ELF tail from {fname}: "
+                                    print(f"[makeext2] Removed non-loadable ELF tail from {fname}: "
                                           f"{original_size} -> {len(content)} bytes")
                             if len(content) == 0:
-                                print(f"[mkfat16] Warning: Skipping 0-byte file: {fname}")
+                                print(f"[makeext2] Warning: Skipping 0-byte file: {fname}")
                                 continue
                             if ext in [".BIN", ".COM"] and len(content) > 524288:
-                                print(f"[mkfat16] Warning: Skipping application larger than 512 KiB: {fname} ({len(content)} bytes)")
+                                print(f"[makeext2] Warning: Skipping application larger than 512 KiB: {fname} ({len(content)} bytes)")
                                 continue
-                            if ext == ".WAD":
-                                destination = f"USR/SHARE/GAMES/DOOM/{target_name}"
-                            elif ext == ".DRV":
-                                destination = f"BOOT/DRIVERS/{target_name}"
-                            elif target_name == "SHELL.BIN":
-                                destination = f"BIN/{target_name}"
-                            elif target_name in test_binaries:
-                                destination = f"USR/BIN/TESTS/{target_name}"
-                            else:
-                                destination = f"USR/BIN/{target_name}"
                             sample_files[destination] = content
                             if ext == ".WAD":
-                                print(f"[mkfat16] Bundled Doom game data: {target_name} ({len(content)} bytes)")
+                                print(f"[makeext2] Bundled Doom game data: {target_name} ({len(content)} bytes)")
                             else:
-                                print(f"[mkfat16] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
+                                print(f"[makeext2] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
 
     directories = ["BIN", "BOOT/DRIVERS", "ETC", "HOME/USER", "MNT", "TMP", "USR/BIN", "USR/BIN/TESTS", "USR/SHARE/DOC", "USR/SHARE/GAMES/DOOM", "VAR/LOG"]
     format_disk(target_img, sample_files, directories)

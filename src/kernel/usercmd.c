@@ -210,7 +210,8 @@ static int resolve_elf_relocations(unsigned int load_bias,
 }
 
 static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
-                              unsigned char* load_area, unsigned int* entry_out,
+                              unsigned char* load_area, unsigned int capacity,
+                              unsigned int min_vaddr_limit, unsigned int* entry_out,
                               int* has_kernel_import) {
     const elf32_ehdr_t* eh = (const elf32_ehdr_t*)file;
     if (file_size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' ||
@@ -239,7 +240,7 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
         if (ph[i].flags & ELF_PF_X) executable_segment = 1;
     }
     if (min_vaddr == 0xFFFFFFFFu || max_vaddr <= min_vaddr ||
-        min_vaddr > USER_APP_BASE || max_vaddr - min_vaddr > USER_DYNAMIC_APP_MAX_SIZE ||
+        min_vaddr > min_vaddr_limit || max_vaddr - min_vaddr > capacity ||
         !executable_segment || !dynamic_vaddr || !dynamic_size ||
         !image_range(dynamic_vaddr, dynamic_size, min_vaddr, max_vaddr)) return -1;
 
@@ -247,7 +248,8 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     if (load_base < min_vaddr) return -1;
     unsigned int load_bias = load_base - min_vaddr;
     if (load_bias > 0xFFFFFFFFu - max_vaddr ||
-        load_bias + max_vaddr > load_base + USER_DYNAMIC_APP_MAX_SIZE) return -1;
+        capacity > 0xFFFFFFFFu - load_base ||
+        load_bias + max_vaddr > load_base + capacity) return -1;
 
     if (zero_elf_bss(ph, eh->phnum, load_bias) != 0 ||
         copy_elf_load_segments(file, ph, eh->phnum, load_bias) != 0) return -1;
@@ -301,6 +303,16 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     if (!image_range(eh->entry, 1, min_vaddr, max_vaddr)) return -1;
     *entry_out = load_bias + eh->entry;
     return 0;
+}
+
+int module_elf32_load(const unsigned char* file, unsigned int file_size,
+                      void* load_area, unsigned int capacity) {
+    unsigned int entry = 0;
+    int has_kernel_import = 0;
+    if (!file || !load_area || !capacity) return -1;
+    return load_dynamic_elf32(file, file_size, (unsigned char*)load_area,
+                              capacity, 0xFFFFFFFFu, &entry,
+                              &has_kernel_import);
 }
 
 /* Load a fully linked ET_EXEC image at the application's fixed address range. */
@@ -368,7 +380,8 @@ typedef struct {
 static volatile int g_usercmd_active = 0;
 static volatile int g_usercmd_app_started = 0;
 static user_process_t g_user_process;
-static unsigned int g_next_user_pid = 1;
+/* PID 1 is reserved for the kernel/shell; user applications start at 2. */
+static unsigned int g_next_user_pid = 2;
 static unsigned int g_usercmd_saved_esp = 0;
 static unsigned int g_usercmd_saved_ebp = 0;
 static unsigned int g_usercmd_saved_ebx = 0;
@@ -849,6 +862,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
         int has_kernel_import = 0;
         int load_result = elf_type == ELF_ET_DYN
             ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest,
+                                 USER_DYNAMIC_APP_MAX_SIZE, USER_APP_BASE,
                                  &entry_address, &has_kernel_import)
             : elf_type == ELF_ET_EXEC
                 ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
@@ -1271,6 +1285,8 @@ int usercmd_wait(int* exit_code) {
 }
 
 int exec_shell_binary(void) {
+    if (*(volatile unsigned int*)0x04ECu == 0x49464555u)
+        return 0; /* The UEFI kernel uses its linked shell fallback. */
     vfs_file_t shell_entry;
     const char* shell_path = "/BIN/SHELL.BIN";
     if (vfs_find_file(shell_path, &shell_entry) != 0) {

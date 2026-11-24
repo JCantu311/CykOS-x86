@@ -13,6 +13,11 @@ start:
     mov ss, ax
     mov sp, 0x7A00
     sti
+    ; Clear the live-CD handoff area on normal disk boots.
+    mov dword [0x04F0], 0
+    mov dword [0x04F4], 0
+    mov dword [0x04F8], 0
+    mov dword [0x04EC], 0
     mov [drive], dl
     call e820
     mov dword [root_lba], ROOT_LBA

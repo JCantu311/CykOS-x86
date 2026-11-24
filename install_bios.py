@@ -21,7 +21,7 @@ if not os.path.isfile(IMAGE):
     raise SystemExit(f"disk image not found: {IMAGE}")
 
 with open(IMAGE, "r+b") as f:
-    # Keep the partition table written by mkfat16.py; install boot code only.
+    # Keep the partition table written by makeext2.py; install boot code only.
     f.seek(0)
     f.write(mbr[:446])
     f.seek(SECTOR)

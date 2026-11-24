@@ -78,9 +78,22 @@ case "$MODE" in
             FOUND_AUDIO=1
         fi
 
+        # Keep the xHCI controller present for USB storage and other devices.
+        # QEMU's usb-kbd takes host input away from the PS/2 keyboard. For the
+        # opt-in test, attach it to a PIIX3 UHCI controller, which CykOS can
+        # enumerate reliably; leave xHCI available for other devices.
+        USB_OPTS=(-device qemu-xhci)
+        if [[ "${CYKOS_QEMU_USB_KBD:-0}" == "1" ]]; then
+            USB_OPTS+=(-device piix3-usb-uhci,id=cykos_usb_kbd
+                       -device usb-kbd,bus=cykos_usb_kbd.0)
+        fi
+        if [[ "${CYKOS_QEMU_USB:-1}" == "0" ]]; then
+            USB_OPTS=()
+        fi
+
         if [[ $FOUND_AUDIO -eq 1 ]]; then
             echo "[run.sh] QEMU audio: ${AUDIO_OPTS[*]}"
-            exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+            exec "$QEMU" -m 4G -vga std "${USB_OPTS[@]}" -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
         fi
 
         echo "[run.sh] Warning: No PC speaker device/audio backend combination works with this QEMU build."
@@ -93,10 +106,10 @@ case "$MODE" in
             # shellcheck disable=SC2086
             AUDIO_OPTS=(${CYKOS_QEMU_AUDIO})
             echo "[run.sh] Using override: ${AUDIO_OPTS[*]}"
-            exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
+            exec "$QEMU" -m 4G -vga std "${USB_OPTS[@]}" -drive file=bin/images/cykos.img,format=raw,if=ide,index=0 "${AUDIO_OPTS[@]}"
         fi
 
-        exec "$QEMU" -m 4G -vga std -drive file=bin/images/cykos.img,format=raw,if=ide,index=0
+        exec "$QEMU" -m 4G -vga std "${USB_OPTS[@]}" -drive file=bin/images/cykos.img,format=raw,if=ide,index=0
         ;;
     virtualbox)
         if [[ $# -ne 2 ]] || ! command -v VBoxManage &> /dev/null; then

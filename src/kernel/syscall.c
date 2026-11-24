@@ -7,6 +7,7 @@
 #include "usercmd.h"
 #include "permissions.h"
 #include "paging.h"
+#include "usb.h"
 
 // Maximum open file descriptors
 #define MAX_FDS 8
@@ -49,27 +50,35 @@ static deferred_console_char_t g_deferred_console[DEFERRED_CONSOLE_CAPACITY];
 static unsigned int g_deferred_console_length;
 static int g_keyboard_event_extended;
 
+static int syscall_fd_owned_by_current(int fd) {
+    return fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
+           g_fds[fd].owner == usercmd_current_pid();
+}
+
 // Kernel-owned physical-key event adapter for applications that need held-key
 // state. Keep this separate from the keyboard module's shell character API so
 // translated characters and module ABI details cannot consume or alter events.
 static int syscall_try_key_event(void) {
-    int scancode;
-    while ((scancode = keyboard_irq_read_scancode()) >= 0) {
-        unsigned char raw = (unsigned char)scancode;
-        if (raw == 0xE0) {
-            g_keyboard_event_extended = 1;
-            continue;
-        }
-        if (raw == 0xE1) {
-            g_keyboard_event_extended = 0;
-            continue;
-        }
+    for (unsigned int pass = 0; pass < 2; ++pass) {
+        int scancode;
+        while ((scancode = keyboard_irq_read_scancode()) >= 0) {
+            unsigned char raw = (unsigned char)scancode;
+            if (raw == 0xE0) {
+                g_keyboard_event_extended = 1;
+                continue;
+            }
+            if (raw == 0xE1) {
+                g_keyboard_event_extended = 0;
+                continue;
+            }
 
-        unsigned int key_id = (g_keyboard_event_extended ? 128u : 0u) +
-                              (raw & 0x7Fu) + 1u;
-        g_keyboard_event_extended = 0;
-        if (raw & 0x80u) return (int)(0x100u + key_id);
-        return (int)key_id;
+            unsigned int key_id = (g_keyboard_event_extended ? 128u : 0u) +
+                                  (raw & 0x7Fu) + 1u;
+            g_keyboard_event_extended = 0;
+            if (raw & 0x80u) return (int)(0x100u + key_id);
+            return (int)key_id;
+        }
+        if (pass == 0) usb_poll();
     }
     return -1;
 }
@@ -169,6 +178,10 @@ static int syscall_validate_user_arguments(const registers_t* regs,
                                           unsigned int a3,
                                           unsigned int a4) {
     if ((regs->cs & 3u) == 0) return 1;
+
+    /* Validate every user pointer before the dispatcher dereferences it. Keep
+     * this list next to the ABI switch so adding a pointer-bearing syscall
+     * requires an explicit range or bounded-string rule here. */
     switch (number) {
         case SYS_PRINT_STRING:
         case SYS_OPEN:
@@ -417,7 +430,7 @@ static void syscall_handler(registers_t* regs) {
                     }
                 }
                 regs->eax = (unsigned int)count;
-            } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
+            } else if (syscall_fd_owned_by_current(fd) &&
                 (g_fds[fd].flags & OPEN_ACCMODE) != 0) {
                 fd_table_t* file = &g_fds[fd];
                 if (permissions_check(file->path, CYK_PERMISSION_WRITE) != 0) {
@@ -508,7 +521,7 @@ static void syscall_handler(registers_t* regs) {
                         regs->eax = (unsigned int)read_bytes;
                     }
                 }
-            } else if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
+            } else if (syscall_fd_owned_by_current(fd) &&
                 (g_fds[fd].flags & OPEN_ACCMODE) != OPEN_WRONLY) {
                 int bytes = vfs_read_at(&g_fds[fd].entry, g_fds[fd].cursor, buf, count);
                 if (bytes > 0) g_fds[fd].cursor += (unsigned int)bytes;
@@ -585,7 +598,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_CLOSE: {
             // arg1 = fd
             int fd = (int)arg1;
-            if (fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use) {
+            if (syscall_fd_owned_by_current(fd)) {
                 g_fds[fd].in_use = 0;
                 g_fds[fd].owner = 0;
                 g_fds[fd].cursor = 0;
@@ -663,9 +676,12 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_TRY_GET_KEY: {
             cyk_keyboard_driver_t* kbd = modload_get_keyboard_driver();
-            regs->eax = (kbd && kbd->try_get_char)
-                ? (unsigned int)kbd->try_get_char()
-                : (unsigned int)-1;
+            int key = (kbd && kbd->try_get_char) ? kbd->try_get_char() : -1;
+            if (key < 0) {
+                usb_poll();
+                key = (kbd && kbd->try_get_char) ? kbd->try_get_char() : -1;
+            }
+            regs->eax = (unsigned int)key;
             break;
         }
 
@@ -834,6 +850,12 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_GETUID: regs->eax = permissions_uid(); break;
         case SYS_GETGID: regs->eax = permissions_gid(); break;
+        case SYS_GETPID: {
+            unsigned int pid = usercmd_current_pid();
+            /* The kernel/shell is process 1. */
+            regs->eax = pid ? pid : 1;
+            break;
+        }
         case SYS_SETUID: regs->eax = (unsigned int)permissions_set_uid(arg1); break;
         case SYS_SETGID: regs->eax = (unsigned int)permissions_set_gid(arg1); break;
 
@@ -850,7 +872,7 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = 0;
                 break;
             }
-            if (fd < 3 || fd >= MAX_FDS || !g_fds[fd].in_use) {
+            if (!syscall_fd_owned_by_current(fd)) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
@@ -876,7 +898,7 @@ static void syscall_handler(registers_t* regs) {
             int fd = (int)arg1;
             int offset = (int)arg2;
             unsigned int base;
-            if (fd < 3 || fd >= MAX_FDS || !g_fds[fd].in_use) {
+            if (!syscall_fd_owned_by_current(fd)) {
                 regs->eax = (unsigned int)-1;
                 break;
             }

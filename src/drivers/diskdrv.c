@@ -5,8 +5,14 @@
 static int disk_mount_init(void) {
     int mounted = fat16_mount_extra_drives();
     if (mounted < 0) {
-        print_color_string("[DISK] Volume discovery failed.\n", VGA_RED);
-        return -1;
+        /* ext2 owns the VFS root in current images. Initialize FAT16 separately
+         * so legacy volume helpers can still inspect the BIOS boot partition. */
+        if (fat16_init() != 0) {
+            print_color_string("[DISK] No legacy FAT16 volumes found.\n", VGA_YELLOW);
+            return 0;
+        }
+        mounted = fat16_mount_extra_drives();
+        if (mounted < 0) mounted = 0;
     }
     print_string("[DISK] Additional FAT16 volumes mounted: ");
     print_char((char)('0' + (mounted % 10)));

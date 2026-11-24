@@ -15,6 +15,7 @@ typedef unsigned int size_t;
 
 // Public Standard I/O Function Declarations
 void clear_screen(void);
+void uefi_console_init(void);
 void print_char(char c);
 void print_string(const char* str);
 int strncmp(const char* str1, const char* str2, size_t n);

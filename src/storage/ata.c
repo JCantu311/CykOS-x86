@@ -1,5 +1,8 @@
 #include "cykastd.h"
 #include "ata.h"
+#include "ahci.h"
+#include "nvme.h"
+#include "usb.h"
 
 #define ATA_PRIMARY_BASE      0x1F0
 #define ATA_SECONDARY_BASE    0x170
@@ -11,6 +14,8 @@
 #define ATA_CMD_WRITE         0x30
 #define ATA_CMD_CACHE_FLUSH   0xE7
 #define ATA_CMD_IDENTIFY      0xEC
+#define ATA_CMD_IDENTIFY_PACKET 0xA1
+#define ATA_CMD_PACKET        0xA0
 
 // Status Bits
 #define ATA_STATUS_ERR        0x01  // Error bit
@@ -65,14 +70,19 @@ static unsigned char g_selected_drive;
 static unsigned int g_drive_sector_count[4];
 
 int ata_select_drive(unsigned char drive) {
-    if (drive >= 4) return -1;
+    if (drive >= 4u + USB_STORAGE_MAX_DEVICES) return -1;
     g_selected_drive = drive;
     return 0;
 }
 
 int ata_probe_drive(unsigned char drive) {
-    if (drive >= 4) return 0;
+    if (drive >= 4u) return usb_storage_present((unsigned int)drive - USB_STORAGE_DRIVE_BASE);
     g_drive_sector_count[drive] = 0;
+
+    /* Prefer a native AHCI controller for the primary disk, retaining legacy
+     * IDE PIO when no supported AHCI SATA port is present. */
+    if (drive == 0 && (ahci_probe(&g_drive_sector_count[drive]) ||
+                       nvme_probe(&g_drive_sector_count[drive]))) return 1;
 
     unsigned short base = ata_base_for_drive(drive);
     unsigned short control = ata_control_for_drive(drive);
@@ -108,6 +118,71 @@ int ata_probe_drive(unsigned char drive) {
     return g_drive_sector_count[drive] != 0;
 }
 
+int ata_probe_atapi_drive(unsigned char drive) {
+    if (drive >= 4) return 0;
+    unsigned short base = ata_base_for_drive(drive);
+    unsigned short control = ata_control_for_drive(drive);
+    outb(base + 6, (unsigned char)(0xA0 | ((drive & 1) << 4)));
+    ata_delay_400ns(control);
+    outb(base + 2, 0);
+    outb(base + 3, 0);
+    outb(base + 4, 0);
+    outb(base + 5, 0);
+    outb(base + 7, ATA_CMD_IDENTIFY_PACKET);
+    if (ata_wait_drq(base, control) != 0) return 0;
+
+    unsigned short identify[256];
+    for (int i = 0; i < 256; i++) identify[i] = inw(base);
+    if (ata_wait_ready(base, control) != 0) return 0;
+    return (identify[0] & 0xC000u) == 0x8000u;
+}
+
+int ata_read_atapi_blocks(unsigned char drive, unsigned int lba, unsigned char count, unsigned short* target_buf) {
+    if (drive >= 4 || !count || count > 16 || !target_buf ||
+        lba > 0xFFFFFFFFu - ((unsigned int)count - 1u)) return -1;
+    unsigned short base = ata_base_for_drive(drive);
+    unsigned short control = ata_control_for_drive(drive);
+    if (ata_select_drive(drive) != 0) return -1;
+
+    outb(base + 6, (unsigned char)(0xA0 | ((drive & 1) << 4)));
+    ata_delay_400ns(control);
+    if (ata_wait_ready(base, control) != 0) return -1;
+    outb(base + 1, 0);       // PACKET feature: PIO data transfer
+    unsigned int byte_limit = (unsigned int)count * 2048u;
+    outb(base + 4, (unsigned char)byte_limit);
+    outb(base + 5, (unsigned char)(byte_limit >> 8));
+    outb(base + 7, ATA_CMD_PACKET);
+    if (ata_wait_drq(base, control) != 0) return -1;
+
+    unsigned char packet[12] = {
+        0xA8, 0,
+        (unsigned char)(lba >> 24), (unsigned char)(lba >> 16),
+        (unsigned char)(lba >> 8), (unsigned char)lba,
+        0, 0, 0, count, 0, 0
+    };
+    for (unsigned int i = 0; i < sizeof(packet); i += 2) {
+        outw(base, (unsigned short)(packet[i] | ((unsigned short)packet[i + 1] << 8)));
+    }
+
+    unsigned int total_bytes = byte_limit;
+    unsigned int transferred = 0;
+    while (transferred < total_bytes) {
+        if (ata_wait_drq(base, control) != 0) return -1;
+        unsigned int bytes = (unsigned int)inb(base + 4) |
+                             ((unsigned int)inb(base + 5) << 8);
+        if (!bytes || (bytes & 1u) || bytes > total_bytes - transferred) return -1;
+        for (unsigned int i = 0; i < bytes / 2; i++) {
+            target_buf[transferred / 2 + i] = inw(base);
+        }
+        transferred += bytes;
+    }
+    return ata_wait_ready(base, control);
+}
+
+int ata_read_atapi_block(unsigned char drive, unsigned int lba, unsigned short* target_buf) {
+    return ata_read_atapi_blocks(drive, lba, 1, target_buf);
+}
+
 /**
  * Reads sequential sectors using LBA28 PIO Mode
  * @param lba        The absolute sector number to start reading from
@@ -116,6 +191,17 @@ int ata_probe_drive(unsigned char drive) {
  * @return           0 on success, -1 on failure
  */
 int ata_read_sectors(unsigned int lba, unsigned char count, unsigned short* target_buf) {
+    if (g_selected_drive >= USB_STORAGE_DRIVE_BASE) {
+        if (!target_buf || !count) return -1;
+        return usb_storage_read_sectors((unsigned int)g_selected_drive - USB_STORAGE_DRIVE_BASE,
+                                        lba, count, target_buf);
+    }
+    if (g_selected_drive == 0) {
+        if (ahci_probe(&g_drive_sector_count[0]))
+            return ahci_read_sectors(lba, count, target_buf);
+        if (nvme_probe(&g_drive_sector_count[0]))
+            return nvme_read_sectors(lba, count, target_buf);
+    }
     unsigned short base = ata_base_for_drive(g_selected_drive);
     unsigned short control = ata_control_for_drive(g_selected_drive);
     if (!target_buf || count == 0 || lba > 0x0FFFFFFF ||
@@ -155,6 +241,17 @@ int ata_read_sectors(unsigned int lba, unsigned char count, unsigned short* targ
  * @return           0 on success, -1 on failure
  */
 int ata_write_sectors(unsigned int lba, unsigned char count, const unsigned short* source_buf) {
+    if (g_selected_drive >= USB_STORAGE_DRIVE_BASE) {
+        if (!source_buf || !count) return -1;
+        return usb_storage_write_sectors((unsigned int)g_selected_drive - USB_STORAGE_DRIVE_BASE,
+                                         lba, count, source_buf);
+    }
+    if (g_selected_drive == 0) {
+        if (ahci_probe(&g_drive_sector_count[0]))
+            return ahci_write_sectors(lba, count, source_buf);
+        if (nvme_probe(&g_drive_sector_count[0]))
+            return nvme_write_sectors(lba, count, source_buf);
+    }
     unsigned short base = ata_base_for_drive(g_selected_drive);
     unsigned short control = ata_control_for_drive(g_selected_drive);
     if (!source_buf || count == 0 || lba > 0x0FFFFFFF ||

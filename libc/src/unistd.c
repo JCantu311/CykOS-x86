@@ -21,6 +21,7 @@
 #define SYS_SBRK      112
 #define SYS_GETCWD    183
 #define SYS_GETUID    24
+#define SYS_GETPID    20
 #define SYS_GETGID    47
 #define SYS_SETUID    23
 #define SYS_SETGID    46
@@ -203,4 +204,8 @@ unsigned int sleep(unsigned int seconds) {
 
 int isatty(int fd) {
     return (fd >= 0 && fd <= 2) ? 1 : 0;
+}
+
+pid_t getpid(void) {
+    return (pid_t)__syscall0(SYS_GETPID);
 }

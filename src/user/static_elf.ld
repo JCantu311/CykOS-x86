@@ -4,7 +4,8 @@ ENTRY(main)
 
 PHDRS
 {
-    app PT_LOAD FLAGS(7);
+    text PT_LOAD FLAGS(5); /* Read + execute */
+    data PT_LOAD FLAGS(6); /* Read + write */
 }
 
 SECTIONS
@@ -16,19 +17,19 @@ SECTIONS
         *(.text*)
         *(.rodata*)
         *(.rdata*)
-    } :app
-    . = ALIGN(4);
+    } :text
+    . = ALIGN(0x1000);
     .data : {
         *(.data*)
         *(.data.rel.ro*)
         *(.data.rel.ro.local*)
         *(.got*)
         *(.got.plt*)
-    } :app
+    } :data
     .bss (NOLOAD) : {
         *(.bss*)
         *(COMMON)
-    } :app
+    } :data
 
     /DISCARD/ : {
         *(.dynamic*)

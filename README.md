@@ -9,9 +9,45 @@ Build the bootable raw disk and, when conversion tools are installed, virtual di
 ./make.sh
 ```
 
-The build places images under `bin/images`: `os_image.bin` and `cykos.img` are raw images; VDI, VMDK, and VHD are generated when `VBoxManage` or `qemu-img` is installed. The BIOS boot loader reads the FAT16 `KERNEL.BIN` file. The kernel's ATA driver currently supports legacy IDE/ATA PIO, not AHCI or NVMe.
+The build places images under `bin/images`: `os_image.bin` and `cykos.img` are raw images; VDI, VMDK, and VHD are generated when `VBoxManage` or `qemu-img` is installed. BIOS boots `KERNEL.BIN` through the FAT16 loader. UEFI boots `EFI/BOOT/BOOTX64.EFI`, which starts the Multiboot2 ELF kernel. The kernel probes native AHCI SATA, NVMe namespace 1, then legacy IDE PIO for its root disk.
 
-For VirtualBox or VMware, create a 32-bit x86 virtual machine with BIOS/Legacy boot enabled and attach the generated disk as an IDE drive. Do not attach it through AHCI/NVMe unless those drivers are added. Start a configured VM with:
+When `xorriso` is installed, `./make.sh` also creates
+`bin/images/cykos-installer.iso` with BIOS and UEFI El Torito entries. In
+BIOS/Legacy mode the menu offers a CykOS live session or disk installation. In
+UEFI mode GRUB starts the live kernel and passes the bundled disk image as a
+Multiboot module; the live session mounts its ext2 root. With enough contiguous
+RAM it copies the image to a RAM disk, so filesystem changes work during the
+session and disappear at shutdown. The UEFI entry currently boots the live
+session; the destructive disk-install menu is BIOS-only.
+
+The BIOS install option lists BIOS hard disks, excludes the BIOS boot medium, and
+requires selecting a disk plus typing `ERASE` before writing. It replaces the
+selected disk's partition table and writes the bundled image from sector 0;
+sectors beyond the image on a larger disk are left unchanged. The target must
+be at least as large as the image and expose 512-byte sectors through BIOS
+EDD. The installer ISO builder verifies that its embedded disk image and BIOS
+kernel match the source files. UEFI boot files require `grub-mkstandalone`,
+GRUB EFI modules, and mtools (`mformat`, `mmd`, and `mcopy`).
+If the ISO is not generated, install `xorriso` and rebuild.
+
+## Disk image utility
+
+`tools/cykos-disk.py` provides host-side operations for the current BIOS image
+layout. After building CykOS, create an image with
+`python3 tools/cykos-disk.py format-image /path/to/cykos.img` and inspect its
+partition table with `python3 tools/cykos-disk.py inspect /path/to/cykos.img`.
+`format-image` refuses to replace an existing file unless `--force` is given.
+These commands operate on image files only; they do not partition or format a
+physical disk. The current layout is an MBR table with an EFI System/FAT16
+boot partition and an ext2 root partition. UEFI boot uses the removable-media
+fallback path on the FAT partition; GPT and native in-OS disk management are
+not implemented. Creating UEFI boot files requires `grub-mkstandalone` and
+the GRUB x86_64 EFI modules. The polled AHCI and NVMe paths use DMA below
+4 GiB and support 512-byte logical sectors; NVMe currently exposes namespace
+1 through the first detected controller. Legacy IDE remains available as a
+fallback.
+
+For VirtualBox or VMware, create a 32-bit x86 virtual machine with BIOS/Legacy boot enabled and attach the generated disk as IDE, AHCI, or NVMe storage. To use UEFI, enable EFI firmware and boot the generated disk's EFI fallback loader. Start a configured VM with:
 
 ```sh
 ./run.sh virtualbox "CykOS"
@@ -28,13 +64,13 @@ The flat standalone shell has a reserved physical-memory window configured in `c
 
 The root filesystem uses a Unix-like layout: `/bin` contains the standalone shell, `/usr/bin` contains apps, `/boot/drivers` and `/boot/MODULES.CFG` hold boot drivers, `/etc` contains command configuration, `/usr/share/doc` contains documentation, `/home/user` is the user home, `/tmp` is for temporary files, `/var/log` is reserved for logs, and `/mnt` is the virtual mount point for additional volumes. Existing `/CYKOS` images and `/drive` paths remain readable for compatibility.
 
-CykShell's Tab completion resolves command names in the first token and file or directory names in later tokens. It uses the mounted VFS directory listing, compares names case-insensitively, appends `/` for a directory, and adds a space after a completed file.
+CykShell's Tab completion resolves command names in the first token and file or directory names in later tokens. It uses the mounted VFS directory listing, compares names case-insensitively, appends `/` for a directory, and adds a space after a completed file. Ctrl+L clears the terminal and redraws the prompt and any command line currently being edited.
 
 CykShell reads the optional `/ETC/AUTOEXEC.SHE` file after its startup banner and before showing the first prompt. It uses the existing `.SHE` script parser: one normal shell command per line, with `#` comments. The image builder installs the repository's `AUTOEXEC.SHE` template at that path; edit the template to select startup commands.
 
 CykShell supports up to eight commands in a pipeline (`cat file | grep text`), conditional command lists (`cmd && next` and `cmd || fallback`), and output redirection (`echo hello > file`, `cat file >> log`). `&&` and `||` use whether the command was found as their current success signal; built-in command failure statuses and application exit codes are not yet propagated. Added text tools include `echo`, `grep`, `head`, and `tail`; `grep` performs a literal, case-sensitive substring match, and `head`/`tail` show ten lines.
 
-The VFS probes registered filesystem drivers and mounts the first supported boot volume. FAT16 and FAT32 are registered built-in backends. Both support 8.3 path lookup, directory listing/navigation, and file reads; FAT32 also supports file create/replace/delete and empty-directory create/remove. Long file names are skipped. FAT32 is a single-volume implementation and does not yet support FSInfo updates, timestamps, permissions, symbolic links, or crash-safe journaling.
+The VFS probes registered filesystem drivers and mounts the first supported volume. The ext2 backend is registered before FAT16/FAT32 and probes MBR Linux partitions (type `0x83`); it supports 1 KiB blocks, ordinary ext2 directory entries, sparse-file reads, and direct, single-indirect, and double-indirect file blocks. It supports file creation, whole-file replacement, deletion, directory creation, and removal of empty directories. It uses compatibility case-insensitive path lookup and rejects unsupported feature flags. The image builder creates an 80 MiB disk with a FAT16 BIOS boot partition containing only `KERNEL.BIN` and a separate ext2 root partition containing the complete OS tree. The bootloader still loads the kernel from FAT16; after startup, ext2 provides `/`. FAT16 root mounting remains as a legacy fallback for older disk images. This ext2 implementation has no journal, crash recovery, or triple-indirect file support. Building the image requires `mke2fs` and `debugfs` from e2fsprogs.
 
 Filesystem code should implement the `vfs_driver_t` operations in `vfs.h` and register its driver in `vfs_mount_root()` in `vfs.c`. Existing FAT16 entry points remain available for compatibility, but kernel, shell, and bundled app I/O use the VFS.
 
@@ -111,6 +147,16 @@ Test and demonstration binaries are installed under `/USR/BIN/TESTS` and are not
 
 ### Hardware Limitations
 
+- **Keyboard:** The loadable keyboard module retains the kernel's IRQ1/i8042
+  PS/2 input path. USB HID boot keyboards are added through `CYKUSB.DRV` and
+  feed the same keyboard event queue.
+- **USB:** The loadable `CYKUSB.DRV` module provides UHCI, OHCI, EHCI, and xHCI
+  host controllers for directly connected USB HID boot keyboards and USB mass-storage devices using the Bulk
+  Only Transport protocol, including devices with multiple logical units. FAT16
+  USB volumes can be mounted as extra drives.
+  USB hubs, hot-plug discovery, non-boot HID devices, UAS storage, and USB
+  booting are not implemented. The xHCI backend currently initializes one
+  controller.
 - **PC Speaker:** Modern x64 hardware frequently has no physical PC speaker connected to port 0x61, so the driver loads without error but is silent on real machines.
 - **QEMU:** QEMU on WSL/Fedora ARM may not have the `pcspk`/`isa-pcspk` device compiled in. Use `./run.sh qemu` and check for `[run.sh] QEMU audio:` output. If no PC speaker device is available, sound will be silent regardless of driver correctness.
 - **HDA Audio:** Detected via PCI but playback is not yet implemented. Full HDA sample playback (DMA buffers, codec init) is planned future work.

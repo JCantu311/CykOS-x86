@@ -106,10 +106,10 @@ fi
 if [ -f bin/images/os_image.bin ]; then
     echo "Updating FAT16 filesystem on bin/images/os_image.bin..."
     if command -v python3 &> /dev/null; then
-        python3 mkfat16.py bin/images/os_image.bin
+        python3 makeext2.py bin/images/os_image.bin
         python3 install_bios.py bin/images/os_image.bin
     elif command -v python &> /dev/null; then
-        python mkfat16.py bin/images/os_image.bin
+        python makeext2.py bin/images/os_image.bin
         python install_bios.py bin/images/os_image.bin
     fi
 fi
