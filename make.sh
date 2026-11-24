@@ -95,14 +95,14 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
 
 # Build an ELF32 Multiboot2 entry for GRUB's x86_64 UEFI loader. The BIOS
 # image remains the flat binary above; both entry paths share the kernel C code.
 $LD -m elf_i386 -T config/uefi-linker.ld --gc-sections --no-dynamic-linker -no-pie \
     -Map bin/kernel-uefi.map bin/uefi_entry.o bin/boot.o bin/cykastd.o bin/ata.o \
     bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o \
-    bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/heap.o \
+    bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o \
     bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB \
     -o bin/KERNEL.ELF
 if command -v grub-file &> /dev/null; then

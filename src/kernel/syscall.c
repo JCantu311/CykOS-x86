@@ -364,10 +364,7 @@ static void syscall_handler(registers_t* regs) {
                 syscall_user_string_valid(regs, (const char*)arg1, 128) &&
                 (!limit || syscall_user_range_valid(regs, arg2, limit)) &&
                 syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
-                (is_write
-                    ? (permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0 ||
-                       vfs_find_file(absolute_path, &(vfs_file_t){0}) != 0)
-                    : permissions_check(absolute_path, CYK_PERMISSION_READ) == 0)) {
+                (!is_write || permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0)) {
                 result = is_write
                     ? vfs_write_file(absolute_path, (const void*)arg2, limit)
                     : vfs_read_file_by_name(absolute_path, (void*)arg2, limit);
@@ -565,7 +562,11 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = (unsigned int)-1;
                     break;
                 }
-                (void)permissions_create(absolute_path, arg3, 0);
+                if (permissions_create(absolute_path, arg3, 0) != 0) {
+                    (void)vfs_delete_file(absolute_path);
+                    regs->eax = (unsigned int)-1;
+                    break;
+                }
                 found = 1;
             } else if (found && (flags & OPEN_CREAT) && (flags & OPEN_EXCL)) {
                 regs->eax = (unsigned int)-1;
@@ -737,8 +738,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_FAT_DELETE: {
             // arg1 = filename
             char absolute_path[128];
-            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
-                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0
                 ? vfs_delete_file(absolute_path) : -1;
             regs->eax = (unsigned int)res;
             break;
@@ -750,7 +750,10 @@ static void syscall_handler(registers_t* regs) {
             char absolute_path[128];
             int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0
                 ? vfs_mkdir(absolute_path) : -1;
-            if (res == 0) (void)permissions_create(absolute_path, arg2, 1);
+            if (res == 0 && permissions_create(absolute_path, arg2, 1) != 0) {
+                (void)vfs_rmdir(absolute_path);
+                res = -1;
+            }
             regs->eax = (unsigned int)res;
             break;
         }
@@ -758,8 +761,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_RMDIR:
         case SYS_CYK_RMDIR: {
             char absolute_path[128];
-            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
-                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+            int res = syscall_absolute_path((const char*)arg1, absolute_path) == 0
                 ? vfs_rmdir(absolute_path) : -1;
             regs->eax = (unsigned int)res;
             break;
@@ -791,8 +793,7 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_UNLINK: {
             char absolute_path[128];
-            regs->eax = (unsigned int)(syscall_absolute_path((const char*)arg1, absolute_path) == 0 &&
-                permissions_check(absolute_path, CYK_PERMISSION_WRITE) == 0
+            regs->eax = (unsigned int)(syscall_absolute_path((const char*)arg1, absolute_path) == 0
                 ? vfs_delete_file(absolute_path) : -1);
             break;
         }
@@ -801,7 +802,8 @@ static void syscall_handler(registers_t* regs) {
             char absolute_path[128];
             const char* path = absolute_path;
             unsigned int* statbuf = (unsigned int*)arg2;
-            if (!statbuf || syscall_absolute_path((const char*)arg1, absolute_path) != 0) {
+            if (!statbuf || syscall_absolute_path((const char*)arg1, absolute_path) != 0 ||
+                permissions_check(absolute_path, 0) != 0) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
@@ -856,6 +858,7 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = pid ? pid : 1;
             break;
         }
+        case SYS_UMASK: regs->eax = permissions_set_umask(arg1); break;
         case SYS_SETUID: regs->eax = (unsigned int)permissions_set_uid(arg1); break;
         case SYS_SETGID: regs->eax = (unsigned int)permissions_set_gid(arg1); break;
 

@@ -8,6 +8,7 @@
 #include "heap.h"
 #include "usercmd.h"
 #include "permissions.h"
+#include "accounts.h"
 #include "paging.h"
 #include "gdt.h"
 #include "exports.h"
@@ -124,6 +125,7 @@ void kernel_main(void) {
         print_string("[LIVE] Preparing a temporary root filesystem from the CD...\n");
     if (vfs_mount_root() == 0) {
         permissions_init();
+        accounts_init();
         print_string("VFS mounted root with ");
         print_string(vfs_current_driver());
         print_string(".\n");

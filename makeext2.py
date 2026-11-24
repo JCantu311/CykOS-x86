@@ -460,7 +460,8 @@ if __name__ == "__main__":
 
     # Keep diagnostics and demonstration programs separate from normal apps.
     test_binaries = {
-        "HELLO.BIN", "SYSDEMO.BIN", "POSIXTEST.BIN", "SOUNDTEST.BIN", "GFXDEMO.BIN"
+        "HELLO.BIN", "SYSDEMO.BIN", "POSIXTEST.BIN", "SOUNDTEST.BIN", "GFXDEMO.BIN",
+        "IDPROBE.BIN"
     }
 
     # Automatically scan bin/ and apps/bin/ for all user binaries

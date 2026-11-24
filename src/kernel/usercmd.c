@@ -7,6 +7,7 @@
 #include "exports.h"
 #include "paging.h"
 #include "gdt.h"
+#include "permissions.h"
 
 #define USERCMDS_FILE     "/ETC/USERCMDS.LST"
 #define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
@@ -371,6 +372,9 @@ typedef struct {
     unsigned int pid;
     user_process_state_t state;
     int exit_code;
+    unsigned int parent_uid;
+    unsigned int parent_gid;
+    unsigned int parent_umask;
     void* stack;
     void* heap_arena;
     unsigned int heap_capacity;
@@ -816,6 +820,14 @@ int exec_user_command(const char* cmd_name, const char* args) {
         }
     }
 
+    if (permissions_check(target_file, CYK_PERMISSION_EXEC) != 0) {
+        g_usercmd_active = 0;
+        print_color_string("CykShell: permission denied: ", VGA_RED);
+        print_string(target_file);
+        print_string("\n");
+        return 1;
+    }
+
     // Check if executable file is empty
     if (app_entry.size == 0) {
         g_usercmd_active = 0;
@@ -964,6 +976,9 @@ int exec_user_command(const char* cmd_name, const char* args) {
     if (g_next_user_pid == 0) g_next_user_pid = 1;
     g_user_process.state = USER_PROCESS_RUNNING;
     g_user_process.exit_code = 0;
+    g_user_process.parent_uid = permissions_uid();
+    g_user_process.parent_gid = permissions_gid();
+    g_user_process.parent_umask = permissions_umask();
     g_user_process.stack = app_stack;
     g_user_process.heap_arena = (void*)USER_APP_HEAP_BASE;
     unsigned int available = heap_get_usable_memory_end() > USER_APP_HEAP_BASE
@@ -1024,6 +1039,8 @@ int exec_user_command(const char* cmd_name, const char* args) {
     g_usercmd_user_mode_active = 0;
     g_usercmd_active = 0;
     g_usercmd_app_started = 0;
+    permissions_set_identity(g_user_process.parent_uid, g_user_process.parent_gid);
+    (void)permissions_set_umask(g_user_process.parent_umask);
     heap_set_allocation_owner(0);
     syscall_close_process_fds(g_user_process.pid);
     heap_free_allocations_by_owner(g_user_process.pid);

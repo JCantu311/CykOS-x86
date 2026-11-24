@@ -47,6 +47,13 @@ the GRUB x86_64 EFI modules. The polled AHCI and NVMe paths use DMA below
 1 through the first detected controller. Legacy IDE remains available as a
 fallback.
 
+Run `python3 -m unittest discover -s tests -v` for host-side image-layout
+regression checks, `python3 tools/cykos-disk.py validate bin/images/cykos.img`
+to check the MBR, partition bounds, overlap, FAT16 label, and ext superblock,
+and `python3 tools/verify-image.py bin/images/cykos.img` to run `e2fsck -fn`
+on an extracted copy of the root partition. These checks do not replace
+booting the image in an emulator.
+
 For VirtualBox or VMware, create a 32-bit x86 virtual machine with BIOS/Legacy boot enabled and attach the generated disk as IDE, AHCI, or NVMe storage. To use UEFI, enable EFI firmware and boot the generated disk's EFI fallback loader. Start a configured VM with:
 
 ```sh
@@ -70,13 +77,44 @@ CykShell reads the optional `/ETC/AUTOEXEC.SHE` file after its startup banner an
 
 CykShell supports up to eight commands in a pipeline (`cat file | grep text`), conditional command lists (`cmd && next` and `cmd || fallback`), and output redirection (`echo hello > file`, `cat file >> log`). `&&` and `||` use whether the command was found as their current success signal; built-in command failure statuses and application exit codes are not yet propagated. Added text tools include `echo`, `grep`, `head`, and `tail`; `grep` performs a literal, case-sensitive substring match, and `head`/`tail` show ten lines.
 
-The VFS probes registered filesystem drivers and mounts the first supported volume. The ext2 backend is registered before FAT16/FAT32 and probes MBR Linux partitions (type `0x83`); it supports 1 KiB blocks, ordinary ext2 directory entries, sparse-file reads, and direct, single-indirect, and double-indirect file blocks. It supports file creation, whole-file replacement, deletion, directory creation, and removal of empty directories. It uses compatibility case-insensitive path lookup and rejects unsupported feature flags. The image builder creates an 80 MiB disk with a FAT16 BIOS boot partition containing only `KERNEL.BIN` and a separate ext2 root partition containing the complete OS tree. The bootloader still loads the kernel from FAT16; after startup, ext2 provides `/`. FAT16 root mounting remains as a legacy fallback for older disk images. This ext2 implementation has no journal, crash recovery, or triple-indirect file support. Building the image requires `mke2fs` and `debugfs` from e2fsprogs.
+The VFS probes registered filesystem drivers and mounts the first supported volume. The ext2 backend is registered before FAT16/FAT32 and probes MBR Linux partitions (type `0x83`); it supports 1 KiB blocks, ordinary ext2 directory entries, sparse-file reads, and direct, single-indirect, and double-indirect file blocks. It supports file creation, whole-file replacement, deletion, directory creation, and removal of empty directories. Whole-file replacement writes a new inode and switches the directory entry after the new contents are ready; failed cleanup places the mount into a write-protected state. This reduces exposure to interrupted rewrites and reports later writes as failures. It does not provide power-loss atomicity: ext2 metadata updates have no journal or recovery pass. The driver uses compatibility case-insensitive path lookup and rejects unsupported feature flags. The image builder creates an 80 MiB disk with a FAT16 BIOS boot partition containing only `KERNEL.BIN` and a separate ext2 root partition containing the complete OS tree. The bootloader still loads the kernel from FAT16; after startup, ext2 provides `/`. FAT16 root mounting remains as a legacy fallback for older disk images. Triple-indirect files are unsupported. Building the image requires `mke2fs` and `debugfs` from e2fsprogs.
 
 Filesystem code should implement the `vfs_driver_t` operations in `vfs.h` and register its driver in `vfs_mount_root()` in `vfs.c`. Existing FAT16 entry points remain available for compatibility, but kernel, shell, and bundled app I/O use the VFS.
 
 ## Syscalls
 
-The `int 0x80` table uses Linux i386 numbers for the implemented POSIX-style subset: `exit` (1), `read` (3), `write` (4), `open` (5), `close` (6), `wait` (7), `unlink` (10), `chdir` (12), `lseek` (19), `mkdir` (39), `rmdir` (40), `brk` (45), and `getcwd` (183). Static ELF applications run at ring 3 with a private 256 KiB stack and an app heap capped at 16 MiB, further limited by contiguous usable RAM reported by BIOS E820. Kernel heap allocations, app `brk`/`sbrk` storage, and open file descriptors are tracked to the active process and reclaimed when it returns, calls `exit`, is interrupted with Ctrl+C, or faults. A small process record tracks its PID and exit status; the shell's `wait` command collects the most recent completed app's PID and status. Legacy flat binaries and dynamic applications with kernel imports retain the ring 0 compatibility path. File descriptors are limited, file opens support a subset of access/create/truncate/append flags, and errors return `-1` without a full `errno` implementation. `brk` takes an absolute address; the old increment-based behavior remains as CykOS `sbrk` syscall 112. Legacy CykOS filesystem syscalls 105-111 remain for existing programs. This is not a complete POSIX environment. MS-DOS does not define a universal protected-mode syscall-number ABI, so DOS-specific compatibility is provided only through filesystem/path semantics where they naturally overlap.
+The `int 0x80` table uses Linux i386 numbers for the implemented POSIX-style subset: `exit` (1), `read` (3), `write` (4), `open` (5), `close` (6), `wait` (7), `unlink` (10), `chmod` (15), `getpid` (20), `setuid` (23), `getuid` (24), `access` (33), `chdir` (12), `lseek` (19), `mkdir` (39), `rmdir` (40), `setgid` (46), `getgid` (47), `umask` (60), `brk` (45), `chown` (182), and `getcwd` (183). Static ELF applications run at ring 3 with a private 256 KiB stack and an app heap capped at 16 MiB, further limited by contiguous usable RAM reported by BIOS E820. Kernel heap allocations, app `brk`/`sbrk` storage, and open file descriptors are tracked to the active process and reclaimed when it returns, calls `exit`, is interrupted with Ctrl+C, or faults. A small process record tracks its PID and exit status; the shell's `wait` command collects the most recent completed app's PID and status. CykOS currently runs one foreground application at a time and has no scheduler or concurrent processes. User memory is selectively enabled for the active ring 3 app and revoked during cleanup; this remains a shared identity-mapped address space rather than per-process virtual memory. UID/GID/umask state is inherited by the foreground app and restored to the shell when it exits. There is no login or multiuser session manager, and file permission records do not provide a security boundary against ring 0 compatibility applications. Legacy flat binaries and dynamic applications with kernel imports retain the ring 0 compatibility path. File descriptors are limited, file opens support a subset of access/create/truncate/append flags, and errors return `-1` without a full `errno` implementation. `brk` takes an absolute address; the old increment-based behavior remains as CykOS `sbrk` syscall 112. Legacy CykOS filesystem syscalls 105-111 remain for existing programs. This is not a complete POSIX environment. MS-DOS does not define a universal protected-mode syscall-number ABI, so DOS-specific compatibility is provided only through filesystem/path semantics where they naturally overlap.
+
+## File permissions
+
+CykOS applies numeric UID/GID and Unix-style `rwx` mode checks at the VFS
+boundary, including shell reads, writes, listings, directory changes, and
+deletes. Paths are normalized before permission records are looked up. The
+persistent `/ETC/PERMISSIONS.DB` stores up to 128 explicit path records; files
+created through CykOS receive the current UID/GID and the active umask. Files
+without an explicit record default to root ownership, directories to `0755`,
+ordinary files to `0644`, and `.BIN`, `.COM`, and `.SHE` files to `0755`.
+Deleted paths lose their permission record. If the permission database cannot
+be saved, CykOS reports the operation as failed and denies non-root access
+until reboot so unsaved metadata cannot silently authorize later operations.
+
+The shell provides `id`, `whoami`, `users`, `stat <path>`, `access <rwx>
+<path>`, `chmod <octal-mode> <path>`, `chown <uid[:gid]> <path>`, and `umask
+[octal-mask]`. Root creates up to 32 accounts with `useradd <name> <uid> <gid>
+[sudo]`; names use letters, digits, `_`, and `-`, and each UID must be unique.
+`usermod <name> sudo|nosudo` changes sudo authorization, and `userdel <name>`
+removes an account (numeric file ownership is left unchanged).
+Set passwords with `passwd [name]`; password input is not echoed. Password
+verifiers are stored in root-only `/ETC/ACCOUNTS.DB` using salted, iterated
+SHA-256. Set an initial root password with `passwd root`. `su [name]` switches
+the shell identity after password authentication (root can switch without a
+password). `sudo <command> [arguments]` runs a shell command as root after
+authentication for accounts created with the optional `sudo` flag. `runas
+<uid> <gid> <app> [args]` remains available to UID 0 for numeric app launches.
+There is no boot login manager, home-directory provisioning, supplementary
+group list, symbolic `chmod` syntax, or session isolation; the boot console
+starts as root. Root bypasses read and write mode bits; execution still
+requires at least one execute bit.
 
 ## Driver Builds
 
@@ -160,6 +198,13 @@ Test and demonstration binaries are installed under `/USR/BIN/TESTS` and are not
 - **PC Speaker:** Modern x64 hardware frequently has no physical PC speaker connected to port 0x61, so the driver loads without error but is silent on real machines.
 - **QEMU:** QEMU on WSL/Fedora ARM may not have the `pcspk`/`isa-pcspk` device compiled in. Use `./run.sh qemu` and check for `[run.sh] QEMU audio:` output. If no PC speaker device is available, sound will be silent regardless of driver correctness.
 - **HDA Audio:** Detected via PCI but playback is not yet implemented. Full HDA sample playback (DMA buffers, codec init) is planned future work.
+
+The current hardware target is 32-bit x86 BIOS or GRUB Multiboot2 UEFI boot in
+QEMU and compatible PCs. Storage support is IDE PIO, polled AHCI, and NVMe
+namespace 1 on the first discovered controller. USB support is limited to the
+documented UHCI/OHCI/EHCI/xHCI boot-keyboard and BOT mass-storage paths. HDA
+playback, USB hubs and hot-plug, UAS, USB boot, GPT, and native partition
+management are outside the implemented support set.
 
 CykOS runs in 32-bit protected mode on x64 hardware; audio programming uses legacy x86 I/O ports (PIT 0x42/0x43, speaker 0x61), available in protected mode.
 

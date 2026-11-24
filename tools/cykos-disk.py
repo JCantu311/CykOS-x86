@@ -15,29 +15,64 @@ sys.path.insert(0, ROOT)
 
 
 def inspect(path):
+    layout = validate_image(path)
+    print(f"Image: {path} ({layout['size']} bytes)")
+    print("Partition table: MBR")
+    for index, part in layout["partitions"]:
+        print(f"  {index + 1}: type=0x{part['type']:02x} start={part['start']} sectors={part['sectors']}"
+              f" bootable={'yes' if part['boot'] == 0x80 else 'no'}")
+        if part["type"] in (0x06, 0x0E, 0xEF):
+            print("     FAT type label: FAT16")
+        if part["type"] == 0x83:
+            print("     ext filesystem magic: 0xef53 (ext)")
+    print("Validation: bootable FAT16 and ext2 root partitions are in bounds and do not overlap.")
+
+
+def validate_image(path):
     with open(path, "rb") as image:
+        size = os.fstat(image.fileno()).st_size
         mbr = image.read(512)
         if len(mbr) != 512:
             raise ValueError("image is smaller than one sector")
         if mbr[510:512] != b"\x55\xaa":
             raise ValueError("missing MBR signature")
-        print(f"Image: {path} ({os.path.getsize(path)} bytes)")
-        print("Partition table: MBR")
+        total_sectors = size // 512
+        partitions = []
         for index in range(4):
             entry = mbr[446 + index * 16:462 + index * 16]
             boot, _chs0, kind, _chs1, start, count = struct.unpack("<B3sB3sII", entry)
             if not kind and not start and not count:
                 continue
-            print(f"  {index + 1}: type=0x{kind:02x} start={start} sectors={count}"
-                  f" bootable={'yes' if boot == 0x80 else 'no'}")
-            if kind in (0x06, 0x0E, 0xEF) and start and count:
-                image.seek(start * 512 + 54)
-                print(f"     FAT type label: {image.read(8).decode('ascii', 'replace').strip()}")
-            if kind == 0x83 and start and count:
-                image.seek(start * 512 + 1024 + 56)
-                magic = image.read(2)
-                ext_magic = "0xef53 (ext)" if magic == bytes((0x53, 0xef)) else "unknown"
-                print(f"     ext filesystem magic: {ext_magic}")
+            if boot not in (0, 0x80):
+                raise ValueError(f"partition {index + 1} has invalid boot flag 0x{boot:02x}")
+            if not kind or not start or not count:
+                raise ValueError(f"partition {index + 1} has an incomplete entry")
+            if start >= total_sectors or count > total_sectors - start:
+                raise ValueError(f"partition {index + 1} extends beyond the image")
+            partitions.append((index, {"boot": boot, "type": kind, "start": start,
+                                       "sectors": count}))
+
+        ordered = sorted(partitions, key=lambda item: item[1]["start"])
+        for previous, current in zip(ordered, ordered[1:]):
+            prev_end = previous[1]["start"] + previous[1]["sectors"]
+            if prev_end > current[1]["start"]:
+                raise ValueError(f"partitions {previous[0] + 1} and {current[0] + 1} overlap")
+
+        fat = [part for _, part in partitions if part["type"] in (0x06, 0x0E, 0xEF)]
+        ext = [part for _, part in partitions if part["type"] == 0x83]
+        if len(fat) != 1 or fat[0]["boot"] != 0x80:
+            raise ValueError("expected exactly one bootable FAT16 partition (type 0x06, 0x0e, or 0xef)")
+        if len(ext) != 1:
+            raise ValueError("expected exactly one ext2 root partition (type 0x83)")
+
+        image.seek(fat[0]["start"] * 512 + 54)
+        if image.read(5) != b"FAT16":
+            raise ValueError("boot partition is not labeled FAT16")
+        image.seek(ext[0]["start"] * 512 + 1024 + 56)
+        if image.read(2) != bytes((0x53, 0xEF)):
+            raise ValueError("root partition is missing the ext filesystem magic")
+
+        return {"size": size, "partitions": partitions}
 
 
 def format_image(path, kernel_path, force):
@@ -94,6 +129,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     show = commands.add_parser("inspect", help="show the MBR partition layout")
     show.add_argument("image")
+    check = commands.add_parser("validate", help="validate the boot and root partition layout")
+    check.add_argument("image")
     create = commands.add_parser("format-image", help="create a bootable CykOS image file")
     create.add_argument("image")
     create.add_argument("--kernel", default=os.path.join(ROOT, "bin", "KERNEL.BIN"))
@@ -102,6 +139,9 @@ def main():
     try:
         if args.command == "inspect":
             inspect(args.image)
+        elif args.command == "validate":
+            validate_image(args.image)
+            print(f"Valid CykOS disk image: {args.image}")
         else:
             format_image(args.image, args.kernel, args.force)
     except (OSError, ValueError, RuntimeError) as exc:

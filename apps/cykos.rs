@@ -52,6 +52,14 @@ pub const SYS_GFX_INFO: u32 = 196;
 pub const SYS_GFX_BITMAP: u32 = 197;
 pub const SYS_TRY_GET_KEY: u32 = 198;
 pub const SYS_GFX_PALETTE: u32 = 199;
+pub const SYS_SETUID: u32    = 23;
+pub const SYS_GETUID: u32    = 24;
+pub const SYS_SETGID: u32    = 46;
+pub const SYS_GETGID: u32    = 47;
+pub const SYS_UMASK: u32     = 60;
+pub const SYS_CHMOD: u32     = 15;
+pub const SYS_ACCESS: u32    = 33;
+pub const SYS_CHOWN: u32     = 182;
 
 pub const FD_STDIN: u32  = 0;
 pub const FD_STDOUT: u32 = 1;
@@ -392,6 +400,21 @@ pub fn wait() -> Result<(u32, i32), i32> {
     let mut status = 0i32;
     let pid = unsafe { syscall::syscall1(SYS_WAIT, &mut status as *mut i32 as u32) };
     if pid == u32::MAX { Err(-1) } else { Ok((pid, status)) }
+}
+
+pub fn getuid() -> u32 { unsafe { syscall::syscall0(SYS_GETUID) } }
+pub fn getgid() -> u32 { unsafe { syscall::syscall0(SYS_GETGID) } }
+pub fn setuid(uid: u32) -> i32 { unsafe { syscall::syscall1(SYS_SETUID, uid) as i32 } }
+pub fn setgid(gid: u32) -> i32 { unsafe { syscall::syscall1(SYS_SETGID, gid) as i32 } }
+pub fn umask(mask: u32) -> u32 { unsafe { syscall::syscall1(SYS_UMASK, mask) } }
+pub fn chmod(path: *const u8, mode: u32) -> i32 {
+    unsafe { syscall::syscall2(SYS_CHMOD, path as u32, mode) as i32 }
+}
+pub fn chown(path: *const u8, uid: u32, gid: u32) -> i32 {
+    unsafe { syscall::syscall3(SYS_CHOWN, path as u32, uid, gid) as i32 }
+}
+pub fn access(path: *const u8, mode: u32) -> i32 {
+    unsafe { syscall::syscall2(SYS_ACCESS, path as u32, mode) as i32 }
 }
 
 /// Play a tone using the Level 2 sound driver (or PC speaker fallback)

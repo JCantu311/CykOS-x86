@@ -1,9 +1,12 @@
 #include "module.h"
 #include "cykastd.h"
 
-#define KBD_DATA_PORT    0x60
-#define KBD_STATUS_PORT  0x64
-#define KEY_SHIFT_EVENT  0x8A
+#define KBD_DATA_PORT       0x60
+#define KBD_STATUS_PORT     0x64
+#define KEY_SHIFT_EVENT     0x8A
+#define KBD_REPEAT_DELAY_MS 500u
+#define KBD_REPEAT_RATE_MS   40u
+#define KBD_TYPEMATIC_500MS_15CPS 0x28u
 
 static inline unsigned char kbd_inb(unsigned short port) {
     unsigned char result;
@@ -69,6 +72,8 @@ static void kbd_configure_set1_stream(void) {
         command_byte = (unsigned char)((command_byte | 0x40u) & ~0x11u);
         if (kbd_write_command(0x60) == 0 && kbd_write_data(command_byte) == 0) {
             if (kbd_send_with_ack(0xF0) == 0) (void)kbd_send_with_ack(0x02);
+            if (kbd_send_with_ack(0xF3) == 0)
+                (void)kbd_send_with_ack(KBD_TYPEMATIC_500MS_15CPS);
             (void)kbd_send_with_ack(0xF4);
         }
     }
@@ -86,12 +91,14 @@ static int g_ctrl_state = 0;
 static int g_caps_lock = 0;
 static int g_extended = 0;
 static unsigned char g_pressed_keys[256];
+static unsigned int g_key_repeat_at[256];
 
 static void keyboard_reset_state(void) {
     g_shift_state = 0;
     g_ctrl_state = 0;
     g_extended = 0;
     memset(g_pressed_keys, 0, sizeof(g_pressed_keys));
+    memset(g_key_repeat_at, 0, sizeof(g_key_repeat_at));
 }
 
 // Standard US QWERTY Scancode Set 1 Lookup Tables
@@ -129,7 +136,7 @@ static int keyboard_try_read_scancode(void) {
     unsigned int saved_flags;
     asm volatile("pushfl; popl %0; cli" : "=r"(saved_flags) :: "memory");
     int scancode = keyboard_irq_read_scancode();
-    if (scancode < 0 && (kbd_inb(KBD_STATUS_PORT) & 0x01u))
+    if (scancode < 0 && (kbd_inb(KBD_STATUS_PORT) & 0x21u) == 0x01u)
         scancode = kbd_inb(KBD_DATA_PORT);
     if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
     return scancode;
@@ -142,6 +149,21 @@ static char keyboard_get_scancode(void) {
         asm volatile("pause");
     }
     return (char)scancode;
+}
+
+/* Gate repeated make codes for an already-held key so hardware bounce or
+ * aggressive typematic timers cannot inject premature duplicate characters. */
+static int keyboard_accept_press(unsigned int key_index, unsigned char key) {
+    if (!key) return 0;
+    unsigned int now = idt_get_millis();
+    if (g_pressed_keys[key_index]) {
+        if ((int)(now - g_key_repeat_at[key_index]) < 0) return 0;
+        g_key_repeat_at[key_index] = now + KBD_REPEAT_RATE_MS;
+    } else {
+        g_pressed_keys[key_index] = key;
+        g_key_repeat_at[key_index] = now + KBD_REPEAT_DELAY_MS;
+    }
+    return key;
 }
 
 // Convert Set 1 scancodes into stable keydown/keyup events. The encoded
@@ -172,6 +194,8 @@ static int keyboard_scancode_to_event(unsigned char scancode) {
         if (!key) key = g_pressed_keys[alternate_index];
         g_pressed_keys[key_index] = 0;
         g_pressed_keys[alternate_index] = 0;
+        g_key_repeat_at[key_index] = 0;
+        g_key_repeat_at[alternate_index] = 0;
         g_extended = 0;
         return key ? 0x100 + key : 0;
     }
@@ -180,18 +204,23 @@ static int keyboard_scancode_to_event(unsigned char scancode) {
     g_extended = 0;
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift press
         g_shift_state = 1;
+        if (g_pressed_keys[key_index]) return 0;
         g_pressed_keys[key_index] = KEY_SHIFT_EVENT;
         return KEY_SHIFT_EVENT;
     }
 
     if (scancode == 0x1D) { // Left or Right Ctrl press
         g_ctrl_state = 1;
+        if (g_pressed_keys[key_index]) return 0;
         g_pressed_keys[key_index] = 0xA3; // Doom's default KEY_FIRE
         return 0xA3;
     }
 
     if (scancode == 0x3A) { // Caps Lock toggle
-        g_caps_lock = !g_caps_lock;
+        if (!g_pressed_keys[key_index]) {
+            g_pressed_keys[key_index] = 1;
+            g_caps_lock = !g_caps_lock;
+        }
         return 0;
     }
 
@@ -215,8 +244,7 @@ static int keyboard_scancode_to_event(unsigned char scancode) {
         scancode == 0x4D || scancode == 0x47 || scancode == 0x4F ||
         scancode == 0x49 || scancode == 0x51 || scancode == 0x52 ||
         scancode == 0x53) {
-        g_pressed_keys[key_index] = (unsigned char)key;
-        return key;
+        return keyboard_accept_press(key_index, (unsigned char)key);
     }
 
     if (scancode >= 128) {
@@ -230,8 +258,7 @@ static int keyboard_scancode_to_event(unsigned char scancode) {
             char normal = scancode_normal[scancode];
             key = (normal >= 'a' && normal <= 'z') ? normal - 'a' + 1 : 0;
         }
-        if (key) g_pressed_keys[key_index] = (unsigned char)key;
-        return key;
+        return keyboard_accept_press(key_index, (unsigned char)key);
     }
 
     char normal_c = scancode_normal[scancode];
@@ -245,8 +272,7 @@ static int keyboard_scancode_to_event(unsigned char scancode) {
         // For symbols and numbers, Shift determines shifted character
         key = g_shift_state ? shifted_c : normal_c;
     }
-    if (key) g_pressed_keys[key_index] = (unsigned char)key;
-    return key;
+    return keyboard_accept_press(key_index, (unsigned char)key);
 }
 
 // Character APIs intentionally suppress keyup events.
@@ -298,6 +324,7 @@ static int keyboard_init(void) {
     g_caps_lock = 0;
     g_extended = 0;
     memset(g_pressed_keys, 0, sizeof(g_pressed_keys));
+    memset(g_key_repeat_at, 0, sizeof(g_key_repeat_at));
     if (saved_flags & 0x200u) asm volatile("sti" ::: "memory");
 
     return 0; // Success

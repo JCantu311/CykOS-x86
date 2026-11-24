@@ -51,6 +51,7 @@ static struct {
     unsigned int ramdisk_base;
     unsigned int ramdisk_bytes;
     unsigned int root_inode;
+    int write_protected;
     int mounted;
     char cwd[128];
 } g_ext2;
@@ -181,21 +182,53 @@ static int ext2_read_sectors(unsigned int lba, unsigned char count, void* out) {
 }
 
 static int ext2_read_block(unsigned int block, void* out) {
-    if (block >= g_ext2.blocks_count) return -1;
-    return ext2_read_sectors(block * 2u, 2, out);
+    if (block >= g_ext2.blocks_count) {
+        if (g_ext2.mounted) g_ext2.write_protected = 1;
+        return -1;
+    }
+    if (ext2_read_sectors(block * 2u, 2, out) != 0) {
+        if (g_ext2.mounted) g_ext2.write_protected = 1;
+        return -1;
+    }
+    return 0;
 }
 
 static int ext2_write_block(unsigned int block, const void* data) {
-    if ((!g_ext2.ramdisk && g_ext2.live_cd) || block >= g_ext2.blocks_count || !data || block > 0x7FFFFFFFu) return -1;
+    if (!g_ext2.ramdisk && g_ext2.live_cd) return -1;
+    if (block >= g_ext2.blocks_count || !data || block > 0x7FFFFFFFu) {
+        g_ext2.write_protected = 1;
+        return -1;
+    }
     if (g_ext2.ramdisk) {
+        if (block > (0xFFFFFFFFu - g_ext2.partition_lba) / 2u) {
+            g_ext2.write_protected = 1;
+            return -1;
+        }
         unsigned int image_sector = g_ext2.partition_lba + block * 2u;
-        memcpy((void*)(g_ext2.ramdisk_base + image_sector * 512u), data, EXT2_BLOCK_SIZE);
+        if (image_sector > 0xFFFFFFFFu / 512u) {
+            g_ext2.write_protected = 1;
+            return -1;
+        }
+        unsigned int image_offset = image_sector * 512u;
+        if (image_offset > g_ext2.ramdisk_bytes ||
+            EXT2_BLOCK_SIZE > g_ext2.ramdisk_bytes - image_offset ||
+            g_ext2.ramdisk_base > 0xFFFFFFFFu - image_offset) {
+            g_ext2.write_protected = 1;
+            return -1;
+        }
+        memcpy((void*)(g_ext2.ramdisk_base + image_offset), data, EXT2_BLOCK_SIZE);
         return 0;
     }
     unsigned int lba = block * 2u;
     if (lba > 0xFFFFFFFFu - g_ext2.partition_lba ||
-        (g_ext2.partition_sectors && (lba > g_ext2.partition_sectors || 2u > g_ext2.partition_sectors - lba))) return -1;
-    if (ata_select_drive(0) != 0 || ata_write_sectors(g_ext2.partition_lba + lba, 2, (const unsigned short*)data) != 0) return -1;
+        (g_ext2.partition_sectors && (lba > g_ext2.partition_sectors || 2u > g_ext2.partition_sectors - lba))) {
+        g_ext2.write_protected = 1;
+        return -1;
+    }
+    if (ata_select_drive(0) != 0 || ata_write_sectors(g_ext2.partition_lba + lba, 2, (const unsigned short*)data) != 0) {
+        g_ext2.write_protected = 1;
+        return -1;
+    }
     return 0;
 }
 
@@ -653,6 +686,38 @@ static int ext2_remove_dir_entry(unsigned int dir_number, const char* name, unsi
     return -1;
 }
 
+static int ext2_replace_dir_entry(unsigned int dir_number, const char* name,
+                                  unsigned int expected_inode, unsigned int new_inode) {
+    ext2_inode_t dir;
+    if (ext2_load_inode(dir_number, &dir) != 0 || (dir.mode & 0xF000u) != EXT2_MODE_DIR) return -1;
+    unsigned int offset = 0;
+    while (offset < dir.size) {
+        unsigned int logical = offset / EXT2_BLOCK_SIZE;
+        unsigned int physical = ext2_data_block(&dir, logical);
+        if (!physical || ext2_read_block(physical, g_ext2_dir_block) != 0) return -1;
+        unsigned int in_block = offset % EXT2_BLOCK_SIZE;
+        while (in_block + sizeof(ext2_dirent_t) <= EXT2_BLOCK_SIZE && offset < dir.size) {
+            ext2_dirent_t* entry = (ext2_dirent_t*)((unsigned char*)g_ext2_dir_block + in_block);
+            if (!entry->rec_len || entry->rec_len < sizeof(*entry) ||
+                in_block + entry->rec_len > EXT2_BLOCK_SIZE) break;
+            if (entry->inode == expected_inode && entry->name_len &&
+                ext2_name_equal((unsigned char*)entry + sizeof(*entry), entry->name_len, name)) {
+                entry->inode = new_inode;
+                return ext2_write_block(physical, g_ext2_dir_block);
+            }
+            offset += entry->rec_len;
+            in_block += entry->rec_len;
+        }
+        if (offset / EXT2_BLOCK_SIZE == logical) offset = (logical + 1) * EXT2_BLOCK_SIZE;
+    }
+    return -1;
+}
+
+static void ext2_abandon_new_inode(unsigned int number, ext2_inode_t* inode) {
+    if (ext2_free_inode_blocks(inode) != 0 || ext2_free_inode(number, 0) != 0)
+        g_ext2.write_protected = 1;
+}
+
 static int ext2_directory_is_empty(const ext2_inode_t* dir) {
     unsigned int offset = 0;
     while (offset < dir->size) {
@@ -676,19 +741,30 @@ static int ext2_directory_is_empty(const ext2_inode_t* dir) {
 static int ext2_delete_file(const char* path) {
     unsigned int parent, number; unsigned short mode;
     char leaf[EXT2_NAME_MAX + 1];
-    if (ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &number, &mode) != 0 ||
+    if (!g_ext2.mounted || g_ext2.write_protected ||
+        ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &number, &mode) != 0 ||
         (mode & 0xF000u) == EXT2_MODE_DIR) return -1;
     ext2_inode_t inode, empty;
-    if (ext2_load_inode(number, &inode) != 0 || ext2_remove_dir_entry(parent, leaf, number) != 0 ||
-        ext2_free_inode_blocks(&inode) != 0) return -1;
+    if (ext2_load_inode(number, &inode) != 0) return -1;
+    if (ext2_remove_dir_entry(parent, leaf, number) != 0) {
+        g_ext2.write_protected = 1;
+        return -1;
+    }
+    if (ext2_free_inode_blocks(&inode) != 0) {
+        g_ext2.write_protected = 1;
+        return 0;
+    }
     memset(&empty, 0, sizeof(empty));
-    return ext2_store_inode(number, &empty) == 0 ? ext2_free_inode(number, 0) : -1;
+    if (ext2_store_inode(number, &empty) != 0 || ext2_free_inode(number, 0) != 0)
+        g_ext2.write_protected = 1;
+    return 0;
 }
 
 static int ext2_mkdir(const char* path) {
     unsigned int parent, existing; unsigned short mode;
     char leaf[EXT2_NAME_MAX + 1];
-    if (ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &existing, &mode) == 0) return -1;
+    if (!g_ext2.mounted || g_ext2.write_protected ||
+        ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &existing, &mode) == 0) return -1;
     int inode_number = ext2_alloc_inode(1);
     if (inode_number < 0) return -1;
     int block = ext2_alloc_block();
@@ -719,7 +795,8 @@ static int ext2_mkdir(const char* path) {
 static int ext2_rmdir(const char* path) {
     unsigned int parent, number; unsigned short mode;
     char leaf[EXT2_NAME_MAX + 1];
-    if (ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &number, &mode) != 0 ||
+    if (!g_ext2.mounted || g_ext2.write_protected ||
+        ext2_resolve_parent(path, &parent, leaf) != 0 || ext2_find_in_dir(parent, leaf, &number, &mode) != 0 ||
         (mode & 0xF000u) != EXT2_MODE_DIR || number == EXT2_ROOT_INO) return -1;
     ext2_inode_t dir, parent_inode, empty;
     if (ext2_load_inode(number, &dir) != 0 || !ext2_directory_is_empty(&dir) ||
@@ -732,16 +809,46 @@ static int ext2_rmdir(const char* path) {
 }
 
 static int ext2_write_file(const char* path, const void* data, unsigned int length) {
-    if (!g_ext2.mounted || (!data && length)) return -1;
+    if (!g_ext2.mounted || g_ext2.write_protected || (!data && length)) return -1;
     unsigned int parent, number;
     unsigned short mode;
     char leaf[EXT2_NAME_MAX + 1];
     if (ext2_resolve_parent(path, &parent, leaf) != 0) return -1;
     if (ext2_find_in_dir(parent, leaf, &number, &mode) == 0) {
         if ((mode & 0xF000u) == EXT2_MODE_DIR) return -1;
-        ext2_inode_t inode;
-        if (ext2_load_inode(number, &inode) != 0 || ext2_write_inode_data(&inode, data, length) != 0 ||
-            ext2_store_inode(number, &inode) != 0) return -1;
+        ext2_inode_t old_inode, replacement;
+        if (ext2_load_inode(number, &old_inode) != 0) return -1;
+        int replacement_number = ext2_alloc_inode(0);
+        if (replacement_number < 0) return -1;
+        memset(&replacement, 0, sizeof(replacement));
+        replacement.mode = old_inode.mode;
+        replacement.uid = old_inode.uid;
+        replacement.gid = old_inode.gid;
+        replacement.atime = old_inode.atime;
+        replacement.ctime = old_inode.ctime;
+        replacement.mtime = old_inode.mtime;
+        replacement.links_count = old_inode.links_count ? old_inode.links_count : 1;
+        if (ext2_write_inode_data(&replacement, data, length) != 0 ||
+            ext2_initialize_inode((unsigned int)replacement_number, &replacement) != 0) {
+            ext2_abandon_new_inode((unsigned int)replacement_number, &replacement);
+            return -1;
+        }
+        if (ext2_replace_dir_entry(parent, leaf, number, (unsigned int)replacement_number) != 0) {
+            /* A failed sector write may still have changed the directory. Keep
+             * both inodes allocated and stop further mutations. */
+            g_ext2.write_protected = 1;
+            return -1;
+        }
+        /* The directory switch commits the replacement. Reclaiming the old
+         * inode is cleanup; if it fails, keep the mounted volume read-only. */
+        if (ext2_free_inode_blocks(&old_inode) != 0) {
+            g_ext2.write_protected = 1;
+            return 0;
+        }
+        ext2_inode_t empty;
+        memset(&empty, 0, sizeof(empty));
+        if (ext2_store_inode(number, &empty) != 0 || ext2_free_inode(number, 0) != 0)
+            g_ext2.write_protected = 1;
         return 0;
     }
     int allocated_inode = ext2_alloc_inode(0);
@@ -751,8 +858,17 @@ static int ext2_write_file(const char* path, const void* data, unsigned int leng
     memset(&inode, 0, sizeof(inode));
     inode.mode = 0100644;
     inode.links_count = 1;
-    if (ext2_write_inode_data(&inode, data, length) != 0 || ext2_initialize_inode(number, &inode) != 0 ||
-        ext2_insert_dir_entry(parent, leaf, number, 1) != 0) return -1;
+    if (ext2_write_inode_data(&inode, data, length) != 0 ||
+        ext2_initialize_inode(number, &inode) != 0) {
+        ext2_abandon_new_inode(number, &inode);
+        return -1;
+    }
+    if (ext2_insert_dir_entry(parent, leaf, number, 1) != 0) {
+        /* The directory block write may have reached storage despite an I/O
+         * error; keep the new inode allocated and require a remount. */
+        g_ext2.write_protected = 1;
+        return -1;
+    }
     return 0;
 }
 

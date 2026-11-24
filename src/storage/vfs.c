@@ -1,4 +1,5 @@
 #include "vfs.h"
+#include "permissions.h"
 
 #define VFS_MAX_DRIVERS 8
 
@@ -51,37 +52,69 @@ int vfs_read_at(const vfs_file_t* file, unsigned int offset, void* buffer, unsig
 
 int vfs_read_file_by_name(const char* path, void* buffer, unsigned int max_bytes) {
     vfs_file_t file;
-    if (!buffer || vfs_find_file(path, &file) != 0) return -1;
+    if (!buffer || (permissions_is_ready() &&
+        permissions_check(path, CYK_PERMISSION_READ) != 0) || vfs_find_file(path, &file) != 0) return -1;
     return vfs_read_at(&file, 0, buffer, max_bytes);
 }
 
 int vfs_write_file(const char* path, const void* data, unsigned int length) {
     if (!g_root_driver || !g_root_driver->write_file) return -1;
-    return g_root_driver->write_file(path, data, length);
+    int privileged_metadata_write = permissions_is_persisting();
+    vfs_file_t existing;
+    int was_present = g_root_driver->find_file && g_root_driver->find_file(path, &existing) == 0;
+    if (!privileged_metadata_write && permissions_is_ready()) {
+        int allowed = was_present
+            ? permissions_check(path, CYK_PERMISSION_WRITE)
+            : permissions_check_parent(path, CYK_PERMISSION_WRITE | CYK_PERMISSION_EXEC);
+        if (allowed != 0) return -1;
+    }
+    if (g_root_driver->write_file(path, data, length) != 0) return -1;
+    if (!privileged_metadata_write && !was_present && permissions_is_ready() &&
+        permissions_create(path, 0666u, 0) != 0) {
+        if (g_root_driver->delete_file) (void)g_root_driver->delete_file(path);
+        return -1;
+    }
+    return 0;
 }
 
 int vfs_delete_file(const char* path) {
     if (!g_root_driver || !g_root_driver->delete_file) return -1;
-    return g_root_driver->delete_file(path);
+    if (permissions_is_ready() &&
+        permissions_check_parent(path, CYK_PERMISSION_WRITE | CYK_PERMISSION_EXEC) != 0) return -1;
+    if (g_root_driver->delete_file(path) != 0) return -1;
+    return !permissions_is_ready() || permissions_remove(path) == 0 ? 0 : -1;
 }
 
 int vfs_list_directory(const char* path, vfs_dir_callback_t callback) {
     if (!g_root_driver || !g_root_driver->list_directory || !callback) return -1;
+    if (permissions_is_ready() && permissions_check(path && path[0] ? path : ".",
+            CYK_PERMISSION_READ | CYK_PERMISSION_EXEC) != 0) return -1;
     return g_root_driver->list_directory(path, callback);
 }
 
 int vfs_mkdir(const char* path) {
     if (!g_root_driver || !g_root_driver->mkdir) return -1;
-    return g_root_driver->mkdir(path);
+    if (permissions_is_ready() &&
+        permissions_check_parent(path, CYK_PERMISSION_WRITE | CYK_PERMISSION_EXEC) != 0) return -1;
+    if (g_root_driver->mkdir(path) != 0) return -1;
+    if (permissions_is_ready() && permissions_create(path, 0777u, 1) != 0) {
+        if (g_root_driver->rmdir) (void)g_root_driver->rmdir(path);
+        return -1;
+    }
+    return 0;
 }
 
 int vfs_rmdir(const char* path) {
     if (!g_root_driver || !g_root_driver->rmdir) return -1;
-    return g_root_driver->rmdir(path);
+    if (permissions_is_ready() &&
+        permissions_check_parent(path, CYK_PERMISSION_WRITE | CYK_PERMISSION_EXEC) != 0) return -1;
+    if (g_root_driver->rmdir(path) != 0) return -1;
+    return !permissions_is_ready() || permissions_remove(path) == 0 ? 0 : -1;
 }
 
 int vfs_chdir(const char* path) {
     if (!g_root_driver || !g_root_driver->chdir) return -1;
+    if (permissions_is_ready() && permissions_check(path, CYK_PERMISSION_EXEC) != 0) return -1;
     return g_root_driver->chdir(path);
 }
 

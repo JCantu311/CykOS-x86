@@ -14,6 +14,7 @@
 #define SYS_CHDIR         12  // POSIX chdir(path)
 #define SYS_LSEEK         19  // POSIX lseek(fd, offset, whence)
 #define SYS_GETPID        20  // POSIX getpid()
+#define SYS_UMASK         60  // POSIX umask(mask)
 #define SYS_MKDIR         39  // POSIX mkdir(path, mode)
 #define SYS_RMDIR         40  // POSIX rmdir(path)
 #define SYS_BRK           45  // Dynamic memory expansion (heap management)

@@ -32,6 +32,7 @@ extern "C" {
     fn get_cursor_pos(x: *mut i32, y: *mut i32);
     fn set_cursor_pos(x: i32, y: i32);
     fn vfs_list_directory(path: *const u8, callback: extern "C" fn(*const u8, u32, u8)) -> i32;
+    fn vfs_find_file(path: *const u8, output: *mut VfsFile) -> i32;
     fn vfs_delete_file(filename: *const u8) -> i32;
     fn vfs_read_file_by_name(filename: *const u8, buffer: *mut u8, max_bytes: u32) -> i32;
     fn vfs_write_file(filename: *const u8, data: *const u8, size: u32) -> i32;
@@ -39,6 +40,25 @@ extern "C" {
     fn vfs_rmdir(path: *const u8) -> i32;
     fn vfs_chdir(path: *const u8) -> i32;
     fn vfs_getcwd(buffer: *mut u8, max_bytes: u32) -> i32;
+    fn permissions_uid() -> u32;
+    fn permissions_gid() -> u32;
+    fn permissions_umask() -> u32;
+    fn permissions_set_umask(mask: u32) -> u32;
+    fn permissions_get(path: *const u8, mode: *mut u32, uid: *mut u32, gid: *mut u32) -> i32;
+    fn permissions_check(path: *const u8, requested: u32) -> i32;
+    fn permissions_chmod(path: *const u8, mode: u32) -> i32;
+    fn permissions_chown(path: *const u8, uid: u32, gid: u32) -> i32;
+    fn permissions_set_uid(uid: u32) -> i32;
+    fn permissions_set_gid(gid: u32) -> i32;
+    fn permissions_set_identity(uid: u32, gid: u32);
+    fn accounts_count() -> u32;
+    fn accounts_get(index: u32, name: *mut u8, uid: *mut u32, gid: *mut u32, flags: *mut u32) -> i32;
+    fn accounts_lookup(name: *const u8, uid: *mut u32, gid: *mut u32, flags: *mut u32) -> i32;
+    fn accounts_create(name: *const u8, uid: u32, gid: u32, flags: u32) -> i32;
+    fn accounts_delete(name: *const u8) -> i32;
+    fn accounts_set_flags(name: *const u8, flags: u32) -> i32;
+    fn accounts_set_password(name: *const u8, password: *const u8) -> i32;
+    fn accounts_authenticate(name: *const u8, password: *const u8) -> i32;
 
     // External user command support (usercmd.c)
     fn exec_user_command(cmd_name: *const u8, args: *const u8) -> i32;
@@ -276,7 +296,7 @@ fn cmd_reboot(_args: &[u8]) {
 fn cmd_shutdown(_args: &[u8]) {
     puts(b"\nShutting down CykOS...\n");
     unsafe {
-        secwait(1);
+        secwait(3);
 
         // 1. QEMU ACPI poweroff port
         outw(0x604, 0x2000);
@@ -357,9 +377,8 @@ fn cmd_touch(args: &[u8]) {
     fname_buf[len] = 0;
 
     unsafe {
-        let mut check_buf = [0u8; 1];
-        let exists = vfs_read_file_by_name(fname_buf.as_ptr(), check_buf.as_mut_ptr(), 1);
-        if exists < 0 {
+        let mut existing = core::mem::MaybeUninit::<VfsFile>::uninit();
+        if vfs_find_file(fname_buf.as_ptr(), existing.as_mut_ptr()) != 0 {
             let dummy = 0u8;
             let res = vfs_write_file(fname_buf.as_ptr(), &dummy, 0);
             if res == 0 {
@@ -655,6 +674,32 @@ fn cmd_rmdir(args: &[u8]) {
 fn cmd_cd(args: &[u8]) {
     let path = trim_slice(args);
     let mut path_buf = [0u8; 64];
+
+    if path == b"~" {
+        let uid = unsafe { permissions_uid() };
+        let mut name = [0u8; 24];
+        if username_for_uid(uid, &mut name) {
+            let name_len = name.iter().position(|&b| b == 0).unwrap_or(24);
+            if name_len + 6 < 63 {
+                path_buf[..6].copy_from_slice(b"/HOME/");
+                for i in 0..name_len {
+                    let c = name[i];
+                    path_buf[6 + i] = if c >= b'a' && c <= b'z' { c - 32 } else { c };
+                }
+                path_buf[6 + name_len] = 0;
+                let mut probe = core::mem::MaybeUninit::<VfsFile>::uninit();
+                if unsafe { vfs_find_file(path_buf.as_ptr(), probe.as_mut_ptr()) } == 0 {
+                    if unsafe { vfs_chdir(path_buf.as_ptr()) } == 0 {
+                        return;
+                    }
+                }
+            }
+        }
+        let root = [b'/', 0];
+        let _ = unsafe { vfs_chdir(root.as_ptr()) };
+        return;
+    }
+
     let len = if path.len() < 63 { path.len() } else { 63 };
     let mut i = 0;
     while i < len {
@@ -1158,6 +1203,465 @@ fn cmd_echo(args: &[u8]) {
     print_char(b'\n');
 }
 
+fn split_word(input: &[u8]) -> (&[u8], &[u8]) {
+    let mut end = 0;
+    while end < input.len() && input[end] != b' ' && input[end] != b'\t' { end += 1; }
+    (&input[..end], trim_slice(&input[end..]))
+}
+
+fn parse_number(input: &[u8], radix: u32) -> Option<u32> {
+    if input.is_empty() { return None; }
+    let mut value = 0u32;
+    for &byte in input {
+        let digit = match byte {
+            b'0'..=b'9' => (byte - b'0') as u32,
+            b'a'..=b'f' => (byte - b'a' + 10) as u32,
+            b'A'..=b'F' => (byte - b'A' + 10) as u32,
+            _ => return None,
+        };
+        if digit >= radix || value > (u32::MAX - digit) / radix { return None; }
+        value = value * radix + digit;
+    }
+    Some(value)
+}
+
+fn print_octal_mode(mode: u32) {
+    for shift in [9, 6, 3, 0] {
+        print_char(b'0' + ((mode >> shift) & 7) as u8);
+    }
+}
+
+fn cmd_id(_args: &[u8]) {
+    unsafe {
+        let uid = permissions_uid();
+        let gid = permissions_gid();
+        puts(b"uid="); print_u32(uid);
+        let mut name = [0u8; 24];
+        if username_for_uid(uid, &mut name) {
+            puts(b"(");
+            puts(&name[..name.iter().position(|&b| b == 0).unwrap_or(24)]);
+            puts(b")");
+        }
+        puts(b" gid="); print_u32(gid);
+        print_char(b'\n');
+    }
+}
+
+fn cmd_whoami(_args: &[u8]) {
+    let uid = unsafe { permissions_uid() };
+    let mut name = [0u8; 24];
+    if username_for_uid(uid, &mut name) {
+        puts(&name[..name.iter().position(|&b| b == 0).unwrap_or(24)]);
+        print_char(b'\n');
+    } else if uid == 0 {
+        puts(b"root\n");
+    } else {
+        puts(b"uid-"); print_u32(uid); print_char(b'\n');
+    }
+}
+
+fn cmd_chmod(args: &[u8]) {
+    let (mode_text, rest) = split_word(trim_slice(args));
+    let (path, extra) = split_word(rest);
+    let mode = parse_number(mode_text, 8);
+    if mode.is_none() || path.is_empty() || !extra.is_empty() || mode.unwrap() > 0o7777 {
+        puts(b"Usage: chmod <octal-mode> <path> (for example chmod 0644 file.txt)\n");
+        return;
+    }
+    let mut path_buf = [0u8; 128];
+    if path.len() >= path_buf.len() { puts(b"chmod: path is too long\n"); return; }
+    path_buf[..path.len()].copy_from_slice(path);
+    unsafe {
+        if permissions_chmod(path_buf.as_ptr(), mode.unwrap()) == 0 {
+            puts(b"Mode set to "); print_octal_mode(mode.unwrap()); print_char(b'\n');
+        } else { puts(b"chmod: permission denied or path not found\n"); }
+    }
+}
+
+fn cmd_chown(args: &[u8]) {
+    let (owner_text, rest) = split_word(trim_slice(args));
+    let (path, extra) = split_word(rest);
+    if owner_text.is_empty() || path.is_empty() || !extra.is_empty() {
+        puts(b"Usage: chown <uid[:gid]> <path>\n");
+        return;
+    }
+    let colon = owner_text.iter().position(|&b| b == b':');
+    let uid_text = colon.map_or(owner_text, |i| &owner_text[..i]);
+    let gid_text = colon.map(|i| &owner_text[i + 1..]);
+    let uid = match parse_number(uid_text, 10) { Some(v) => v, None => { puts(b"chown: invalid uid/gid\n"); return; } };
+    let mut path_buf = [0u8; 128];
+    if path.len() >= path_buf.len() { puts(b"chown: path is too long\n"); return; }
+    path_buf[..path.len()].copy_from_slice(path);
+    unsafe {
+        let mut mode = 0u32;
+        let mut old_uid = 0u32;
+        let mut old_gid = 0u32;
+        if permissions_get(path_buf.as_ptr(), &mut mode, &mut old_uid, &mut old_gid) != 0 {
+            puts(b"chown: path not found\n"); return;
+        }
+        let gid = match gid_text {
+            Some(text) => match parse_number(text, 10) {
+                Some(v) => v,
+                None => { puts(b"chown: invalid uid/gid\n"); return; }
+            },
+            None => old_gid,
+        };
+        if permissions_chown(path_buf.as_ptr(), uid, gid) == 0 {
+            puts(b"Ownership updated\n");
+        } else { puts(b"chown: root privileges required\n"); }
+    }
+}
+
+fn cmd_umask(args: &[u8]) {
+    let text = trim_slice(args);
+    if text.is_empty() {
+        let mask = unsafe { permissions_umask() };
+        print_octal_mode(mask);
+        print_char(b'\n');
+        return;
+    }
+    let (word, rest) = split_word(text);
+    let parsed = parse_number(word, 8);
+    if parsed.is_none() || parsed.unwrap() > 0o777 || !rest.is_empty() {
+        puts(b"Usage: umask [octal-mask]\n");
+        return;
+    }
+    let previous = unsafe { permissions_set_umask(parsed.unwrap()) };
+    puts(b"umask "); print_octal_mode(previous); puts(b" -> ");
+    print_octal_mode(parsed.unwrap()); print_char(b'\n');
+}
+
+fn cmd_stat(args: &[u8]) {
+    let path = trim_slice(args);
+    if path.is_empty() || path.iter().any(|&b| b == b' ' || b == b'\t') {
+        puts(b"Usage: stat <path>\n"); return;
+    }
+    let mut path_buf = [0u8; 128];
+    if path.len() >= path_buf.len() { puts(b"stat: path is too long\n"); return; }
+    path_buf[..path.len()].copy_from_slice(path);
+    unsafe {
+        let mut mode = 0u32; let mut uid = 0u32; let mut gid = 0u32;
+        if permissions_check(path_buf.as_ptr(), 0) != 0 ||
+            permissions_get(path_buf.as_ptr(), &mut mode, &mut uid, &mut gid) != 0 {
+            puts(b"stat: path not found or inaccessible\n"); return;
+        }
+        let mut file = core::mem::MaybeUninit::<VfsFile>::uninit();
+        if vfs_find_file(path_buf.as_ptr(), file.as_mut_ptr()) != 0 {
+            puts(b"stat: path not found\n"); return;
+        }
+        let file = file.assume_init();
+        if mode & 0o170000 == 0o040000 { puts(b"directory "); }
+        else { puts(b"file "); }
+        puts(path); puts(b" mode="); print_octal_mode(mode & 0o7777);
+        puts(b" uid="); print_u32(uid); puts(b" gid="); print_u32(gid);
+        puts(b" size="); print_u32(file.size); puts(b" bytes\n");
+    }
+}
+
+#[repr(C)]
+struct VfsFile {
+    name: [u8; 13],
+    size: u32,
+    first_cluster: u32,
+    attributes: u8,
+    volume_index: u8,
+    driver: *const u8,
+}
+
+fn cmd_access(args: &[u8]) {
+    let (mode_text, path) = split_word(trim_slice(args));
+    if mode_text.is_empty() || path.is_empty() || path.iter().any(|&b| b == b' ' || b == b'\t') {
+        puts(b"Usage: access <rwx> <path>\n"); return;
+    }
+    let mut requested = 0u32;
+    for &byte in mode_text {
+        match byte {
+            b'r' => requested |= 4,
+            b'w' => requested |= 2,
+            b'x' => requested |= 1,
+            _ => { puts(b"access: use only r, w, and x\n"); return; }
+        }
+    }
+    let mut path_buf = [0u8; 128];
+    if path.len() >= path_buf.len() { puts(b"access: path is too long\n"); return; }
+    path_buf[..path.len()].copy_from_slice(path);
+    if unsafe { permissions_check(path_buf.as_ptr(), requested) } == 0 {
+        puts(b"allowed\n");
+    } else { puts(b"denied\n"); }
+}
+
+fn cmd_runas(args: &[u8]) {
+    let (uid_text, rest) = split_word(trim_slice(args));
+    let (gid_text, command_and_args) = split_word(rest);
+    let (command, app_args) = split_word(command_and_args);
+    if uid_text.is_empty() || gid_text.is_empty() || command.is_empty() ||
+        unsafe { permissions_uid() } != 0 {
+        puts(b"Usage: runas <uid> <gid> <app> [arguments] (root only)\n"); return;
+    }
+    let uid = match parse_number(uid_text, 10) { Some(v) => v, None => { puts(b"runas: invalid uid/gid\n"); return; } };
+    let gid = match parse_number(gid_text, 10) { Some(v) => v, None => { puts(b"runas: invalid uid/gid\n"); return; } };
+    if command.len() >= 128 || app_args.len() >= 128 { puts(b"runas: command line is too long\n"); return; }
+    unsafe {
+        let old_uid = permissions_uid();
+        let old_gid = permissions_gid();
+        let old_umask = permissions_umask();
+        if permissions_set_gid(gid) != 0 || permissions_set_uid(uid) != 0 {
+            permissions_set_identity(old_uid, old_gid);
+            puts(b"runas: unable to set identity\n"); return;
+        }
+        let mut command_buf = [0u8; 128];
+        let mut args_buf = [0u8; 128];
+        command_buf[..command.len()].copy_from_slice(command);
+        args_buf[..app_args.len()].copy_from_slice(app_args);
+        let _ = exec_user_command(command_buf.as_ptr(), args_buf.as_ptr());
+        permissions_set_identity(old_uid, old_gid);
+        let _ = permissions_set_umask(old_umask);
+    }
+}
+
+fn read_secret(prompt: &[u8]) -> ([u8; 65], usize) {
+    puts(prompt);
+    let mut secret = [0u8; 65];
+    let mut len = 0usize;
+    loop {
+        let key = unsafe { get_char() };
+        if key == b'\r' || key == b'\n' { print_char(b'\n'); break; }
+        if key == 8 || key == 127 {
+            if len > 0 { len -= 1; secret[len] = 0; }
+            continue;
+        }
+        if key >= 0x20 && key < 0x7f && len < 64 { secret[len] = key; len += 1; }
+    }
+    (secret, len)
+}
+
+fn username_for_uid(uid: u32, out: &mut [u8; 24]) -> bool {
+    let mut i = 0;
+    while i < unsafe { accounts_count() } {
+        let mut account_uid = 0; let mut gid = 0; let mut flags = 0;
+        if unsafe { accounts_get(i, out.as_mut_ptr(), &mut account_uid, &mut gid, &mut flags) } == 0 && account_uid == uid { return true; }
+        i += 1;
+    }
+    false
+}
+
+fn cmd_users(_args: &[u8]) {
+    let mut i = 0;
+    while i < unsafe { accounts_count() } {
+        let mut name = [0u8; 24]; let mut uid = 0; let mut gid = 0; let mut flags = 0;
+        if unsafe { accounts_get(i, name.as_mut_ptr(), &mut uid, &mut gid, &mut flags) } == 0 {
+            puts(&name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())]);
+            puts(b" uid="); print_u32(uid); puts(b" gid="); print_u32(gid);
+            if flags & 1 != 0 { puts(b" sudo"); }
+            print_char(b'\n');
+        }
+        i += 1;
+    }
+}
+
+fn cmd_useradd(args: &[u8]) {
+    let (name, rest) = split_word(trim_slice(args));
+    let (uid_text, rest) = split_word(rest);
+    let (gid_text, flags_text) = split_word(rest);
+    if unsafe { permissions_uid() } != 0 || name.is_empty() || name.len() >= 24 || uid_text.is_empty() || gid_text.is_empty() ||
+        (!flags_text.is_empty() && flags_text != b"sudo") {
+        puts(b"Usage: useradd <name> <uid> <gid> [sudo] (root only)\n"); return;
+    }
+    let uid = match parse_number(uid_text,10) {Some(v)=>v,None=>{puts(b"useradd: invalid uid\n");return;}};
+    let gid = match parse_number(gid_text,10) {Some(v)=>v,None=>{puts(b"useradd: invalid gid\n");return;}};
+    let mut account_name=[0u8;24]; account_name[..name.len()].copy_from_slice(name);
+    let flags=if flags_text==b"sudo" {1} else {0};
+    if unsafe { accounts_create(account_name.as_ptr(),uid,gid,flags) } == 0 {
+        puts(b"Account created; set its password with passwd ");puts(name);print_char(b'\n');
+        // Create home directory /HOME/<NAME>
+        let mut home = [0u8; 64];
+        home[..6].copy_from_slice(b"/HOME/");
+        for i in 0..name.len() {
+            let c = name[i];
+            home[6 + i] = if c >= b'a' && c <= b'z' { c - 32 } else { c };
+        }
+        home[6 + name.len()] = 0;
+        unsafe {
+            // Ensure /HOME exists first
+            let home_root = b"/HOME\0";
+            let _ = vfs_mkdir(home_root.as_ptr());
+            if vfs_mkdir(home.as_ptr()) == 0 {
+                let _ = permissions_chown(home.as_ptr(), uid, gid);
+                let _ = permissions_chmod(home.as_ptr(), 0o0750);
+                puts(b"Home directory created: ");
+                puts(&home[..6 + name.len()]);
+                print_char(b'\n');
+            }
+        }
+    }
+    else { puts(b"useradd: account or UID already exists, or database is unavailable\n"); }
+}
+
+fn cmd_userdel(args: &[u8]) {
+    let name=trim_slice(args);
+    if unsafe{permissions_uid()}!=0||name.is_empty()||name.len()>=24||name.iter().any(|&b|b==b' '||b==b'\t') {puts(b"Usage: userdel <name> (root only; root cannot be deleted)\n");return;}
+    let mut account_name=[0u8;24];account_name[..name.len()].copy_from_slice(name);
+    if unsafe{accounts_delete(account_name.as_ptr())}==0 {puts(b"Account deleted; files owned by its UID are unchanged\n");}
+    else {puts(b"userdel: account not found, root account protected, or database unavailable\n");}
+}
+
+fn cmd_usermod(args: &[u8]) {
+    let (name,setting)=split_word(trim_slice(args));
+    if unsafe{permissions_uid()}!=0||name.is_empty()||name.len()>=24||(setting!=b"sudo"&&setting!=b"nosudo") {puts(b"Usage: usermod <name> sudo|nosudo (root only)\n");return;}
+    let mut account_name=[0u8;24];account_name[..name.len()].copy_from_slice(name);
+    let flags=if setting==b"sudo" {1} else {0};
+    if unsafe{accounts_set_flags(account_name.as_ptr(),flags)}==0 {puts(b"Account privileges updated\n");}
+    else {puts(b"usermod: account not found, root account protected, or database unavailable\n");}
+}
+
+fn cmd_passwd(args: &[u8]) {
+    let target_arg=trim_slice(args);
+    if target_arg.iter().any(|&b|b==b' '||b==b'\t') {puts(b"Usage: passwd [username]\n");return;}
+    let current_uid=unsafe{permissions_uid()};
+    let mut current=[0u8;24];
+    if target_arg.is_empty() {
+        if !username_for_uid(current_uid,&mut current){puts(b"passwd: current UID has no account\n");return;}
+    } else {
+        if current_uid!=0 {puts(b"passwd: root privileges required to set another user's password\n");return;}
+        if target_arg.len()>=24 {puts(b"passwd: invalid username\n");return;}
+        current[..target_arg.len()].copy_from_slice(target_arg);
+    }
+    let (first,first_len)=read_secret(b"New password: ");
+    if first_len==0 {puts(b"passwd: empty passwords are not allowed\n");return;}
+    let (second,second_len)=read_secret(b"Retype new password: ");
+    if first_len!=second_len || first[..first_len]!=second[..second_len] {puts(b"passwd: passwords do not match\n");return;}
+    let name=current.as_ptr();
+    if unsafe{accounts_set_password(name,first.as_ptr())}==0 {puts(b"Password updated\n");} else {puts(b"passwd: unable to update password\n");}
+}
+
+fn cmd_su(args: &[u8]) {
+    let target=trim_slice(args);
+    if target.iter().any(|&b|b==b' '||b==b'\t') {puts(b"Usage: su [username]\n");return;}
+    let mut target_name=[0u8;24];
+    if target.is_empty() {target_name[..4].copy_from_slice(b"root");}
+    else if target.len()<24 {target_name[..target.len()].copy_from_slice(target);}
+    else {puts(b"su: invalid username\n");return;}
+    let mut uid=0;let mut gid=0;let mut flags=0;
+    if unsafe{accounts_lookup(target_name.as_ptr(),&mut uid,&mut gid,&mut flags)}!=0 {puts(b"su: unknown account\n");return;}
+    if unsafe{permissions_uid()}!=0 {
+        let (mut password,len)=read_secret(b"Password: ");
+        password[len]=0;
+        if unsafe{accounts_authenticate(target_name.as_ptr(),password.as_ptr())}!=0 {puts(b"su: authentication failed\n");return;}
+    }
+    unsafe{permissions_set_identity(uid,gid);}
+    puts(b"Switched to ");puts(&target_name[..target_name.iter().position(|&b|b==0).unwrap_or(24)]);print_char(b'\n');
+}
+
+fn cmd_sudo(args: &[u8]) {
+    let command=trim_slice(args);
+    if command.is_empty(){puts(b"Usage: sudo <command> [arguments]\n");return;}
+    let uid=unsafe{permissions_uid()};
+    if uid!=0 {
+        let mut name=[0u8;24];let mut gid=0;let mut flags=0;
+        if !username_for_uid(uid,&mut name)||unsafe{accounts_lookup(name.as_ptr(),core::ptr::null_mut(),&mut gid,&mut flags)}!=0||flags&1==0 {
+            puts(b"sudo: account is not authorized\n");return;
+        }
+        let (mut password,len)=read_secret(b"Password: ");password[len]=0;
+        if unsafe{accounts_authenticate(name.as_ptr(),password.as_ptr())}!=0 {puts(b"sudo: authentication failed\n");return;}
+    }
+    let old_uid=unsafe{permissions_uid()};let old_gid=unsafe{permissions_gid()};
+    unsafe{permissions_set_identity(0,0);}
+    dispatch_single_command(command);
+    unsafe{permissions_set_identity(old_uid,old_gid);}
+}
+
+fn cmd_login(args: &[u8]) {
+    let target = trim_slice(args);
+    if target.iter().any(|&b| b == b' ' || b == b'\t') {
+        puts(b"Usage: login [username]\n");
+        return;
+    }
+    let mut target_name = [0u8; 24];
+    if target.is_empty() {
+        puts(b"Username: ");
+        let mut len = 0usize;
+        loop {
+            let key = unsafe { get_char() };
+            if key == b'\r' || key == b'\n' { print_char(b'\n'); break; }
+            if key == 8 || key == 127 {
+                if len > 0 { len -= 1; target_name[len] = 0; puts(b"\x08 \x08"); }
+                continue;
+            }
+            if key >= 0x20 && key < 0x7f && len < 23 {
+                target_name[len] = key; len += 1; print_char(key);
+            }
+        }
+        if len == 0 { return; }
+    } else if target.len() < 24 {
+        target_name[..target.len()].copy_from_slice(target);
+    } else {
+        puts(b"login: invalid username\n");
+        return;
+    }
+    let mut uid = 0;
+    let mut gid = 0;
+    let mut flags = 0;
+    if unsafe { accounts_lookup(target_name.as_ptr(), &mut uid, &mut gid, &mut flags) } != 0 {
+        puts(b"login: unknown account\n");
+        return;
+    }
+    let (mut password, len) = read_secret(b"Password: ");
+    password[len] = 0;
+    if unsafe { accounts_authenticate(target_name.as_ptr(), password.as_ptr()) } != 0 {
+        puts(b"login: authentication failed\n");
+        return;
+    }
+    unsafe { permissions_set_identity(uid, gid); }
+    puts(b"Logged in as ");
+    puts(&target_name[..target_name.iter().position(|&b| b == 0).unwrap_or(24)]);
+    print_char(b'\n');
+
+    // cd to home directory if it exists
+    let mut home = [0u8; 64];
+    home[..6].copy_from_slice(b"/HOME/");
+    let name_len = target_name.iter().position(|&b| b == 0).unwrap_or(24);
+    if name_len + 6 < 63 {
+        // Copy name as uppercase for FAT/ext2 compatibility
+        for i in 0..name_len {
+            let c = target_name[i];
+            home[6 + i] = if c >= b'a' && c <= b'z' { c - 32 } else { c };
+        }
+        home[6 + name_len] = 0;
+        unsafe {
+            let mut probe = core::mem::MaybeUninit::<VfsFile>::uninit();
+            if vfs_find_file(home.as_ptr(), probe.as_mut_ptr()) == 0 {
+                vfs_chdir(home.as_ptr());
+            }
+        }
+    }
+}
+
+fn cmd_who(_args: &[u8]) {
+    let uid = unsafe { permissions_uid() };
+    let mut name = [0u8; 24];
+    if username_for_uid(uid, &mut name) {
+        puts(&name[..name.iter().position(|&b| b == 0).unwrap_or(24)]);
+    } else {
+        puts(b"uid-"); print_u32(uid);
+    }
+    puts(b"       console\n");
+}
+
+fn cmd_groups(_args: &[u8]) {
+    let uid = unsafe { permissions_uid() };
+    let gid = unsafe { permissions_gid() };
+    let mut name = [0u8; 24];
+    if username_for_uid(uid, &mut name) {
+        puts(&name[..name.iter().position(|&b| b == 0).unwrap_or(24)]);
+    } else {
+        puts(b"uid-"); print_u32(uid);
+    }
+    puts(b" : gid-");
+    print_u32(gid);
+    if uid == 0 { puts(b" root wheel"); }
+    print_char(b'\n');
+}
+
 fn cmd_filter(args: &[u8], mode: u8) {
     let trimmed = trim_slice(args);
     let (pattern, filename) = if mode == b'g' {
@@ -1473,6 +1977,42 @@ pub static COMMANDS: &[Command] = &[
     },
     Command { name: b"echo", description: b"Print text (e.g. echo hello)", handler: cmd_echo },
     Command { name: b"ECHO", description: b"", handler: cmd_echo },
+    Command { name: b"id", description: b"Show the current numeric UID and GID", handler: cmd_id },
+    Command { name: b"ID", description: b"", handler: cmd_id },
+    Command { name: b"whoami", description: b"Show the current user identity", handler: cmd_whoami },
+    Command { name: b"WHOAMI", description: b"", handler: cmd_whoami },
+    Command { name: b"chmod", description: b"Set file mode using octal permissions", handler: cmd_chmod },
+    Command { name: b"CHMOD", description: b"", handler: cmd_chmod },
+    Command { name: b"chown", description: b"Set numeric file owner and group (root only)", handler: cmd_chown },
+    Command { name: b"CHOWN", description: b"", handler: cmd_chown },
+    Command { name: b"umask", description: b"Show or set the file creation mask", handler: cmd_umask },
+    Command { name: b"UMASK", description: b"", handler: cmd_umask },
+    Command { name: b"stat", description: b"Show file mode, owner, group, and size", handler: cmd_stat },
+    Command { name: b"STAT", description: b"", handler: cmd_stat },
+    Command { name: b"access", description: b"Check read, write, or execute access", handler: cmd_access },
+    Command { name: b"ACCESS", description: b"", handler: cmd_access },
+    Command { name: b"runas", description: b"Run an app with numeric UID/GID (root only)", handler: cmd_runas },
+    Command { name: b"RUNAS", description: b"", handler: cmd_runas },
+    Command { name: b"users", description: b"List local accounts", handler: cmd_users },
+    Command { name: b"USERS", description: b"", handler: cmd_users },
+    Command { name: b"useradd", description: b"Create a local account (root only)", handler: cmd_useradd },
+    Command { name: b"USERADD", description: b"", handler: cmd_useradd },
+    Command { name: b"userdel", description: b"Delete a local account (root only)", handler: cmd_userdel },
+    Command { name: b"USERDEL", description: b"", handler: cmd_userdel },
+    Command { name: b"usermod", description: b"Change sudo access (root only)", handler: cmd_usermod },
+    Command { name: b"USERMOD", description: b"", handler: cmd_usermod },
+    Command { name: b"passwd", description: b"Set an account password", handler: cmd_passwd },
+    Command { name: b"PASSWD", description: b"", handler: cmd_passwd },
+    Command { name: b"su", description: b"Switch to a local account", handler: cmd_su },
+    Command { name: b"SU", description: b"", handler: cmd_su },
+    Command { name: b"sudo", description: b"Run a command as root", handler: cmd_sudo },
+    Command { name: b"SUDO", description: b"", handler: cmd_sudo },
+    Command { name: b"login", description: b"Log in as a local account", handler: cmd_login },
+    Command { name: b"LOGIN", description: b"", handler: cmd_login },
+    Command { name: b"who", description: b"Show the currently logged-in user", handler: cmd_who },
+    Command { name: b"WHO", description: b"", handler: cmd_who },
+    Command { name: b"groups", description: b"Show group memberships for the current user", handler: cmd_groups },
+    Command { name: b"GROUPS", description: b"", handler: cmd_groups },
     Command { name: b"grep", description: b"Print lines containing text (grep text [file])", handler: cmd_grep },
     Command { name: b"GREP", description: b"", handler: cmd_grep },
     Command { name: b"head", description: b"Print the first 10 lines (head [file])", handler: cmd_head },
@@ -1506,6 +2046,19 @@ fn run_script(filename: &[u8]) {
             return;
         }
         SCRIPT_ACTIVE = true;
+    }
+
+    if filename.len() >= 128 {
+        puts(b"CykShell: script path is too long\n");
+        unsafe { SCRIPT_ACTIVE = false; }
+        return;
+    }
+    let mut permission_path = [0u8; 128];
+    permission_path[..filename.len()].copy_from_slice(filename);
+    if unsafe { permissions_check(permission_path.as_ptr(), 1) } != 0 {
+        puts(b"CykShell: script permission denied\n");
+        unsafe { SCRIPT_ACTIVE = false; }
+        return;
     }
 
     if filename.len() >= 64 {
@@ -1835,6 +2388,24 @@ const AUTOCOMPLETE_LIST: &[&[u8]] = &[
     b"cat",
     b"soundtest",
     b"gfxdemo",
+    b"id",
+    b"whoami",
+    b"chmod",
+    b"chown",
+    b"umask",
+    b"stat",
+    b"access",
+    b"runas",
+    b"users",
+    b"useradd",
+    b"userdel",
+    b"usermod",
+    b"passwd",
+    b"su",
+    b"sudo",
+    b"login",
+    b"who",
+    b"groups",
 ];
 
 const PATH_COMPLETION_CAPACITY: usize = 128;
@@ -1950,16 +2521,39 @@ fn complete_path_token(token: &[u8], output: &mut [u8; 128]) -> Option<usize> {
 }
 
 fn print_shell_prompt() {
+    // Show username@CykOS in color, then cwd
+    let uid = unsafe { permissions_uid() };
+    let mut name = [0u8; 24];
+    if username_for_uid(uid, &mut name) {
+        let name_len = name.iter().position(|&b| b == 0).unwrap_or(24);
+        puts_color(&name[..name_len], 0x0A); // green
+    } else if uid == 0 {
+        puts_color(b"root", 0x0A);
+    } else {
+        puts_color(b"uid-", 0x0A);
+        // Print uid digits in green
+        let mut buf = [0u8; 10];
+        let mut idx = 0;
+        let mut n = uid;
+        if n == 0 { buf[0] = b'0'; idx = 1; }
+        else { while n > 0 { buf[idx] = b'0' + (n % 10) as u8; n /= 10; idx += 1; } }
+        while idx > 0 { idx -= 1; puts_color(&buf[idx..idx+1], 0x0A); }
+    }
+    puts_color(b"@CykOS", 0x0B); // cyan
+    puts(b":");
+
     let mut cwd_buf = [0u8; 128];
     let cwd_len = unsafe { vfs_getcwd(cwd_buf.as_mut_ptr(), 128) };
     if cwd_len > 0 {
-        for &byte in &cwd_buf[..cwd_len as usize] {
-            print_char(byte);
-        }
+        puts_color(&cwd_buf[..cwd_len as usize], 0x0E); // yellow
     } else {
-        puts(b"/");
+        puts_color(b"/", 0x0E);
     }
-    puts(b"] # ");
+    if uid == 0 {
+        puts(b"# ");
+    } else {
+        puts(b"$ ");
+    }
 }
 
 #[no_mangle]

@@ -63,6 +63,7 @@ int keyboard_irq_has_scancode(void);
 int keyboard_irq_read_scancode(void);
 void keyboard_irq_reset_state(void);
 void keyboard_irq_inject_scancode(unsigned char scancode);
+unsigned int idt_get_millis(void);
 
 // Level 2 Sound Driver Interface Table (standardized for game porting)
 // Matches the audio abstraction expected by doomgeneric and similar software:
