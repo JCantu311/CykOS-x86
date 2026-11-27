@@ -241,7 +241,7 @@ bin/SHELL.BIN: bin/kernel_syms.ld bin/libshell.a src/user/shell.ld
 
 # Level 2 Standalone Drivers (compiled in parallel)
 define DRIVER_RULE
-$(word 2,$(subst :, ,$(1))): $(word 1,$(subst :, ,$(1))) | bin/.dirs-ready
+$(word 2,$(subst :, ,$(1))): $(word 1,$(subst :, ,$(1))) Makefile DRIVERS.LST src/kernel/module.h | bin/.dirs-ready
 	@mkdir -p "$$(dir $$@)"
 	@echo "Building relocatable driver: $$< -> $$@"
 	@"$(CC)" $(DRIVER_CFLAGS) -c "$$<" -o "$$@.o"
