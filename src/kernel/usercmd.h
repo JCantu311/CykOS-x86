@@ -50,4 +50,12 @@ unsigned int usercmd_app_brk(unsigned int requested);
 /** Reap the most recently exited foreground app; returns its pid or -1. */
 int usercmd_wait(int* exit_code);
 
+/* Dynamic shared library runtime support (dlopen/dlsym/dlclose). */
+unsigned int usercmd_dlopen(const char* path, int flags);
+unsigned int usercmd_dlsym(int handle, const char* symbol);
+int usercmd_dlclose(int handle);
+int usercmd_execve(const char* path, char* const argv[], char* const envp[], registers_t* regs);
+unsigned int usercmd_mmap(unsigned int addr, unsigned int length, int prot, int flags);
+int usercmd_munmap(unsigned int addr, unsigned int length);
+
 #endif // USERCMD_H

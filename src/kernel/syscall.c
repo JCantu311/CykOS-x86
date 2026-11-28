@@ -8,10 +8,21 @@
 #include "permissions.h"
 #include "paging.h"
 #include "usb.h"
+#include "sched.h"
 
 // Maximum open file descriptors
-#define MAX_FDS 8
+#define MAX_FDS 32
 #define SYS_FILE_IO_LIMIT (1024 * 1024)
+#define PIPE_BUF_SIZE 4096
+
+typedef struct {
+    char data[PIPE_BUF_SIZE];
+    unsigned int head;
+    unsigned int tail;
+    unsigned int count;
+    int readers;
+    int writers;
+} pipe_buf_t;
 
 #define OPEN_ACCMODE 0x0003
 #define OPEN_RDONLY  0x0000
@@ -25,14 +36,17 @@
 
 typedef struct {
     int in_use;
+    int fd_num;
     vfs_file_t entry;
     unsigned int cursor;
     unsigned int flags;
     unsigned int owner;
     char path[128];
+    pipe_buf_t* pipe;
+    int pipe_write;
 } fd_table_t;
 
-static fd_table_t g_fds[MAX_FDS];
+static fd_table_t* g_fds;
 static const char* g_pipe_input;
 static unsigned int g_pipe_input_len;
 static unsigned int g_pipe_input_pos;
@@ -46,13 +60,84 @@ typedef struct {
     char value;
     unsigned char is_error;
 } deferred_console_char_t;
-static deferred_console_char_t g_deferred_console[DEFERRED_CONSOLE_CAPACITY];
+static deferred_console_char_t* g_deferred_console;
 static unsigned int g_deferred_console_length;
 static int g_keyboard_event_extended;
 
-static int syscall_fd_owned_by_current(int fd) {
-    return fd >= 3 && fd < MAX_FDS && g_fds[fd].in_use &&
-           g_fds[fd].owner == usercmd_current_pid();
+static int syscall_find_fd_slot(unsigned int owner, int fd_num) {
+    if (fd_num < 0) return -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (g_fds[i].in_use && g_fds[i].owner == owner && g_fds[i].fd_num == fd_num) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int syscall_alloc_fd_slot(void) {
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!g_fds[i].in_use) return i;
+    }
+    return -1;
+}
+
+static int syscall_alloc_fd_num(unsigned int owner) {
+    for (int fd = 3; fd < MAX_FDS + 3; fd++) {
+        if (syscall_find_fd_slot(owner, fd) < 0) return fd;
+    }
+    return -1;
+}
+
+typedef struct {
+    unsigned int d_ino;
+    unsigned char d_type;
+    char d_name[128];
+} sys_dirent_t;
+
+static sys_dirent_t* g_listdir_out;
+static unsigned int g_listdir_cap;
+static unsigned int g_listdir_cnt;
+
+static void syscall_listdir_cb(const char* name, unsigned int size, unsigned char is_dir) {
+    (void)size;
+    if (!g_listdir_out || g_listdir_cnt >= g_listdir_cap || !name) return;
+    sys_dirent_t* ent = &g_listdir_out[g_listdir_cnt++];
+    ent->d_ino = g_listdir_cnt;
+    ent->d_type = is_dir ? 4u : 8u; /* DT_DIR=4, DT_REG=8 */
+    unsigned int i = 0;
+    while (name[i] && i < sizeof(ent->d_name) - 1u) {
+        ent->d_name[i] = name[i];
+        i++;
+    }
+    ent->d_name[i] = '\0';
+}
+
+static void syscall_close_fd_slot(int slot) {
+    if (slot < 0 || slot >= MAX_FDS || !g_fds[slot].in_use) return;
+    if (g_fds[slot].pipe) {
+        pipe_buf_t* p = g_fds[slot].pipe;
+        if (g_fds[slot].pipe_write) p->writers--;
+        else p->readers--;
+        if (p->readers <= 0 && p->writers <= 0) {
+            free(p);
+        }
+    }
+    memset(&g_fds[slot], 0, sizeof(g_fds[slot]));
+}
+
+static void syscall_clone_process_fds(unsigned int parent_pid, unsigned int child_pid) {
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (g_fds[i].in_use && g_fds[i].owner == parent_pid) {
+            int dst = syscall_alloc_fd_slot();
+            if (dst < 0) break;
+            g_fds[dst] = g_fds[i];
+            g_fds[dst].owner = child_pid;
+            if (g_fds[dst].pipe) {
+                if (g_fds[dst].pipe_write) g_fds[dst].pipe->writers++;
+                else g_fds[dst].pipe->readers++;
+            }
+        }
+    }
 }
 
 // Kernel-owned physical-key event adapter for applications that need held-key
@@ -115,13 +200,9 @@ void syscall_flush_deferred_console(void) {
 
 void syscall_close_process_fds(unsigned int owner) {
     if (owner == 0) return;
-    for (int fd = 3; fd < MAX_FDS; fd++) {
-        if (g_fds[fd].in_use && g_fds[fd].owner == owner) {
-            g_fds[fd].in_use = 0;
-            g_fds[fd].cursor = 0;
-            g_fds[fd].flags = 0;
-            g_fds[fd].owner = 0;
-            g_fds[fd].path[0] = '\0';
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (g_fds[i].in_use && g_fds[i].owner == owner) {
+            syscall_close_fd_slot(i);
         }
     }
 }
@@ -201,6 +282,7 @@ static int syscall_validate_user_arguments(const registers_t* regs,
         case SYS_CYK_MKDIR:
         case SYS_CYK_RMDIR:
         case SYS_CYK_CHDIR:
+        case SYS_EXECVE:
             if (!syscall_user_string_valid(regs, (const char*)a1,
                     number == SYS_PRINT_STRING ? 4096u : 128u)) return 0;
             break;
@@ -211,6 +293,10 @@ static int syscall_validate_user_arguments(const registers_t* regs,
     switch (number) {
         case SYS_WAIT:
             return !a1 || syscall_user_range_valid(regs, a1, sizeof(int));
+        case SYS_WAITPID:
+            return !a2 || syscall_user_range_valid(regs, a2, sizeof(int));
+        case SYS_PIPE:
+            return syscall_user_range_valid(regs, a1, 2u * sizeof(int));
         case SYS_READ:
         case SYS_WRITE:
         case SYS_FAT_READ:
@@ -375,11 +461,56 @@ static void syscall_handler(registers_t* regs) {
 
         case SYS_EXIT: {
             // arg1 = exit code
-            // Return exit code in eax
             regs->eax = arg1;
+            if (sched_current_pid() > 1u) {
+                unsigned int pid = sched_current_pid();
+                syscall_close_process_fds(pid);
+                paging_space_t* space = sched_get_current_vm_space();
+                sched_set_current_vm_space((void*)0);
+                paging_switch_address_space((void*)0);
+                if (space) paging_destroy_address_space(space);
+                sched_exit((int)arg1);
+            }
             if (usercmd_is_running()) {
                 usercmd_terminate((int)arg1);
             }
+            break;
+        }
+
+        case SYS_FORK: {
+            paging_space_t* cur_space = sched_get_current_vm_space();
+            if (!cur_space) cur_space = paging_get_active_address_space();
+            paging_space_t* child_space = paging_clone_address_space(cur_space);
+            if (!child_space) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            unsigned int parent_pid = usercmd_current_pid();
+            int child_pid = sched_spawn_user_fork("child", child_space, regs, parent_pid);
+            if (child_pid < 0) {
+                paging_destroy_address_space(child_space);
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            syscall_clone_process_fds(parent_pid, (unsigned int)child_pid);
+            regs->eax = (unsigned int)child_pid;
+            break;
+        }
+
+        case SYS_EXECVE: {
+            if (usercmd_execve((const char*)arg1, (char* const*)arg2,
+                               (char* const*)arg3, regs) != 0) {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_WAITPID: {
+            int* status = (int*)arg2;
+            asm volatile("sti" ::: "memory");
+            int res = sched_waitpid(usercmd_current_pid(), (int)arg1, status, (int)arg3);
+            asm volatile("cli" ::: "memory");
+            regs->eax = (unsigned int)res;
             break;
         }
 
@@ -405,31 +536,33 @@ static void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            if (fd == FD_STDOUT) {
-                if (g_pipe_active && g_pipe_output) {
-                    regs->eax = syscall_pipe_write(buf, (unsigned int)count);
-                } else if (syscall_graphics_mode_active()) {
-                    syscall_defer_console_write(buf, (unsigned int)count, 0);
-                    regs->eax = (unsigned int)count;
-                } else {
-                    for (size_t i = 0; i < count; i++) {
-                        print_char(buf[i]);
+            int slot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (slot >= 0) {
+                if (g_fds[slot].pipe) {
+                    if (!g_fds[slot].pipe_write) {
+                        regs->eax = (unsigned int)-1;
+                        break;
                     }
-                    regs->eax = (unsigned int)count;
-                }
-            } else if (fd == FD_STDERR) {
-                if (syscall_graphics_mode_active()) {
-                    syscall_defer_console_write(buf, (unsigned int)count, 1);
-                } else {
-                    for (size_t i = 0; i < count; i++) {
-                        char temp[2] = { buf[i], '\0' };
-                        print_color_string(temp, VGA_RED);
+                    pipe_buf_t* p = g_fds[slot].pipe;
+                    unsigned int written = 0;
+                    asm volatile("sti" ::: "memory");
+                    while (written < count) {
+                        if (p->readers <= 0) break;
+                        while (p->count < PIPE_BUF_SIZE && written < count) {
+                            p->data[p->tail] = buf[written++];
+                            p->tail = (p->tail + 1u) % PIPE_BUF_SIZE;
+                            p->count++;
+                        }
+                        if (written < count && p->readers > 0) {
+                            sched_sleep_ms(2u);
+                        }
                     }
+                    asm volatile("cli" ::: "memory");
+                    regs->eax = (written == 0 && p->readers <= 0) ? (unsigned int)-1 : written;
+                    break;
                 }
-                regs->eax = (unsigned int)count;
-            } else if (syscall_fd_owned_by_current(fd) &&
-                (g_fds[fd].flags & OPEN_ACCMODE) != 0) {
-                fd_table_t* file = &g_fds[fd];
+                if ((g_fds[slot].flags & OPEN_ACCMODE) != 0) {
+                    fd_table_t* file = &g_fds[slot];
                 if (permissions_check(file->path, CYK_PERMISSION_WRITE) != 0) {
                     regs->eax = (unsigned int)-1;
                     break;
@@ -468,6 +601,31 @@ static void syscall_handler(registers_t* regs) {
                 } else {
                     regs->eax = (unsigned int)-1;
                 }
+                } else {
+                    regs->eax = (unsigned int)-1;
+                }
+            } else if (fd == FD_STDOUT) {
+                if (g_pipe_active && g_pipe_output) {
+                    regs->eax = syscall_pipe_write(buf, (unsigned int)count);
+                } else if (syscall_graphics_mode_active()) {
+                    syscall_defer_console_write(buf, (unsigned int)count, 0);
+                    regs->eax = (unsigned int)count;
+                } else {
+                    for (size_t i = 0; i < count; i++) {
+                        print_char(buf[i]);
+                    }
+                    regs->eax = (unsigned int)count;
+                }
+            } else if (fd == FD_STDERR) {
+                if (syscall_graphics_mode_active()) {
+                    syscall_defer_console_write(buf, (unsigned int)count, 1);
+                } else {
+                    for (size_t i = 0; i < count; i++) {
+                        char temp[2] = { buf[i], '\0' };
+                        print_color_string(temp, VGA_RED);
+                    }
+                }
+                regs->eax = (unsigned int)count;
             } else {
                 regs->eax = (unsigned int)-1;
             }
@@ -490,7 +648,37 @@ static void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            if (fd == FD_STDIN) {
+            int rslot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (rslot >= 0) {
+                if (g_fds[rslot].pipe) {
+                    if (g_fds[rslot].pipe_write) {
+                        regs->eax = (unsigned int)-1;
+                        break;
+                    }
+                    pipe_buf_t* p = g_fds[rslot].pipe;
+                    unsigned int got = 0;
+                    asm volatile("sti" ::: "memory");
+                    while (got == 0) {
+                        while (p->count > 0 && got < count) {
+                            buf[got++] = p->data[p->head];
+                            p->head = (p->head + 1u) % PIPE_BUF_SIZE;
+                            p->count--;
+                        }
+                        if (got > 0 || p->writers <= 0) break;
+                        sched_sleep_ms(2u);
+                    }
+                    asm volatile("cli" ::: "memory");
+                    regs->eax = got;
+                    break;
+                }
+                if ((g_fds[rslot].flags & OPEN_ACCMODE) != OPEN_WRONLY) {
+                    int bytes = vfs_read_at(&g_fds[rslot].entry, g_fds[rslot].cursor, buf, count);
+                    if (bytes > 0) g_fds[rslot].cursor += (unsigned int)bytes;
+                    regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
+                } else {
+                    regs->eax = (unsigned int)-1;
+                }
+            } else if (fd == FD_STDIN) {
                 if (g_pipe_active && g_pipe_input) {
                     int bytes = syscall_pipe_read(buf, (unsigned int)count);
                     regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
@@ -518,11 +706,6 @@ static void syscall_handler(registers_t* regs) {
                         regs->eax = (unsigned int)read_bytes;
                     }
                 }
-            } else if (syscall_fd_owned_by_current(fd) &&
-                (g_fds[fd].flags & OPEN_ACCMODE) != OPEN_WRONLY) {
-                int bytes = vfs_read_at(&g_fds[fd].entry, g_fds[fd].cursor, buf, count);
-                if (bytes > 0) g_fds[fd].cursor += (unsigned int)bytes;
-                regs->eax = (unsigned int)(bytes >= 0 ? bytes : -1);
             } else {
                 regs->eax = (unsigned int)-1;
             }
@@ -542,15 +725,10 @@ static void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            int found_fd = -1;
-            for (int i = 3; i < MAX_FDS; i++) {
-                if (!g_fds[i].in_use) {
-                    found_fd = i;
-                    break;
-                }
-            }
+            int found_fd = syscall_alloc_fd_slot();
+            int fd_num = syscall_alloc_fd_num(usercmd_current_pid());
 
-            if (found_fd == -1) {
+            if (found_fd == -1 || fd_num == -1) {
                 regs->eax = (unsigned int)-1; // No free FDs
                 break;
             }
@@ -582,14 +760,17 @@ static void syscall_handler(registers_t* regs) {
                     vfs_find_file(absolute_path, &g_fds[found_fd].entry) != 0) found = 0;
             }
             if (found) {
+                memset(&g_fds[found_fd], 0, sizeof(g_fds[found_fd]));
                 g_fds[found_fd].in_use = 1;
+                g_fds[found_fd].fd_num = fd_num;
                 g_fds[found_fd].flags = flags;
                 g_fds[found_fd].owner = usercmd_current_pid();
+                vfs_find_file(absolute_path, &g_fds[found_fd].entry);
                 g_fds[found_fd].cursor = (flags & OPEN_APPEND) ? g_fds[found_fd].entry.size : 0;
                 unsigned int path_length = strlen(absolute_path);
                 memcpy(g_fds[found_fd].path, absolute_path, path_length);
                 g_fds[found_fd].path[path_length] = '\0';
-                regs->eax = (unsigned int)found_fd;
+                regs->eax = (unsigned int)fd_num;
             } else {
                 regs->eax = (unsigned int)-1; // File not found
             }
@@ -597,18 +778,95 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_CLOSE: {
-            // arg1 = fd
             int fd = (int)arg1;
-            if (syscall_fd_owned_by_current(fd)) {
-                g_fds[fd].in_use = 0;
-                g_fds[fd].owner = 0;
-                g_fds[fd].cursor = 0;
-                g_fds[fd].flags = 0;
-                g_fds[fd].path[0] = '\0';
+            int slot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (slot >= 0) {
+                syscall_close_fd_slot(slot);
                 regs->eax = 0;
             } else {
                 regs->eax = (unsigned int)-1;
             }
+            break;
+        }
+
+        case SYS_PIPE: {
+            int* pipefd = (int*)arg1;
+            unsigned int owner = usercmd_current_pid();
+            int s0 = syscall_alloc_fd_slot();
+            if (s0 < 0) { regs->eax = (unsigned int)-1; break; }
+            int fd0 = syscall_alloc_fd_num(owner);
+            if (fd0 < 0) { regs->eax = (unsigned int)-1; break; }
+            g_fds[s0].in_use = 1;
+            g_fds[s0].owner = owner;
+            g_fds[s0].fd_num = fd0;
+
+            int s1 = syscall_alloc_fd_slot();
+            if (s1 < 0) { memset(&g_fds[s0], 0, sizeof(g_fds[s0])); regs->eax = (unsigned int)-1; break; }
+            int fd1 = syscall_alloc_fd_num(owner);
+            if (fd1 < 0) { memset(&g_fds[s0], 0, sizeof(g_fds[s0])); regs->eax = (unsigned int)-1; break; }
+
+            pipe_buf_t* p = (pipe_buf_t*)calloc(1u, sizeof(pipe_buf_t));
+            if (!p) { memset(&g_fds[s0], 0, sizeof(g_fds[s0])); regs->eax = (unsigned int)-1; break; }
+            p->readers = 1;
+            p->writers = 1;
+
+            memset(&g_fds[s0], 0, sizeof(g_fds[s0]));
+            g_fds[s0].in_use = 1;
+            g_fds[s0].owner = owner;
+            g_fds[s0].fd_num = fd0;
+            g_fds[s0].pipe = p;
+            g_fds[s0].pipe_write = 0;
+
+            memset(&g_fds[s1], 0, sizeof(g_fds[s1]));
+            g_fds[s1].in_use = 1;
+            g_fds[s1].owner = owner;
+            g_fds[s1].fd_num = fd1;
+            g_fds[s1].pipe = p;
+            g_fds[s1].pipe_write = 1;
+
+            pipefd[0] = fd0;
+            pipefd[1] = fd1;
+            regs->eax = 0;
+            break;
+        }
+
+        case SYS_DUP: {
+            int oldfd = (int)arg1;
+            unsigned int owner = usercmd_current_pid();
+            int src = syscall_find_fd_slot(owner, oldfd);
+            if (src < 0) { regs->eax = (unsigned int)-1; break; }
+            int dst = syscall_alloc_fd_slot();
+            int newfd = syscall_alloc_fd_num(owner);
+            if (dst < 0 || newfd < 0) { regs->eax = (unsigned int)-1; break; }
+            g_fds[dst] = g_fds[src];
+            g_fds[dst].fd_num = newfd;
+            if (g_fds[dst].pipe) {
+                if (g_fds[dst].pipe_write) g_fds[dst].pipe->writers++;
+                else g_fds[dst].pipe->readers++;
+            }
+            regs->eax = (unsigned int)newfd;
+            break;
+        }
+
+        case SYS_DUP2: {
+            int oldfd = (int)arg1;
+            int newfd = (int)arg2;
+            if (newfd < 0 || newfd >= MAX_FDS + 3) { regs->eax = (unsigned int)-1; break; }
+            unsigned int owner = usercmd_current_pid();
+            int src = syscall_find_fd_slot(owner, oldfd);
+            if (src < 0) { regs->eax = (unsigned int)-1; break; }
+            if (oldfd == newfd) { regs->eax = (unsigned int)newfd; break; }
+            int existing = syscall_find_fd_slot(owner, newfd);
+            if (existing >= 0) syscall_close_fd_slot(existing);
+            int dst = syscall_alloc_fd_slot();
+            if (dst < 0) { regs->eax = (unsigned int)-1; break; }
+            g_fds[dst] = g_fds[src];
+            g_fds[dst].fd_num = newfd;
+            if (g_fds[dst].pipe) {
+                if (g_fds[dst].pipe_write) g_fds[dst].pipe->writers++;
+                else g_fds[dst].pipe->readers++;
+            }
+            regs->eax = (unsigned int)newfd;
             break;
         }
 
@@ -705,10 +963,16 @@ static void syscall_handler(registers_t* regs) {
         }
 
         case SYS_MSLEEP: {
-            unsigned int start = idt_get_millis();
             asm volatile("sti" ::: "memory");
-            while ((unsigned int)(idt_get_millis() - start) < arg1)
-                asm volatile("hlt" ::: "memory");
+            sched_sleep_ms(arg1);
+            asm volatile("cli" ::: "memory");
+            regs->eax = 0;
+            break;
+        }
+
+        case SYS_YIELD: {
+            asm volatile("sti" ::: "memory");
+            sched_yield();
             asm volatile("cli" ::: "memory");
             regs->eax = 0;
             break;
@@ -869,30 +1133,37 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
-            if (fd >= 0 && fd <= 2) {
-                memset(statbuf, 0, 13 * sizeof(unsigned int));
-                statbuf[2] = 0020666; // S_IFCHR
-                regs->eax = 0;
+            int fslot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (fslot < 0) {
+                if (fd >= 0 && fd <= 2) {
+                    memset(statbuf, 0, 13 * sizeof(unsigned int));
+                    statbuf[2] = 0020666; // S_IFCHR
+                    regs->eax = 0;
+                    break;
+                }
+                regs->eax = (unsigned int)-1;
                 break;
             }
-            if (!syscall_fd_owned_by_current(fd)) {
-                regs->eax = (unsigned int)-1;
+            if (g_fds[fslot].pipe) {
+                memset(statbuf, 0, 13 * sizeof(unsigned int));
+                statbuf[2] = 0010600; // S_IFIFO
+                regs->eax = 0;
                 break;
             }
             memset(statbuf, 0, 13 * sizeof(unsigned int));
             unsigned int mode = 0, uid = 0, gid = 0;
-            if (permissions_get(g_fds[fd].path, &mode, &uid, &gid) != 0) {
+            if (permissions_get(g_fds[fslot].path, &mode, &uid, &gid) != 0) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
-            statbuf[1] = g_fds[fd].entry.first_cluster;
+            statbuf[1] = g_fds[fslot].entry.first_cluster;
             statbuf[2] = mode;
             statbuf[3] = 1;
             statbuf[4] = uid;
             statbuf[5] = gid;
-            statbuf[7] = g_fds[fd].entry.size;
+            statbuf[7] = g_fds[fslot].entry.size;
             statbuf[8] = 512;
-            statbuf[9] = (g_fds[fd].entry.size + 511) / 512;
+            statbuf[9] = (g_fds[fslot].entry.size + 511) / 512;
             regs->eax = 0;
             break;
         }
@@ -901,13 +1172,14 @@ static void syscall_handler(registers_t* regs) {
             int fd = (int)arg1;
             int offset = (int)arg2;
             unsigned int base;
-            if (!syscall_fd_owned_by_current(fd)) {
+            int lslot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (lslot < 0 || g_fds[lslot].pipe) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
             if ((int)arg3 == 0) base = 0;
-            else if ((int)arg3 == 1) base = g_fds[fd].cursor;
-            else if ((int)arg3 == 2) base = g_fds[fd].entry.size;
+            else if ((int)arg3 == 1) base = g_fds[lslot].cursor;
+            else if ((int)arg3 == 2) base = g_fds[lslot].entry.size;
             else {
                 regs->eax = (unsigned int)-1;
                 break;
@@ -922,7 +1194,7 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (unsigned int)-1;
                 break;
             }
-            g_fds[fd].cursor = next;
+            g_fds[lslot].cursor = next;
             regs->eax = next;
             break;
         }
@@ -1125,6 +1397,107 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        case SYS_DLOPEN: {
+            const char* path = (const char*)arg1;
+            if (syscall_user_string_valid(regs, path, 128)) {
+                regs->eax = usercmd_dlopen(path, (int)arg2);
+            } else {
+                regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_DLSYM: {
+            const char* sym = (const char*)arg2;
+            if (syscall_user_string_valid(regs, sym, 128)) {
+                regs->eax = usercmd_dlsym((int)arg1, sym);
+            } else {
+                regs->eax = 0;
+            }
+            break;
+        }
+
+        case SYS_DLCLOSE: {
+            regs->eax = (unsigned int)usercmd_dlclose((int)arg1);
+            break;
+        }
+
+        case SYS_MMAP: {
+            regs->eax = usercmd_mmap(arg1, arg2, (int)arg3, (int)arg4);
+            break;
+        }
+
+        case SYS_MUNMAP: {
+            regs->eax = (unsigned int)usercmd_munmap(arg1, arg2);
+            break;
+        }
+
+        case SYS_FCNTL: {
+            int fd = (int)arg1;
+            int cmd = (int)arg2;
+            int slot = syscall_find_fd_slot(usercmd_current_pid(), fd);
+            if (slot < 0 && (fd < 0 || fd > 2)) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            if (cmd == 0) { /* F_DUPFD */
+                if (slot < 0) { regs->eax = (unsigned int)-1; break; }
+                int min_fd = (int)arg3;
+                if (min_fd < 0) min_fd = 0;
+                int newfd = -1;
+                for (int cand = min_fd; cand < MAX_FDS + 3; cand++) {
+                    if (syscall_find_fd_slot(usercmd_current_pid(), cand) < 0 &&
+                        !(cand >= 0 && cand <= 2 && cand < min_fd)) {
+                        newfd = cand;
+                        break;
+                    }
+                }
+                int dst = syscall_alloc_fd_slot();
+                if (dst < 0 || newfd < 0) { regs->eax = (unsigned int)-1; break; }
+                g_fds[dst] = g_fds[slot];
+                g_fds[dst].fd_num = newfd;
+                if (g_fds[dst].pipe) {
+                    if (g_fds[dst].pipe_write) g_fds[dst].pipe->writers++;
+                    else g_fds[dst].pipe->readers++;
+                }
+                regs->eax = (unsigned int)newfd;
+            } else if (cmd == 1 || cmd == 2) { /* F_GETFD / F_SETFD */
+                regs->eax = 0;
+            } else if (cmd == 3) { /* F_GETFL */
+                regs->eax = (slot >= 0) ? g_fds[slot].flags : 0;
+            } else if (cmd == 4) { /* F_SETFL */
+                if (slot >= 0) g_fds[slot].flags = arg3;
+                regs->eax = 0;
+            } else {
+                regs->eax = (unsigned int)-1;
+            }
+            break;
+        }
+
+        case SYS_LISTDIR: {
+            char absolute_path[128];
+            sys_dirent_t* out = (sys_dirent_t*)arg2;
+            unsigned int max_entries = arg3;
+            if (!out || max_entries == 0 || max_entries > 256u ||
+                !syscall_user_string_valid(regs, (const char*)arg1, 128u) ||
+                !syscall_user_range_valid(regs, arg2, max_entries * sizeof(sys_dirent_t)) ||
+                syscall_absolute_path((const char*)arg1, absolute_path) != 0 ||
+                permissions_check(absolute_path, CYK_PERMISSION_READ) != 0) {
+                regs->eax = (unsigned int)-1;
+                break;
+            }
+            g_listdir_out = out;
+            g_listdir_cap = max_entries;
+            g_listdir_cnt = 0;
+            int res = vfs_list_directory(absolute_path, syscall_listdir_cb);
+            unsigned int cnt = g_listdir_cnt;
+            g_listdir_out = (void*)0;
+            g_listdir_cap = 0;
+            g_listdir_cnt = 0;
+            regs->eax = (res == 0) ? cnt : (unsigned int)-1;
+            break;
+        }
+
         default: {
             // Unknown syscall
             regs->eax = (unsigned int)-1;
@@ -1137,6 +1510,16 @@ static void syscall_handler(registers_t* regs) {
 }
 
 void syscall_init(void) {
-    memset(g_fds, 0, sizeof(g_fds));
+    if (!g_fds) {
+        g_fds = (fd_table_t*)calloc(MAX_FDS, sizeof(fd_table_t));
+    } else {
+        memset(g_fds, 0, MAX_FDS * sizeof(fd_table_t));
+    }
+    if (!g_deferred_console) {
+        g_deferred_console = (deferred_console_char_t*)calloc(
+            DEFERRED_CONSOLE_CAPACITY, sizeof(deferred_console_char_t));
+    } else {
+        memset(g_deferred_console, 0, DEFERRED_CONSOLE_CAPACITY * sizeof(deferred_console_char_t));
+    }
     register_interrupt_handler(128, syscall_handler);
 }

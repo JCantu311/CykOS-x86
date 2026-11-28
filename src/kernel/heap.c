@@ -165,7 +165,7 @@ void heap_init(void) {
         g_heap_corrupt = 1;
         return;
     }
-    g_usable_memory_end = detect_contiguous_usable_end(0x02000000u, 0x01000000u);
+    g_usable_memory_end = detect_contiguous_usable_end(0x13000000u, 0x01000000u);
     g_heap_max_addr = detect_contiguous_usable_end(HEAP_MAX_ADDR,
                                                     HEAP_FALLBACK_MAX_ADDR);
     if (g_heap_max_addr > HEAP_MAX_ADDR) g_heap_max_addr = HEAP_MAX_ADDR;

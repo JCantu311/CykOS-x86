@@ -20,6 +20,7 @@ static int g_sound_driver_count = 0;
 static int g_selected_sound_index = 0;
 static cyk_display_driver_t* g_display_driver = (void*)0;
 static cyk_usb_driver_t* g_usb_driver = (void*)0;
+static cyk_net_driver_t* g_net_driver = (void*)0;
 static const char* parse_next_token(const char* p, char* out_token, int max_len) {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     if (*p == '\0') return (void*)0;
@@ -39,6 +40,7 @@ int modload_load_all(void) {
     memset(g_sound_drivers, 0, sizeof(g_sound_drivers));
     g_display_driver = (void*)0;
     g_usb_driver = (void*)0;
+    g_net_driver = (void*)0;
 
     print_string("[MODLOAD] Checking for /BOOT/MODULES.CFG...\n");
 
@@ -131,7 +133,8 @@ int modload_load_all(void) {
             !name_terminated ||
             (header->type != MODULE_TYPE_UNKNOWN && header->type != MODULE_TYPE_KEYBOARD &&
              header->type != MODULE_TYPE_DISPLAY &&
-             header->type != MODULE_TYPE_SOUND && header->type != MODULE_TYPE_USB) ||
+             header->type != MODULE_TYPE_SOUND && header->type != MODULE_TYPE_USB &&
+             header->type != MODULE_TYPE_NET) ||
             !header->init || (unsigned int)header->init < aligned ||
             (unsigned int)header->init >= image_end) {
             free(allocation);
@@ -161,6 +164,8 @@ int modload_load_all(void) {
             g_display_driver = (cyk_display_driver_t*)header;
         } else if (header->type == MODULE_TYPE_USB) {
             g_usb_driver = (cyk_usb_driver_t*)header;
+        } else if (header->type == MODULE_TYPE_NET) {
+            g_net_driver = (cyk_net_driver_t*)header;
         }
 
         g_module_allocations[g_loaded_count] = allocation;
@@ -254,6 +259,10 @@ int modload_select_sound_driver(int index) {
 
 cyk_display_driver_t* modload_get_display_driver(void) {
     return g_display_driver;
+}
+
+cyk_net_driver_t* modload_get_net_driver(void) {
+    return g_net_driver;
 }
 
 cyk_module_header_t* modload_find_module(const char* name) {

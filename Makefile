@@ -58,12 +58,13 @@ HAS_VBOXMANAGE := $(shell command -v VBoxManage >/dev/null 2>&1 && echo 1)
 HAS_QEMU_IMG := $(shell command -v qemu-img >/dev/null 2>&1 && echo 1)
 HAS_XORRISO := $(shell command -v xorriso >/dev/null 2>&1 && echo 1)
 
-COMMON_CFLAGS := -m32 -ffreestanding -O0 -nostdlib -fno-pic -fno-pie \
+COMMON_CFLAGS := -m32 -ffreestanding -O2 -nostdlib -fno-pic -fno-pie \
+	-fno-delete-null-pointer-checks --param=min-pagesize=0 \
 	-ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables \
 	-fno-builtin -fno-stack-protector -Wall -Wextra \
 	-Isrc/kernel -Isrc/storage -Isrc/drivers
 
-DRIVER_CFLAGS := -m32 -DMODULE_LOAD_ADDRESS=0 -ffreestanding -O0 -nostdlib -fPIC \
+DRIVER_CFLAGS := -m32 -DMODULE_LOAD_ADDRESS=0 -ffreestanding -O2 -nostdlib -fPIC \
 	-fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector \
 	-Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers
 
@@ -87,7 +88,7 @@ KERNEL_OBJS := $(patsubst %.c,bin/%.o,$(notdir $(KERNEL_SRCS)))
 KERNEL_LINK_OBJS := bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o \
 	bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o \
 	bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o \
-	bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o
+	bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/sched.o bin/net.o bin/kernel.o
 
 # Drivers from DRIVERS.LST (or defaults)
 ifneq ($(wildcard DRIVERS.LST),)
@@ -115,6 +116,10 @@ LIBC_OBJS := $(LIBC_COBJS) $(LIBC_SOBJS)
 C_APP_SRCS := $(wildcard apps/*.c)
 C_APP_BINS := $(foreach s,$(C_APP_SRCS),bin/$(shell basename $(s) .c | tr '[:lower:]' '[:upper:]').BIN)
 
+# Shared libraries (.so)
+SO_SRCS := $(wildcard libs/*.c)
+SO_BINS := $(foreach s,$(SO_SRCS),bin/LIB$(shell basename $(s) .c | tr '[:lower:]' '[:upper:]').SO)
+
 # Lua objects
 LUA_CORES := lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
 	lopcodes lparser lstate lstring ltable ltm lundump lvm lzio lauxlib \
@@ -134,7 +139,7 @@ ISO_TARGET := $(if $(HAS_XORRISO),bin/images/cykos-installer.iso,)
 
 ALL_IMAGE_DEPS := \
 	bin/mbr.bin bin/stage2.bin bin/KERNEL.BIN bin/KERNEL.ELF $(BOOTX64_TARGET) \
-	bin/SHELL.BIN $(DRIVER_BINS) bin/MODULES.CFG \
+	bin/SHELL.BIN $(DRIVER_BINS) $(SO_BINS) bin/MODULES.CFG \
 	$(RUST_APP_BINS) $(C_APP_BINS) bin/LUA.BIN bin/DOOM.BIN bin/DOOM1.WAD
 
 .PHONY: all clean rebuild
@@ -311,21 +316,33 @@ bin/libc.a: $(LIBC_OBJS)
 	"$(AR)" rcs $@ $(LIBC_OBJS)
 	@echo "  -> Created: $@"
 
+# Shared Libraries (libs/*.c -> bin/LIB*.SO)
+define SO_RULE
+$(1): $(2) | bin/.dirs-ready
+	@echo "  Building shared library: $(2) -> $(1)"
+	@"$(CC)" $(LIBC_CFLAGS) -c "$(2)" -o "$(1).o"
+	@"$(LD)" -m elf_i386 -shared --hash-style=sysv -soname "$$(notdir $(1))" "$(1).o" -o "$(1)"
+	@rm -f "$(1).o"
+endef
+$(foreach s,$(SO_SRCS),$(eval $(call SO_RULE,bin/LIB$(shell basename $(s) .c | tr '[:lower:]' '[:upper:]').SO,$(s))))
+
 # C Userland Applications (compiled in parallel after libc.a)
 define C_APP_RULE
-$(1): $(2) bin/libc.a
+$(1): $(2) bin/libc.a $(SO_BINS)
 	@mode="$$$${CYKOS_LINK_MODE:-}"; \
 	if [ -z "$$$$mode" ] && [ -f APP_LINKING.LST ]; then \
 		mode=$$$$(awk -v app="$(3)" 'toupper($$$$1) == app { print tolower($$$$2); exit }' APP_LINKING.LST); \
 	fi; \
 	mode="$$$${mode:-static}"; \
 	echo "  Compiling C Userland App: $(2) ($$$$mode)"; \
-	"$(CC)" $(LIBC_CFLAGS) -c "$(2)" -o "$(1).o"; \
+	"$(CC)" $(LIBC_CFLAGS) -c "$(2)" -o "$(1).o" && \
 	if [ "$$$$mode" = "dynamic" ]; then \
-		"$(LD)" -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e _start -u _start "$(1).o" bin/libc.a -o "$(1)"; \
+		"$(LD)" -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e _start -u _start "$(1).o" bin/libc.a $(SO_BINS) -o "$(1)"; \
+	elif [ "$$$$mode" = "high" ]; then \
+		"$(LD)" -m elf_i386 -T toolchain/cykos-high.ld -e _start --gc-sections -u _start "$(1).o" bin/libc.a -o "$(1)"; \
 	else \
 		"$(LD)" -m elf_i386 -T src/user/static_elf.ld -e _start --gc-sections -u _start "$(1).o" bin/libc.a -o "$(1)"; \
-	fi; \
+	fi && \
 	rm -f "$(1).o"
 endef
 $(foreach s,$(C_APP_SRCS),$(eval $(call C_APP_RULE,bin/$(shell basename $(s) .c | tr '[:lower:]' '[:upper:]').BIN,$(s),$(shell basename $(s) .c | tr '[:lower:]' '[:upper:]'))))

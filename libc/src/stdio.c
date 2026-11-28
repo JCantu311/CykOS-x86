@@ -3,12 +3,14 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/wait.h>
 
 #define FILE_WRITE_BUFFER_CAPACITY (256u * 1024u)
 
-static FILE _stdin  = { .fd = STDIN_FILENO,  .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 0 };
-static FILE _stdout = { .fd = STDOUT_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1 };
-static FILE _stderr = { .fd = STDERR_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1 };
+static FILE _stdin  = { .fd = STDIN_FILENO,  .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 0, .ungetc_char = -1 };
+static FILE _stdout = { .fd = STDOUT_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1, .ungetc_char = -1 };
+static FILE _stderr = { .fd = STDERR_FILENO, .flags = 0, .eof = 0, .error = 0, .buf_pos = 0, .buf_len = 0, .mode = 1, .ungetc_char = -1 };
 
 FILE* stdin  = &_stdin;
 FILE* stdout = &_stdout;
@@ -55,14 +57,13 @@ int rename(const char* old_path, const char* new_path) {
 
 FILE* fopen(const char* pathname, const char* mode) {
     int flags = 0;
-    if (strchr(mode, '+')) {
-        flags = O_RDWR;
-    } else if (*mode == 'r') {
-        flags = O_RDONLY;
+    int plus = (strchr(mode, '+') != NULL);
+    if (*mode == 'r') {
+        flags = plus ? O_RDWR : O_RDONLY;
     } else if (*mode == 'w') {
-        flags = O_WRONLY | O_CREAT | O_TRUNC;
+        flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
     } else if (*mode == 'a') {
-        flags = O_WRONLY | O_CREAT | O_APPEND;
+        flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
     }
 
     int fd = open(pathname, flags, 0666);
@@ -87,6 +88,24 @@ FILE* fopen(const char* pathname, const char* mode) {
     fp->buf_pos = 0;
     fp->buf_len = 0;
     fp->mode = (*mode == 'r') ? 0 : 1;
+    fp->ungetc_char = -1;
+    return fp;
+}
+
+FILE* fdopen(int fd, const char* mode) {
+    if (fd < 0 || !mode) return NULL;
+    FILE* fp = (FILE*)malloc(sizeof(FILE));
+    if (!fp) return NULL;
+    fp->fd = fd;
+    fp->flags = (*mode == 'r') ? O_RDONLY : O_WRONLY;
+    fp->eof = 0;
+    fp->error = 0;
+    fp->write_buf = 0;
+    fp->write_buf_capacity = 0;
+    fp->buf_pos = 0;
+    fp->buf_len = 0;
+    fp->mode = (*mode == 'r') ? 0 : 1;
+    fp->ungetc_char = -1;
     return fp;
 }
 
@@ -133,8 +152,25 @@ size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream) {
     size_t bytes_read = 0;
     char* dest = (char*)ptr;
 
+    if (stream->ungetc_char >= 0 && total_bytes > 0) {
+        dest[bytes_read++] = (char)stream->ungetc_char;
+        stream->ungetc_char = -1;
+    }
+
     while (bytes_read < total_bytes) {
         if (stream->buf_pos >= stream->buf_len) {
+            size_t remaining = total_bytes - bytes_read;
+            if (remaining >= BUFSIZ) {
+                size_t direct_chunk = remaining > (512u * 1024u) ? (512u * 1024u) : remaining;
+                ssize_t r = read(stream->fd, dest + bytes_read, direct_chunk);
+                if (r <= 0) {
+                    if (r == 0) stream->eof = 1;
+                    else stream->error = 1;
+                    break;
+                }
+                bytes_read += (size_t)r;
+                continue;
+            }
             ssize_t r = read(stream->fd, stream->buf, BUFSIZ);
             if (r <= 0) {
                 if (r == 0) stream->eof = 1;
@@ -196,6 +232,7 @@ int fseek(FILE* stream, long offset, int whence) {
     stream->buf_pos = 0;
     stream->buf_len = 0;
     stream->eof = 0;
+    stream->ungetc_char = -1;
     off_t ret = lseek(stream->fd, (off_t)offset, whence);
     return (ret == (off_t)-1) ? -1 : 0;
 }
@@ -204,7 +241,14 @@ long ftell(FILE* stream) {
     if (!stream) return -1;
     off_t cur = lseek(stream->fd, 0, SEEK_CUR);
     if (cur == (off_t)-1) return -1;
-    return (long)(cur - (stream->buf_len - stream->buf_pos));
+    long adj = (long)(stream->buf_len - stream->buf_pos) + (stream->ungetc_char >= 0 ? 1 : 0);
+    return (long)cur - adj;
+}
+
+void rewind(FILE* stream) {
+    if (!stream) return;
+    fseek(stream, 0, SEEK_SET);
+    stream->error = 0;
 }
 
 int feof(FILE* stream) {
@@ -213,6 +257,37 @@ int feof(FILE* stream) {
 
 int ferror(FILE* stream) {
     return stream ? stream->error : 0;
+}
+
+void clearerr(FILE* stream) {
+    if (!stream) return;
+    stream->eof = 0;
+    stream->error = 0;
+}
+
+void perror(const char* s) {
+    const char* msg = strerror(errno);
+    if (s && s[0]) {
+        fprintf(stderr, "%s: %s\n", s, msg);
+    } else {
+        fprintf(stderr, "%s\n", msg);
+    }
+}
+
+int setvbuf(FILE* stream, char* buf, int mode, size_t size) {
+    (void)stream; (void)buf; (void)mode; (void)size;
+    return 0;
+}
+
+void setbuf(FILE* stream, char* buf) {
+    setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
+}
+
+int ungetc(int c, FILE* stream) {
+    if (!stream || c == EOF || stream->ungetc_char >= 0) return EOF;
+    stream->ungetc_char = (unsigned char)c;
+    stream->eof = 0;
+    return stream->ungetc_char;
 }
 
 int fgetc(FILE* stream) {
@@ -271,4 +346,81 @@ int puts(const char* s) {
     if (fputs(s, stdout) == EOF) return EOF;
     if (fputc('\n', stdout) == EOF) return EOF;
     return 0;
+}
+
+/* ----------- tmpfile / tmpnam ----------- */
+
+static unsigned int g_tmpnam_seq = 0;
+
+FILE* tmpfile(void) {
+    char name[32];
+    snprintf(name, sizeof(name), "/TMP/TF%06u", g_tmpnam_seq++);
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return NULL;
+    unlink(name); /* delete-on-close semantics (best effort) */
+    FILE* fp = fdopen(fd, "w+");
+    return fp;
+}
+
+char* tmpnam(char* s) {
+    static char g_tmpnam_buf[32];
+    char* buf = s ? s : g_tmpnam_buf;
+    snprintf(buf, 32, "/TMP/TN%06u", g_tmpnam_seq++);
+    return buf;
+}
+
+/* ----------- popen / pclose ----------- */
+
+FILE* popen(const char* command, const char* type) {
+    if (!command || !type) return NULL;
+    int pfd[2];
+    if (pipe(pfd) != 0) return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        /* child */
+        if (*type == 'r') {
+            close(pfd[0]);
+            dup2(pfd[1], STDOUT_FILENO);
+            close(pfd[1]);
+        } else {
+            close(pfd[1]);
+            dup2(pfd[0], STDIN_FILENO);
+            close(pfd[0]);
+        }
+        char* argv[4];
+        argv[0] = "/USR/BIN/SH.BIN";
+        argv[1] = "-c";
+        argv[2] = (char*)command;
+        argv[3] = NULL;
+        execv(argv[0], argv);
+        _exit(127);
+    }
+
+    /* parent */
+    FILE* fp;
+    if (*type == 'r') {
+        close(pfd[1]);
+        fp = fdopen(pfd[0], "r");
+    } else {
+        close(pfd[0]);
+        fp = fdopen(pfd[1], "w");
+    }
+    return fp;
+}
+
+int pclose(FILE* stream) {
+    if (!stream) return -1;
+    int fd = stream->fd;
+    fclose(stream);
+    int status = 0;
+    waitpid(-1, &status, 0);
+    (void)fd;
+    return WEXITSTATUS(status);
 }

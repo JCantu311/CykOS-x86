@@ -30,5 +30,20 @@ extern int errno;
 #define EDOM        33  /* Math argument out of domain of func */
 #define ERANGE      34  /* Math result not representable */
 #define ENOSYS      38  /* Function not implemented */
+#define ENAMETOOLONG 36 /* File name too long */
+#define ELOOP       40  /* Too many symbolic links encountered */
+#define ENOTEMPTY   39  /* Directory not empty */
+#define EPIPE       32  /* Broken pipe */
+#define EDEADLK     35  /* Resource deadlock would occur */
+#define ENOLCK      37  /* No record locks available */
+#define EOVERFLOW   75  /* Value too large for defined data type */
+#define EILSEQ      84  /* Illegal byte sequence */
+#define ENOTSOCK    88  /* Socket operation on non-socket */
+#define ECONNREFUSED 111 /* Connection refused */
+#define ETIMEDOUT   110  /* Connection timed out */
+#define EWOULDBLOCK EAGAIN
+#define ENOBUFS     105  /* No buffer space available */
+#define EMSGSIZE    90   /* Message too long */
+#define EADDRINUSE  98   /* Address already in use */
 
 #endif

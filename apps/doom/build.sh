@@ -27,7 +27,7 @@ make -C "$DOOM_DIR" -f Makefile clean OBJDIR=build OUTPUT="$DOOM_OUTPUT" \
     SRC_DOOM="$DOOM_OBJECTS"
 
 DOOM_CFLAGS=(
-    -m32 -ffreestanding -Os -fno-builtin -fno-stack-protector -fno-pic -fno-pie
+    -m32 -ffreestanding -O2 -fno-builtin -fno-stack-protector -fno-pic -fno-pie
     -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables
     -DNORMALUNIX -D_DEFAULT_SOURCE -DCMAP256 -DCYKOS
     -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200

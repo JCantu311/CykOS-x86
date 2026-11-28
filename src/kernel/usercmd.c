@@ -8,6 +8,7 @@
 #include "paging.h"
 #include "gdt.h"
 #include "permissions.h"
+#include "sched.h"
 
 #define USERCMDS_FILE     "/ETC/USERCMDS.LST"
 #define USERCMDS_FALLBACK "/ETC/USERCMDS.TXT"
@@ -18,7 +19,9 @@
 #define USER_APP_BASE     0x180000  // RAM arena above the BIOS/VGA memory hole
 #define USER_APP_MAX_SIZE 0x90000   // 576 KB, fixed app arena ends at 0x210000
 #define USER_DYNAMIC_APP_BASE 0x300000
-#define USER_DYNAMIC_APP_MAX_SIZE 0xC0000
+#define USER_DYNAMIC_APP_MAX_SIZE 0x100000
+#define USER_MAX_DYN_MODULES 8
+#define USER_MAX_DT_NEEDED   8
 #define USER_SHELL_STACK_BASE 0x210000
 #define USER_SHELL_STACK_SIZE 0x20000
 #define USER_APP_STACK_BASE 0x250000
@@ -27,7 +30,15 @@
 #define USER_APP_STACK_GUARD_VALUE 0xC7A55AFEu
 #define USER_APP_HEAP_MAX_SIZE 0x1000000 // Bound app-owned heap arena to 16 MiB
 #define USER_APP_HEAP_BASE 0x800000
-#define USER_APP_FILE_MAX 0x80000   // ELF file may include headers and dynamic tables
+#define USER_MMAP_BASE     0x1800000u
+#define USER_MMAP_LIMIT    0x2000000u
+#define USER_HIGH_ELF_MIN  0x04000000u
+#define USER_HIGH_ELF_LIMIT 0x30000000u
+#define USER_HIGH_MMAP_BASE 0x30000000u
+#define USER_HIGH_MMAP_LIMIT 0x3E000000u
+#define USER_HIGH_STACK_BASE 0x3F000000u
+#define USER_HIGH_STACK_SIZE 0x00100000u /* 1 MiB stack for large toolchains (GCC) */
+#define USER_APP_FILE_MAX  0x2000000  // Lift binary file limit to 32 MiB
 #define USER_PATH_MAX     64
 static volatile int g_usercmd_cancel_requested;
 static volatile int g_usercmd_abort_requested;
@@ -155,12 +166,156 @@ static int copy_elf_load_segments(const unsigned char* file,
     return 0;
 }
 
+typedef struct {
+    int used;
+    int refcount;
+    char name[64];
+    unsigned int load_bias;
+    unsigned int min_vaddr;
+    unsigned int max_vaddr;
+    const elf32_sym_t* symtab;
+    unsigned int sym_count;
+    const char* strtab;
+    unsigned int str_size;
+    const unsigned int* hash;
+} dyn_module_t;
+
+static char dyn_to_upper(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+static int dyn_str_eq_nocase(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (dyn_to_upper(*a) != dyn_to_upper(*b)) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static const char* dyn_basename(const char* path) {
+    if (!path) return "";
+    const char* last = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') last = p + 1;
+    }
+    return last;
+}
+
+static unsigned int elf_sysv_hash(const char* name) {
+    unsigned int h = 0, g;
+    while (*name) {
+        h = (h << 4) + (unsigned char)*name++;
+        g = h & 0xF0000000u;
+        if (g) h ^= g >> 24;
+        h &= ~g;
+    }
+    return h;
+}
+
+static int dyn_lookup_in_module(const dyn_module_t* mod, const char* name, unsigned int* out_addr) {
+    if (!mod || !mod->used || !mod->symtab || !mod->strtab || !name) return -1;
+
+    if (mod->hash && mod->hash[0] > 0) {
+        unsigned int nbucket = mod->hash[0];
+        unsigned int nchain = mod->hash[1];
+        const unsigned int* buckets = &mod->hash[2];
+        const unsigned int* chains = &mod->hash[2 + nbucket];
+        unsigned int idx = buckets[elf_sysv_hash(name) % nbucket];
+        unsigned int guard = 0;
+        while (idx != 0 && idx < mod->sym_count && idx < nchain && guard++ < nchain) {
+            const elf32_sym_t* sym = &mod->symtab[idx];
+            if (sym->shndx != ELF_SHN_UNDEF && (sym->info >> 4) != 0 && sym->name < mod->str_size) {
+                const char* sname = mod->strtab + sym->name;
+                unsigned int n = 0;
+                while (sname[n] && name[n] && sname[n] == name[n]) n++;
+                if (sname[n] == '\0' && name[n] == '\0') {
+                    if (sym->shndx == ELF_SHN_ABS) {
+                        *out_addr = sym->value;
+                    } else {
+                        *out_addr = mod->load_bias + sym->value;
+                    }
+                    return 0;
+                }
+            }
+            idx = chains[idx];
+        }
+        return -1;
+    }
+
+    for (unsigned int i = 1; i < mod->sym_count; i++) {
+        const elf32_sym_t* sym = &mod->symtab[i];
+        if (sym->shndx == ELF_SHN_UNDEF || (sym->info >> 4) == 0 || sym->name >= mod->str_size) continue;
+        const char* sname = mod->strtab + sym->name;
+        unsigned int n = 0;
+        while (sname[n] && name[n] && sname[n] == name[n]) n++;
+        if (sname[n] == '\0' && name[n] == '\0') {
+            *out_addr = (sym->shndx == ELF_SHN_ABS) ? sym->value : (mod->load_bias + sym->value);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int dyn_lookup_global(const dyn_module_t* modules, unsigned int module_count,
+                             const char* name, unsigned int* out_addr) {
+    if (!modules || !name || !out_addr) return -1;
+    for (unsigned int i = 0; i < module_count; i++) {
+        if (modules[i].used && dyn_lookup_in_module(&modules[i], name, out_addr) == 0) {
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int dyn_find_loaded(const dyn_module_t* modules, unsigned int module_count, const char* name) {
+    const char* base = dyn_basename(name);
+    for (unsigned int i = 0; i < module_count; i++) {
+        if (modules[i].used && dyn_str_eq_nocase(modules[i].name, base)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int dyn_open_library_file(const char* name, unsigned char** out_buf, unsigned int* out_size) {
+    if (!name || !name[0] || !out_buf || !out_size) return -1;
+    const char* prefixes[] = { "", "/USR/LIB/", "/LIB/", "/USR/BIN/" };
+    char path[128];
+    vfs_file_t entry;
+
+    for (unsigned int p = 0; p < 4u; p++) {
+        if (p == 0 && name[0] != '/') continue;
+        unsigned int pos = 0;
+        const char* pre = prefixes[p];
+        while (*pre && pos < sizeof(path) - 1u) path[pos++] = *pre++;
+        const char* n = (p == 0) ? name : dyn_basename(name);
+        while (*n && pos < sizeof(path) - 1u) path[pos++] = dyn_to_upper(*n++);
+        path[pos] = '\0';
+
+        if (vfs_find_file(path, &entry) == 0 && entry.size >= sizeof(elf32_ehdr_t) &&
+            entry.size <= USER_APP_FILE_MAX) {
+            unsigned char* buf = (unsigned char*)malloc(entry.size);
+            if (!buf) return -1;
+            if (vfs_read_at(&entry, 0, buf, entry.size) == (int)entry.size) {
+                *out_buf = buf;
+                *out_size = entry.size;
+                return 0;
+            }
+            free(buf);
+            return -1;
+        }
+    }
+    return -1;
+}
+
 static int resolve_elf_relocations(unsigned int load_bias,
                                    unsigned int min_vaddr, unsigned int max_vaddr,
                                    unsigned int rel_vaddr, unsigned int rel_size,
                                    unsigned int rel_entry_size,
                                    unsigned int sym_vaddr, unsigned int sym_count,
                                    unsigned int str_vaddr, unsigned int str_size,
+                                   const dyn_module_t* modules, unsigned int module_count,
                                    int* has_kernel_import) {
     if (rel_size == 0) return 0;
     if (rel_entry_size != sizeof(elf32_rel_t) || rel_size % rel_entry_size != 0 ||
@@ -185,17 +340,23 @@ static int resolve_elf_relocations(unsigned int load_bias,
         if (symbol_index >= sym_count) return -1;
 
         elf32_sym_t* symbol = &symbols[symbol_index];
-        unsigned int symbol_address;
+        unsigned int symbol_address = 0;
         if (symbol->shndx == ELF_SHN_UNDEF) {
             if (symbol->name >= str_size) return -1;
             unsigned int remain = str_size - symbol->name;
             unsigned int n = 0;
             while (n < remain && strings[symbol->name + n]) n++;
             if (n == remain) return -1;
-            if (kernel_export_resolve(strings + symbol->name, &symbol_address) != 0) {
-                if ((symbol->info >> 4) == ELF_STB_WEAK) symbol_address = 0;
-                else return -1;
-            } else if (has_kernel_import) *has_kernel_import = 1;
+            const char* sym_name = strings + symbol->name;
+            if (dyn_lookup_global(modules, module_count, sym_name, &symbol_address) == 0) {
+                /* Resolved from a loaded shared library. */
+            } else if (kernel_export_resolve(sym_name, &symbol_address) == 0) {
+                if (has_kernel_import) *has_kernel_import = 1;
+            } else if ((symbol->info >> 4) == ELF_STB_WEAK) {
+                symbol_address = 0;
+            } else {
+                return -1;
+            }
         } else if (symbol->shndx == ELF_SHN_ABS) {
             symbol_address = symbol->value;
         } else {
@@ -210,10 +371,13 @@ static int resolve_elf_relocations(unsigned int load_bias,
     return 0;
 }
 
-static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
-                              unsigned char* load_area, unsigned int capacity,
-                              unsigned int min_vaddr_limit, unsigned int* entry_out,
-                              int* has_kernel_import) {
+static int load_elf_et_dyn_internal(const char* mod_name,
+                                    const unsigned char* file, unsigned int file_size,
+                                    unsigned char* load_area, unsigned int capacity,
+                                    unsigned int min_vaddr_limit, unsigned int* entry_out,
+                                    dyn_module_t* modules, unsigned int* module_count,
+                                    unsigned int* next_addr, int allow_needed,
+                                    int* has_kernel_import, int* out_slot) {
     const elf32_ehdr_t* eh = (const elf32_ehdr_t*)file;
     if (file_size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' ||
         eh->ident[2] != 'L' || eh->ident[3] != 'F' || eh->ident[4] != 1 ||
@@ -259,13 +423,19 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
     unsigned int str_size = 0, sym_entry_size = 0;
     unsigned int rel_vaddr = 0, rel_size = 0, rel_entry_size = sizeof(elf32_rel_t);
     unsigned int plt_rel_vaddr = 0, plt_rel_size = 0, plt_rel_type = 0;
+    unsigned int needed_offsets[USER_MAX_DT_NEEDED];
+    unsigned int needed_count = 0;
+
     elf32_dyn_t* dyn = (elf32_dyn_t*)(load_bias + dynamic_vaddr);
     unsigned int dynamic_entries = dynamic_size / sizeof(elf32_dyn_t);
     int saw_null = 0;
     for (unsigned int i = 0; i < dynamic_entries; i++) {
         switch (dyn[i].tag) {
             case ELF_DT_NULL: saw_null = 1; i = dynamic_entries; break;
-            case ELF_DT_NEEDED: return -1; // No dependent shared libraries yet.
+            case ELF_DT_NEEDED:
+                if (!allow_needed || needed_count >= USER_MAX_DT_NEEDED) return -1;
+                needed_offsets[needed_count++] = dyn[i].value;
+                break;
             case ELF_DT_HASH: hash_vaddr = dyn[i].value; break;
             case ELF_DT_SYMTAB: sym_vaddr = dyn[i].value; break;
             case ELF_DT_STRTAB: str_vaddr = dyn[i].value; break;
@@ -293,17 +463,86 @@ static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
         !image_range(sym_vaddr, symbol_count * sizeof(elf32_sym_t), min_vaddr, max_vaddr)) return -1;
     if (plt_rel_size && (plt_rel_type != ELF_DT_REL || !plt_rel_vaddr)) return -1;
 
-    if (has_kernel_import) *has_kernel_import = 0;
+    if (next_addr) {
+        unsigned int span = max_vaddr - min_vaddr;
+        *next_addr = (load_base + span + 4095u) & ~4095u;
+    }
+
+    int slot = -1;
+    if (modules && module_count && *module_count < USER_MAX_DYN_MODULES) {
+        slot = (int)(*module_count)++;
+        dyn_module_t* mod = &modules[slot];
+        memset(mod, 0, sizeof(*mod));
+        mod->used = 1;
+        mod->refcount = 1;
+        const char* base_name = dyn_basename(mod_name);
+        unsigned int ni = 0;
+        while (base_name[ni] && ni < sizeof(mod->name) - 1u) {
+            mod->name[ni] = base_name[ni];
+            ni++;
+        }
+        mod->name[ni] = '\0';
+        mod->load_bias = load_bias;
+        mod->min_vaddr = min_vaddr;
+        mod->max_vaddr = max_vaddr;
+        mod->symtab = (const elf32_sym_t*)(load_bias + sym_vaddr);
+        mod->sym_count = symbol_count;
+        mod->strtab = (const char*)(load_bias + str_vaddr);
+        mod->str_size = str_size;
+        mod->hash = hash;
+    }
+    if (out_slot) *out_slot = slot;
+
+    const char* strtab = (const char*)(load_bias + str_vaddr);
+    for (unsigned int i = 0; i < needed_count; i++) {
+        if (needed_offsets[i] >= str_size) return -1;
+        const char* dep_name = strtab + needed_offsets[i];
+        if (modules && module_count && dyn_find_loaded(modules, *module_count, dep_name) >= 0) {
+            continue;
+        }
+        if (!next_addr || *next_addr >= USER_DYNAMIC_APP_BASE + USER_DYNAMIC_APP_MAX_SIZE) {
+            return -1;
+        }
+        unsigned char* dep_file = (unsigned char*)0;
+        unsigned int dep_size = 0;
+        if (dyn_open_library_file(dep_name, &dep_file, &dep_size) != 0) {
+            return -1;
+        }
+        unsigned int dep_base = *next_addr;
+        unsigned int dep_cap = (USER_DYNAMIC_APP_BASE + USER_DYNAMIC_APP_MAX_SIZE) - dep_base;
+        int dep_res = load_elf_et_dyn_internal(dep_name, dep_file, dep_size,
+                                               (unsigned char*)dep_base, dep_cap,
+                                               USER_APP_BASE, (void*)0,
+                                               modules, module_count, next_addr,
+                                               allow_needed, has_kernel_import, (void*)0);
+        free(dep_file);
+        if (dep_res != 0) return -1;
+    }
+
+    unsigned int mod_cnt = module_count ? *module_count : 0;
     if (resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, rel_vaddr, rel_size,
                                 rel_entry_size, sym_vaddr, symbol_count,
-                                str_vaddr, str_size, has_kernel_import) != 0 ||
+                                str_vaddr, str_size, modules, mod_cnt, has_kernel_import) != 0 ||
         resolve_elf_relocations(load_bias, min_vaddr, max_vaddr, plt_rel_vaddr, plt_rel_size,
                                 sizeof(elf32_rel_t), sym_vaddr, symbol_count,
-                                str_vaddr, str_size, has_kernel_import) != 0) return -1;
+                                str_vaddr, str_size, modules, mod_cnt, has_kernel_import) != 0) return -1;
 
-    if (!image_range(eh->entry, 1, min_vaddr, max_vaddr)) return -1;
-    *entry_out = load_bias + eh->entry;
+    if (entry_out) {
+        if (!image_range(eh->entry, 1, min_vaddr, max_vaddr)) return -1;
+        *entry_out = load_bias + eh->entry;
+    }
     return 0;
+}
+
+static int load_dynamic_elf32(const unsigned char* file, unsigned int file_size,
+                              unsigned char* load_area, unsigned int capacity,
+                              unsigned int min_vaddr_limit, unsigned int* entry_out,
+                              int* has_kernel_import) {
+    if (has_kernel_import) *has_kernel_import = 0;
+    return load_elf_et_dyn_internal("module", file, file_size, load_area, capacity,
+                                    min_vaddr_limit, entry_out,
+                                    (void*)0, (void*)0, (void*)0, 0,
+                                    has_kernel_import, (void*)0);
 }
 
 int module_elf32_load(const unsigned char* file, unsigned int file_size,
@@ -361,6 +600,78 @@ static int load_static_elf32(const unsigned char* file, unsigned int file_size,
     return 0;
 }
 
+static int probe_high_elf32(const vfs_file_t* app_file, unsigned int* min_vaddr_out,
+                            unsigned int* max_vaddr_out) {
+    if (!app_file || app_file->size < sizeof(elf32_ehdr_t)) return 0;
+    elf32_ehdr_t eh;
+    if (vfs_read_at(app_file, 0, &eh, sizeof(eh)) != (int)sizeof(eh)) return 0;
+    if (eh.ident[0] != 0x7F || eh.ident[1] != 'E' || eh.ident[2] != 'L' || eh.ident[3] != 'F' ||
+        eh.ident[4] != 1 || eh.ident[5] != 1 || eh.type != ELF_ET_EXEC ||
+        eh.machine != ELF_EM_386 || eh.version != 1 || eh.ehsize != sizeof(eh) ||
+        eh.phentsize != sizeof(elf32_phdr_t) || eh.phnum == 0 || eh.phnum > 32 ||
+        eh.phoff > app_file->size || eh.phnum > (app_file->size - eh.phoff) / eh.phentsize) {
+        return 0;
+    }
+    elf32_phdr_t ph[32];
+    unsigned int ph_bytes = eh.phnum * (unsigned int)sizeof(elf32_phdr_t);
+    if (vfs_read_at(app_file, eh.phoff, ph, ph_bytes) != (int)ph_bytes) return 0;
+
+    unsigned int min_v = 0xFFFFFFFFu;
+    unsigned int max_v = 0;
+    int has_load = 0;
+    int has_dyn = 0;
+    int entry_ok = 0;
+    for (unsigned int i = 0; i < eh.phnum; i++) {
+        if (ph[i].type == ELF_PT_DYNAMIC) has_dyn = 1;
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+        if (ph[i].filesz > ph[i].memsz || ph[i].offset > app_file->size ||
+            ph[i].filesz > app_file->size - ph[i].offset ||
+            ph[i].vaddr > 0xFFFFFFFFu - ph[i].memsz) return 0;
+        has_load = 1;
+        if (ph[i].vaddr < min_v) min_v = ph[i].vaddr;
+        if (ph[i].vaddr + ph[i].memsz > max_v) max_v = ph[i].vaddr + ph[i].memsz;
+        if ((ph[i].flags & ELF_PF_X) && eh.entry >= ph[i].vaddr &&
+            eh.entry < ph[i].vaddr + ph[i].memsz) entry_ok = 1;
+    }
+    if (!has_load || has_dyn || !entry_ok) return 0;
+    if (min_v < USER_HIGH_ELF_MIN || max_v <= min_v || max_v > USER_HIGH_ELF_LIMIT) return 0;
+    if (min_vaddr_out) *min_vaddr_out = min_v;
+    if (max_vaddr_out) *max_vaddr_out = max_v;
+    return 1;
+}
+
+static int load_high_elf32_streaming(const vfs_file_t* app_file, paging_space_t* space,
+                                     unsigned int* min_vaddr_out, unsigned int* max_vaddr_out,
+                                     unsigned int* entry_out) {
+    unsigned int min_v = 0, max_v = 0;
+    if (!probe_high_elf32(app_file, &min_v, &max_v)) return -1;
+
+    elf32_ehdr_t eh;
+    if (vfs_read_at(app_file, 0, &eh, sizeof(eh)) != (int)sizeof(eh)) return -1;
+    elf32_phdr_t ph[32];
+    unsigned int ph_bytes = eh.phnum * (unsigned int)sizeof(elf32_phdr_t);
+    if (vfs_read_at(app_file, eh.phoff, ph, ph_bytes) != (int)ph_bytes) return -1;
+
+    unsigned int alloc_start = min_v & ~4095u;
+    unsigned int alloc_end = (max_v + 4095u) & ~4095u;
+    if (paging_alloc_user_range(space, alloc_start, alloc_end - alloc_start) != 0) return -1;
+
+    paging_switch_address_space(space);
+    for (unsigned int i = 0; i < eh.phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+        memset((void*)ph[i].vaddr, 0, ph[i].memsz);
+        if (ph[i].filesz > 0) {
+            if (vfs_read_at(app_file, ph[i].offset, (void*)ph[i].vaddr, ph[i].filesz) != (int)ph[i].filesz) {
+                return -1;
+            }
+        }
+    }
+    if (min_vaddr_out) *min_vaddr_out = alloc_start;
+    if (max_vaddr_out) *max_vaddr_out = alloc_end;
+    if (entry_out) *entry_out = eh.entry;
+    return 0;
+}
+
 typedef enum {
     USER_PROCESS_EMPTY = 0,
     USER_PROCESS_RUNNING,
@@ -379,6 +690,14 @@ typedef struct {
     void* heap_arena;
     unsigned int heap_capacity;
     unsigned int heap_break;
+    unsigned int heap_mapped;
+    paging_space_t* vm_space;
+    dyn_module_t dyn_modules[USER_MAX_DYN_MODULES];
+    unsigned int dyn_module_count;
+    unsigned int dyn_next_addr;
+    int dyn_arena_mapped;
+    unsigned int mmap_next;
+    int is_high_process;
 } user_process_t;
 
 static volatile int g_usercmd_active = 0;
@@ -433,6 +752,94 @@ void usercmd_apply_pending_app_abort(registers_t* regs) {
     (void)usercmd_redirect_user_irq(regs);
 }
 
+static void usercmd_cleanup_vm_space(void) {
+    memset(g_user_process.dyn_modules, 0, sizeof(g_user_process.dyn_modules));
+    g_user_process.dyn_module_count = 0;
+    g_user_process.dyn_next_addr = USER_DYNAMIC_APP_BASE;
+    g_user_process.dyn_arena_mapped = 0;
+    g_user_process.mmap_next = USER_MMAP_BASE;
+    if (g_user_process.vm_space) {
+        paging_space_t* space = g_user_process.vm_space;
+        g_user_process.vm_space = (void*)0;
+        g_user_process.heap_mapped = 0;
+        sched_set_current_vm_space((void*)0);
+        paging_switch_address_space((void*)0);
+        paging_destroy_address_space(space);
+    }
+}
+
+unsigned int usercmd_dlopen(const char* path, int flags) {
+    (void)flags;
+    if (!path || !path[0] || !g_user_process.vm_space) return 0;
+
+    if (!g_user_process.dyn_arena_mapped) {
+        if (paging_alloc_user_range(g_user_process.vm_space, USER_DYNAMIC_APP_BASE,
+                                    USER_DYNAMIC_APP_MAX_SIZE) != 0) {
+            return 0;
+        }
+        g_user_process.dyn_arena_mapped = 1;
+        g_user_process.dyn_next_addr = USER_DYNAMIC_APP_BASE;
+    }
+
+    int existing = dyn_find_loaded(g_user_process.dyn_modules, g_user_process.dyn_module_count, path);
+    if (existing >= 0) {
+        g_user_process.dyn_modules[existing].refcount++;
+        return (unsigned int)(existing + 1);
+    }
+
+    if (g_user_process.dyn_module_count >= USER_MAX_DYN_MODULES ||
+        g_user_process.dyn_next_addr >= USER_DYNAMIC_APP_BASE + USER_DYNAMIC_APP_MAX_SIZE) {
+        return 0;
+    }
+
+    unsigned char* file = (unsigned char*)0;
+    unsigned int file_size = 0;
+    if (dyn_open_library_file(path, &file, &file_size) != 0) {
+        return 0;
+    }
+
+    unsigned int base = g_user_process.dyn_next_addr;
+    unsigned int cap = (USER_DYNAMIC_APP_BASE + USER_DYNAMIC_APP_MAX_SIZE) - base;
+    int slot = -1;
+    int has_kernel_import = 0;
+    int res = load_elf_et_dyn_internal(path, file, file_size, (unsigned char*)base, cap,
+                                       USER_APP_BASE, (void*)0,
+                                       g_user_process.dyn_modules,
+                                       &g_user_process.dyn_module_count,
+                                       &g_user_process.dyn_next_addr,
+                                       1, &has_kernel_import, &slot);
+    free(file);
+    if (res != 0 || slot < 0) {
+        return 0;
+    }
+    return (unsigned int)(slot + 1);
+}
+
+unsigned int usercmd_dlsym(int handle, const char* symbol) {
+    if (!symbol || !symbol[0]) return 0;
+    unsigned int addr = 0;
+    if (handle == 0) {
+        if (dyn_lookup_global(g_user_process.dyn_modules, g_user_process.dyn_module_count,
+                              symbol, &addr) == 0) {
+            return addr;
+        }
+        return 0;
+    }
+    if (handle < 1 || (unsigned int)handle > g_user_process.dyn_module_count) return 0;
+    const dyn_module_t* mod = &g_user_process.dyn_modules[handle - 1];
+    if (!mod->used) return 0;
+    if (dyn_lookup_in_module(mod, symbol, &addr) == 0) return addr;
+    return 0;
+}
+
+int usercmd_dlclose(int handle) {
+    if (handle < 1 || (unsigned int)handle > g_user_process.dyn_module_count) return -1;
+    dyn_module_t* mod = &g_user_process.dyn_modules[handle - 1];
+    if (!mod->used) return -1;
+    if (mod->refcount > 0) mod->refcount--;
+    return 0;
+}
+
 static int usercmd_cancel_loading(unsigned char** staged_image) {
     if (!g_usercmd_cancel_requested) return 0;
     g_usercmd_cancel_requested = 0;
@@ -448,6 +855,7 @@ static int usercmd_cancel_loading(unsigned char** staged_image) {
         (void)usercmd_set_app_memory_access(0);
         g_usercmd_user_mapping_active = 0;
     }
+    usercmd_cleanup_vm_space();
     g_user_process.exit_code = 130;
     g_user_process.state = USER_PROCESS_EXITED;
     heap_set_allocation_owner(0);
@@ -457,6 +865,7 @@ static int usercmd_cancel_loading(unsigned char** staged_image) {
 }
 
 static void usercmd_prepare_stack_guard(void) {
+    if (g_user_process.is_high_process) return;
     volatile unsigned int* guard =
         (volatile unsigned int*)(USER_APP_STACK_BASE - USER_APP_STACK_GUARD_SIZE);
     for (unsigned int i = 0; i < USER_APP_STACK_GUARD_SIZE / sizeof(unsigned int); i++)
@@ -464,6 +873,7 @@ static void usercmd_prepare_stack_guard(void) {
 }
 
 static int usercmd_stack_guard_intact(void) {
+    if (g_user_process.is_high_process) return 1;
     volatile unsigned int* guard =
         (volatile unsigned int*)(USER_APP_STACK_BASE - USER_APP_STACK_GUARD_SIZE);
     for (unsigned int i = 0; i < USER_APP_STACK_GUARD_SIZE / sizeof(unsigned int); i++)
@@ -536,7 +946,8 @@ static unsigned int usercmd_build_user_return_frame(int argc, char** argv,
         0xCD, 0x80,                         /* int 0x80 */
         0x0F, 0x0B                          /* ud2 if exit unexpectedly returns */
     };
-    unsigned int trampoline_address = USER_APP_STACK_BASE + 16u;
+    unsigned int stack_base = g_user_process.stack ? (unsigned int)g_user_process.stack : USER_APP_STACK_BASE;
+    unsigned int trampoline_address = stack_base + 16u;
     memcpy((void*)trampoline_address, trampoline, sizeof(trampoline));
     /* Match the i386 C ABI: ESP is 12 mod 16 at function entry. */
     unsigned int user_esp = stack_top - 20u;
@@ -544,6 +955,7 @@ static unsigned int usercmd_build_user_return_frame(int argc, char** argv,
     frame[0] = trampoline_address;
     frame[1] = (unsigned int)argc;
     frame[2] = (unsigned int)argv;
+    frame[3] = 0; /* envp = NULL when launched directly from shell */
     g_usercmd_user_exit_trampoline = trampoline_address;
     return user_esp;
 }
@@ -574,6 +986,12 @@ int usercmd_redirect_user_irq(registers_t* regs) {
 }
 
 static int usercmd_set_app_memory_access(int user) {
+    if (g_user_process.vm_space) {
+        /* Isolated per-process address spaces already map image & stack as
+         * user-accessible; heap pages are mapped on demand in sbrk/brk. */
+        if (!user) return 0;
+        return 0;
+    }
     int result = 0;
     if (g_usercmd_image_size && paging_set_user_range(
             g_usercmd_image_base, g_usercmd_image_size, user) != 0) result = -1;
@@ -844,73 +1262,150 @@ int exec_user_command(const char* cmd_name, const char* args) {
         return 1;
     }
 
-    staged_image = (unsigned char*)malloc(app_entry.size);
-    if (!staged_image) {
-        g_usercmd_active = 0;
-        print_color_string("CykShell: not enough memory to load: ", VGA_RED);
-        print_string(target_file);
-        print_string("\n");
-        return 1;
-    }
-    int bytes_read = vfs_read_at(&app_entry, 0, staged_image, app_entry.size);
-    if (bytes_read != (int)app_entry.size) {
+    unsigned int high_min = 0, high_max = 0;
+    int is_high_elf = probe_high_elf32(&app_entry, &high_min, &high_max);
+    paging_space_t* app_space = (paging_space_t*)0;
+    unsigned int active_stack_base = USER_APP_STACK_BASE;
+    unsigned int active_stack_size = USER_APP_STACK_SIZE;
+    unsigned int high_heap_base = USER_APP_HEAP_BASE;
+
+    if (is_high_elf) {
+        app_space = paging_create_address_space();
+        if (!app_space ||
+            paging_alloc_user_range(app_space, USER_HIGH_STACK_BASE, USER_HIGH_STACK_SIZE) != 0) {
+            if (app_space) paging_destroy_address_space(app_space);
+            g_usercmd_active = 0;
+            print_color_string("CykShell: failed to allocate high-ELF process VM.\n", VGA_RED);
+            return 1;
+        }
+        g_user_process.vm_space = app_space;
+        g_user_process.heap_mapped = 0;
+        memset(g_user_process.dyn_modules, 0, sizeof(g_user_process.dyn_modules));
+        g_user_process.dyn_module_count = 0;
+        g_user_process.dyn_next_addr = USER_DYNAMIC_APP_BASE;
+        g_user_process.dyn_arena_mapped = 0;
+        g_user_process.is_high_process = 1;
+        g_user_process.mmap_next = USER_HIGH_MMAP_BASE;
+        sched_set_current_vm_space(app_space);
+
+        unsigned int loaded_min = 0, loaded_max = 0;
+        if (load_high_elf32_streaming(&app_entry, app_space, &loaded_min, &loaded_max, &entry_address) != 0) {
+            usercmd_cleanup_vm_space();
+            g_usercmd_active = 0;
+            print_color_string("CykShell: failed to load high ELF: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1;
+        }
+        active_stack_base = USER_HIGH_STACK_BASE;
+        active_stack_size = USER_HIGH_STACK_SIZE;
+        high_heap_base = loaded_max;
+        use_user_mode = 1;
+        g_usercmd_image_base = loaded_min;
+        g_usercmd_image_size = loaded_max - loaded_min;
+    } else {
+        staged_image = (unsigned char*)malloc(app_entry.size);
+        if (!staged_image) {
+            g_usercmd_active = 0;
+            print_color_string("CykShell: not enough memory to load: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1;
+        }
+        int bytes_read = vfs_read_at(&app_entry, 0, staged_image, app_entry.size);
+        if (bytes_read != (int)app_entry.size) {
+            free(staged_image);
+            staged_image = (unsigned char*)0;
+            g_usercmd_active = 0;
+            print_color_string("CykShell: failed to load: ", VGA_RED);
+            print_string(target_file);
+            print_string("\n");
+            return 1;
+        }
+        if (usercmd_cancel_loading(&staged_image)) return 1;
+
+        int is_elf = (app_entry.size >= 4 && staged_image[0] == 0x7F && staged_image[1] == 'E' &&
+                      staged_image[2] == 'L' && staged_image[3] == 'F');
+        unsigned short elf_type = (is_elf && app_entry.size >= sizeof(elf32_ehdr_t))
+            ? ((const elf32_ehdr_t*)staged_image)->type : 0;
+        unsigned int target_image_base = (is_elf && elf_type == ELF_ET_DYN)
+            ? USER_DYNAMIC_APP_BASE : USER_APP_BASE;
+        unsigned int target_image_cap = (is_elf && elf_type == ELF_ET_DYN)
+            ? USER_DYNAMIC_APP_MAX_SIZE : USER_APP_MAX_SIZE;
+
+        app_space = paging_create_address_space();
+        if (!app_space ||
+            paging_alloc_user_range(app_space, target_image_base, target_image_cap) != 0 ||
+            paging_alloc_user_range(app_space, USER_APP_STACK_BASE, USER_APP_STACK_SIZE) != 0) {
+            if (app_space) paging_destroy_address_space(app_space);
+            free(staged_image);
+            staged_image = (unsigned char*)0;
+            g_usercmd_active = 0;
+            print_color_string("CykShell: failed to allocate process virtual memory.\n", VGA_RED);
+            return 1;
+        }
+        g_user_process.vm_space = app_space;
+        g_user_process.heap_mapped = 0;
+        memset(g_user_process.dyn_modules, 0, sizeof(g_user_process.dyn_modules));
+        g_user_process.dyn_module_count = 0;
+        g_user_process.dyn_next_addr = USER_DYNAMIC_APP_BASE;
+        g_user_process.dyn_arena_mapped = (is_elf && elf_type == ELF_ET_DYN) ? 1 : 0;
+        g_user_process.is_high_process = 0;
+        g_user_process.mmap_next = USER_MMAP_BASE;
+        sched_set_current_vm_space(app_space);
+        paging_switch_address_space(app_space);
+
+        if (is_elf) {
+            if (elf_type == ELF_ET_DYN) {
+                dest = (void*)USER_DYNAMIC_APP_BASE;
+            }
+            int has_kernel_import = 0;
+            int load_result = elf_type == ELF_ET_DYN
+                ? load_elf_et_dyn_internal(target_file, staged_image, app_entry.size,
+                                           (unsigned char*)dest, USER_DYNAMIC_APP_MAX_SIZE,
+                                           USER_APP_BASE, &entry_address,
+                                           g_user_process.dyn_modules,
+                                           &g_user_process.dyn_module_count,
+                                           &g_user_process.dyn_next_addr,
+                                           1, &has_kernel_import, (void*)0)
+                : elf_type == ELF_ET_EXEC
+                    ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
+                    : -1;
+            if (usercmd_cancel_loading(&staged_image)) return 1;
+            if (load_result != 0) {
+                usercmd_cleanup_vm_space();
+                free(staged_image);
+                staged_image = (unsigned char*)0;
+                g_usercmd_active = 0;
+                print_color_string("CykShell: invalid ELF app or unresolved kernel import: ", VGA_RED);
+                print_string(target_file);
+                print_string("\n");
+                return 1;
+            }
+            use_user_mode = elf_type == ELF_ET_EXEC ||
+                            (elf_type == ELF_ET_DYN && !has_kernel_import);
+            g_usercmd_image_base = (unsigned int)dest;
+            g_usercmd_image_size = elf_type == ELF_ET_DYN
+                ? USER_DYNAMIC_APP_MAX_SIZE : USER_APP_MAX_SIZE;
+        } else {
+            if (app_entry.size > USER_APP_MAX_SIZE) {
+                usercmd_cleanup_vm_space();
+                free(staged_image);
+                staged_image = (unsigned char*)0;
+                g_usercmd_active = 0;
+                print_color_string("CykShell: flat app exceeds its memory limit: ", VGA_RED);
+                print_string(target_file);
+                print_string("\n");
+                return 1;
+            }
+            memset(dest, 0, USER_APP_MAX_SIZE);
+            memcpy(dest, staged_image, app_entry.size);
+            g_usercmd_image_base = USER_APP_BASE;
+            g_usercmd_image_size = USER_APP_MAX_SIZE;
+        }
         free(staged_image);
         staged_image = (unsigned char*)0;
-        g_usercmd_active = 0;
-        print_color_string("CykShell: failed to load: ", VGA_RED);
-        print_string(target_file);
-        print_string("\n");
-        return 1;
     }
-    if (usercmd_cancel_loading(&staged_image)) return 1;
-
-    if (app_entry.size >= 4 && staged_image[0] == 0x7F && staged_image[1] == 'E' &&
-        staged_image[2] == 'L' && staged_image[3] == 'F') {
-        unsigned short elf_type = app_entry.size >= sizeof(elf32_ehdr_t)
-            ? ((const elf32_ehdr_t*)staged_image)->type : 0;
-        if (elf_type == ELF_ET_DYN) {
-            dest = (void*)USER_DYNAMIC_APP_BASE;
-        }
-        int has_kernel_import = 0;
-        int load_result = elf_type == ELF_ET_DYN
-            ? load_dynamic_elf32(staged_image, app_entry.size, (unsigned char*)dest,
-                                 USER_DYNAMIC_APP_MAX_SIZE, USER_APP_BASE,
-                                 &entry_address, &has_kernel_import)
-            : elf_type == ELF_ET_EXEC
-                ? load_static_elf32(staged_image, app_entry.size, (unsigned char*)dest, &entry_address)
-                : -1;
-        if (usercmd_cancel_loading(&staged_image)) return 1;
-        if (load_result != 0) {
-            free(staged_image);
-            staged_image = (unsigned char*)0;
-            g_usercmd_active = 0;
-            print_color_string("CykShell: invalid ELF app or unresolved kernel import: ", VGA_RED);
-            print_string(target_file);
-            print_string("\n");
-            return 1;
-        }
-        use_user_mode = elf_type == ELF_ET_EXEC ||
-                        (elf_type == ELF_ET_DYN && !has_kernel_import);
-        g_usercmd_image_base = (unsigned int)dest;
-        g_usercmd_image_size = elf_type == ELF_ET_DYN
-            ? USER_DYNAMIC_APP_MAX_SIZE : USER_APP_MAX_SIZE;
-    } else {
-        if (app_entry.size > USER_APP_MAX_SIZE) {
-            free(staged_image);
-            staged_image = (unsigned char*)0;
-            g_usercmd_active = 0;
-            print_color_string("CykShell: flat app exceeds its memory limit: ", VGA_RED);
-            print_string(target_file);
-            print_string("\n");
-            return 1;
-        }
-        memset(dest, 0, USER_APP_MAX_SIZE);
-        memcpy(dest, staged_image, app_entry.size);
-        g_usercmd_image_base = USER_APP_BASE;
-        g_usercmd_image_size = USER_APP_MAX_SIZE;
-    }
-    free(staged_image);
-    staged_image = (unsigned char*)0;
 
     // Tokenize arguments into standard (int argc, char** argv)
     #define MAX_APP_ARGS 16
@@ -962,8 +1457,8 @@ int exec_user_command(const char* cmd_name, const char* args) {
     int app_argc = 0;
     char** app_argv = (char**)0;
     unsigned int app_stack_top = 0;
-    if (usercmd_copy_arguments_to_app_stack(argc, s_argv, USER_APP_STACK_BASE,
-            USER_APP_STACK_SIZE, &app_argc, &app_argv, &app_stack_top) != 0) {
+    if (usercmd_copy_arguments_to_app_stack(argc, s_argv, active_stack_base,
+            active_stack_size, &app_argc, &app_argv, &app_stack_top) != 0) {
         g_usercmd_active = 0;
         print_color_string("CykShell: application arguments exceed its stack.\n", VGA_RED);
         return 1;
@@ -971,7 +1466,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
 
     // Execute as standard 32-bit function: int main(int argc, char** argv)
     typedef int (*app_main_fn)(int, char**);
-    void* app_stack = (void*)USER_APP_STACK_BASE;
+    void* app_stack = (void*)active_stack_base;
     g_user_process.pid = g_next_user_pid++;
     if (g_next_user_pid == 0) g_next_user_pid = 1;
     g_user_process.state = USER_PROCESS_RUNNING;
@@ -980,12 +1475,18 @@ int exec_user_command(const char* cmd_name, const char* args) {
     g_user_process.parent_gid = permissions_gid();
     g_user_process.parent_umask = permissions_umask();
     g_user_process.stack = app_stack;
-    g_user_process.heap_arena = (void*)USER_APP_HEAP_BASE;
-    unsigned int available = heap_get_usable_memory_end() > USER_APP_HEAP_BASE
-        ? heap_get_usable_memory_end() - USER_APP_HEAP_BASE : 0;
-    available &= ~0xFFFu;
-    g_user_process.heap_capacity = available < USER_APP_HEAP_MAX_SIZE
-        ? available : USER_APP_HEAP_MAX_SIZE;
+    if (is_high_elf) {
+        g_user_process.heap_arena = (void*)high_heap_base;
+        g_user_process.heap_capacity = USER_HIGH_MMAP_BASE > high_heap_base
+            ? (USER_HIGH_MMAP_BASE - high_heap_base) : 0;
+    } else {
+        g_user_process.heap_arena = (void*)USER_APP_HEAP_BASE;
+        unsigned int available = heap_get_usable_memory_end() > USER_APP_HEAP_BASE
+            ? heap_get_usable_memory_end() - USER_APP_HEAP_BASE : 0;
+        available &= ~0xFFFu;
+        g_user_process.heap_capacity = available < USER_APP_HEAP_MAX_SIZE
+            ? available : USER_APP_HEAP_MAX_SIZE;
+    }
     g_user_process.heap_break = 0;
     heap_set_allocation_owner(g_user_process.pid);
 
@@ -1035,6 +1536,7 @@ int exec_user_command(const char* cmd_name, const char* args) {
         (void)usercmd_set_app_memory_access(0);
         g_usercmd_user_mapping_active = 0;
     }
+    usercmd_cleanup_vm_space();
     usercmd_reset_keyboard_state();
     g_usercmd_user_mode_active = 0;
     g_usercmd_active = 0;
@@ -1247,7 +1749,283 @@ int usercmd_is_app_started(void) {
 }
 
 unsigned int usercmd_current_pid(void) {
+    unsigned int spid = sched_current_pid();
+    if (spid > 1u) return spid;
     return g_usercmd_app_started ? g_user_process.pid : 0;
+}
+
+#define EXECVE_MAX_ARGS 128
+#define EXECVE_ARG_BUF  16384
+#define EXECVE_MAX_ENVS 64
+#define EXECVE_ENV_BUF  8192
+
+typedef struct {
+    char kpath[128];
+    char arg_pool[EXECVE_ARG_BUF];
+    unsigned int arg_offsets[EXECVE_MAX_ARGS];
+    unsigned int user_argv[EXECVE_MAX_ARGS + 1];
+    char env_pool[EXECVE_ENV_BUF];
+    unsigned int env_offsets[EXECVE_MAX_ENVS];
+    unsigned int user_envp[EXECVE_MAX_ENVS + 1];
+} execve_staging_t;
+
+int usercmd_execve(const char* path, char* const argv[], char* const envp[], registers_t* regs) {
+    if (!path || !path[0] || !regs) return -1;
+
+    execve_staging_t* st = (execve_staging_t*)malloc(sizeof(execve_staging_t));
+    if (!st) return -1;
+
+    /* Copy path, argv, and envp strings from caller's address space before switching CR3. */
+    unsigned int plen = 0;
+    while (plen < sizeof(st->kpath) - 1u && path[plen]) {
+        st->kpath[plen] = path[plen];
+        plen++;
+    }
+    st->kpath[plen] = '\0';
+
+    unsigned int argc = 0;
+    unsigned int pool_used = 0;
+    if (argv) {
+        while (argc < EXECVE_MAX_ARGS && argv[argc]) {
+            const char* s = argv[argc];
+            st->arg_offsets[argc] = pool_used;
+            while (*s && pool_used < EXECVE_ARG_BUF - 1u) {
+                st->arg_pool[pool_used++] = *s++;
+            }
+            st->arg_pool[pool_used++] = '\0';
+            argc++;
+            if (pool_used >= EXECVE_ARG_BUF) break;
+        }
+    } else {
+        st->arg_offsets[0] = 0;
+        for (unsigned int i = 0; i <= plen && i < EXECVE_ARG_BUF - 1u; i++) {
+            st->arg_pool[i] = st->kpath[i];
+        }
+        pool_used = plen + 1u;
+        argc = 1;
+    }
+
+    unsigned int envc = 0;
+    unsigned int epool_used = 0;
+    if (envp) {
+        while (envc < EXECVE_MAX_ENVS && envp[envc]) {
+            const char* s = envp[envc];
+            st->env_offsets[envc] = epool_used;
+            while (*s && epool_used < EXECVE_ENV_BUF - 1u) {
+                st->env_pool[epool_used++] = *s++;
+            }
+            st->env_pool[epool_used++] = '\0';
+            envc++;
+            if (epool_used >= EXECVE_ENV_BUF) break;
+        }
+    }
+
+    vfs_file_t app_entry;
+    if (vfs_find_file(st->kpath, &app_entry) != 0 ||
+        app_entry.size < sizeof(elf32_ehdr_t) ||
+        app_entry.size > USER_APP_FILE_MAX) {
+        free(st);
+        return -1;
+    }
+
+    unsigned int high_min = 0, high_max = 0;
+    int is_high_elf = probe_high_elf32(&app_entry, &high_min, &high_max);
+    paging_space_t* old_space = sched_get_current_vm_space();
+    paging_space_t* new_space = paging_create_address_space();
+    if (!new_space) {
+        free(st);
+        return -1;
+    }
+
+    unsigned int stack_base = is_high_elf ? USER_HIGH_STACK_BASE : USER_APP_STACK_BASE;
+    unsigned int stack_size = is_high_elf ? USER_HIGH_STACK_SIZE : USER_APP_STACK_SIZE;
+    unsigned int entry_address = 0;
+    unsigned int loaded_max = 0;
+    unsigned short elf_type = ELF_ET_EXEC;
+    dyn_module_t local_mods[USER_MAX_DYN_MODULES];
+    memset(local_mods, 0, sizeof(local_mods));
+    unsigned int local_mod_cnt = 0;
+    unsigned int local_next_addr = USER_DYNAMIC_APP_BASE;
+
+    if (is_high_elf) {
+        if (paging_alloc_user_range(new_space, stack_base, stack_size) != 0) {
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+        sched_set_current_vm_space(new_space);
+        unsigned int loaded_min = 0;
+        if (load_high_elf32_streaming(&app_entry, new_space, &loaded_min, &loaded_max, &entry_address) != 0) {
+            sched_set_current_vm_space(old_space);
+            paging_switch_address_space(old_space);
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+    } else {
+        unsigned char* staged = (unsigned char*)malloc(app_entry.size);
+        if (!staged) {
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+        if (vfs_read_at(&app_entry, 0, staged, app_entry.size) != (int)app_entry.size ||
+            staged[0] != 0x7F || staged[1] != 'E' || staged[2] != 'L' || staged[3] != 'F') {
+            free(staged);
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+        elf_type = ((const elf32_ehdr_t*)staged)->type;
+        if (elf_type != ELF_ET_DYN && elf_type != ELF_ET_EXEC) {
+            free(staged);
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+        unsigned int target_base = (elf_type == ELF_ET_DYN) ? USER_DYNAMIC_APP_BASE : USER_APP_BASE;
+        unsigned int target_cap  = (elf_type == ELF_ET_DYN) ? USER_DYNAMIC_APP_MAX_SIZE : USER_APP_MAX_SIZE;
+        if (paging_alloc_user_range(new_space, target_base, target_cap) != 0 ||
+            paging_alloc_user_range(new_space, stack_base, stack_size) != 0) {
+            paging_destroy_address_space(new_space);
+            free(staged);
+            free(st);
+            return -1;
+        }
+        sched_set_current_vm_space(new_space);
+        paging_switch_address_space(new_space);
+
+        int has_kernel_import = 0;
+        int load_res = (elf_type == ELF_ET_DYN)
+            ? load_elf_et_dyn_internal(st->kpath, staged, app_entry.size,
+                                       (unsigned char*)target_base, target_cap,
+                                       USER_APP_BASE, &entry_address,
+                                       local_mods, &local_mod_cnt, &local_next_addr,
+                                       1, &has_kernel_import, (void*)0)
+            : load_static_elf32(staged, app_entry.size, (unsigned char*)target_base, &entry_address);
+        free(staged);
+        if (load_res != 0 || has_kernel_import) {
+            sched_set_current_vm_space(old_space);
+            paging_switch_address_space(old_space);
+            paging_destroy_address_space(new_space);
+            free(st);
+            return -1;
+        }
+    }
+
+    /* Set up Ring 3 stack with envp strings, argv strings, envp[], argv[], and cdecl _start(argc, argv, envp). */
+    unsigned int sp = stack_base + stack_size;
+    for (unsigned int i = 0; i < envc; i++) {
+        const char* s = &st->env_pool[st->env_offsets[i]];
+        unsigned int len = (unsigned int)strlen(s) + 1u;
+        sp -= len;
+        memcpy((void*)sp, s, len);
+        st->user_envp[i] = sp;
+    }
+    st->user_envp[envc] = 0;
+
+    for (unsigned int i = 0; i < argc; i++) {
+        const char* s = &st->arg_pool[st->arg_offsets[i]];
+        unsigned int len = (unsigned int)strlen(s) + 1u;
+        sp -= len;
+        memcpy((void*)sp, s, len);
+        st->user_argv[i] = sp;
+    }
+    st->user_argv[argc] = 0;
+    sp &= ~0xFu;
+
+    sp -= (envc + 1u) * sizeof(unsigned int);
+    unsigned int envp_ptr = sp;
+    memcpy((void*)envp_ptr, st->user_envp, (envc + 1u) * sizeof(unsigned int));
+
+    sp -= (argc + 1u) * sizeof(unsigned int);
+    unsigned int argv_ptr = sp;
+    memcpy((void*)argv_ptr, st->user_argv, (argc + 1u) * sizeof(unsigned int));
+
+    sp -= 16u;
+    unsigned int* frame = (unsigned int*)sp;
+    frame[0] = 0; /* return address */
+    frame[1] = argc;
+    frame[2] = argv_ptr;
+    frame[3] = envp_ptr;
+
+    free(st);
+
+    if (old_space && old_space == g_user_process.vm_space) {
+        g_user_process.vm_space = new_space;
+        memcpy(g_user_process.dyn_modules, local_mods, sizeof(local_mods));
+        g_user_process.dyn_module_count = local_mod_cnt;
+        g_user_process.dyn_next_addr = local_next_addr;
+        g_user_process.dyn_arena_mapped = (elf_type == ELF_ET_DYN) ? 1 : 0;
+        g_user_process.is_high_process = is_high_elf;
+        if (is_high_elf) {
+            g_user_process.heap_arena = (void*)loaded_max;
+            g_user_process.heap_capacity = USER_HIGH_MMAP_BASE > loaded_max
+                ? (USER_HIGH_MMAP_BASE - loaded_max) : 0;
+            g_user_process.heap_break = 0;
+            g_user_process.heap_mapped = 0;
+            g_user_process.mmap_next = USER_HIGH_MMAP_BASE;
+        }
+    }
+    if (old_space && old_space != new_space) {
+        paging_destroy_address_space(old_space);
+    }
+
+    regs->eip = entry_address;
+    regs->useresp = sp;
+    regs->eax = 0;
+    return 0;
+}
+
+unsigned int usercmd_mmap(unsigned int addr, unsigned int length, int prot, int flags) {
+    (void)prot;
+    (void)flags;
+    if (!length) return (unsigned int)-1;
+
+    paging_space_t* space = sched_get_current_vm_space();
+    if (!space) space = paging_get_active_address_space();
+    if (!space) return (unsigned int)-1;
+
+    unsigned int aligned_len = (length + 4095u) & ~4095u;
+    if (aligned_len < length) return (unsigned int)-1;
+
+    unsigned int mmap_base = g_user_process.is_high_process ? USER_HIGH_MMAP_BASE : USER_MMAP_BASE;
+    unsigned int mmap_limit = g_user_process.is_high_process ? USER_HIGH_MMAP_LIMIT : USER_MMAP_LIMIT;
+
+    unsigned int target = addr ? (addr & ~4095u) : 0;
+    if (target == 0) {
+        if (g_user_process.mmap_next < mmap_base ||
+            g_user_process.mmap_next >= mmap_limit) {
+            g_user_process.mmap_next = mmap_base;
+        }
+        if (aligned_len > mmap_limit - g_user_process.mmap_next) {
+            return (unsigned int)-1;
+        }
+        target = g_user_process.mmap_next;
+        g_user_process.mmap_next += aligned_len;
+    } else {
+        if (target < mmap_base || target >= mmap_limit ||
+            aligned_len > mmap_limit - target) {
+            return (unsigned int)-1;
+        }
+    }
+
+    if (paging_alloc_user_range(space, target, aligned_len) != 0) {
+        return (unsigned int)-1;
+    }
+    return target;
+}
+
+int usercmd_munmap(unsigned int addr, unsigned int length) {
+    if (!length || (addr & 4095u) != 0) return -1;
+    paging_space_t* space = sched_get_current_vm_space();
+    if (!space) space = paging_get_active_address_space();
+    if (!space) return -1;
+    unsigned int mmap_base = g_user_process.is_high_process ? USER_HIGH_MMAP_BASE : USER_MMAP_BASE;
+    unsigned int mmap_limit = g_user_process.is_high_process ? USER_HIGH_MMAP_LIMIT : USER_MMAP_LIMIT;
+    if (addr < mmap_base || addr >= mmap_limit ||
+        length > mmap_limit - addr) return -1;
+    return paging_free_user_range(space, addr, length);
 }
 
 static int usercmd_ensure_app_heap(unsigned int minimum_capacity) {
@@ -1275,7 +2053,19 @@ void* usercmd_app_sbrk(int increment) {
     if (increment > 0) {
         if ((unsigned int)increment > g_user_process.heap_capacity - previous)
             return (void*)-1;
-        g_user_process.heap_break += (unsigned int)increment;
+        unsigned int new_break = previous + (unsigned int)increment;
+        if (g_user_process.vm_space && new_break > g_user_process.heap_mapped) {
+            unsigned int new_mapped = (new_break + 4095u) & ~4095u;
+            if (new_mapped > g_user_process.heap_capacity)
+                new_mapped = g_user_process.heap_capacity;
+            if (paging_alloc_user_range(g_user_process.vm_space,
+                    (unsigned int)g_user_process.heap_arena + g_user_process.heap_mapped,
+                    new_mapped - g_user_process.heap_mapped) != 0) {
+                return (void*)-1;
+            }
+            g_user_process.heap_mapped = new_mapped;
+        }
+        g_user_process.heap_break = new_break;
     } else if (increment < 0) {
         unsigned int amount = 0U - (unsigned int)increment;
         if (amount > previous) return (void*)-1;
@@ -1288,8 +2078,21 @@ unsigned int usercmd_app_brk(unsigned int requested) {
     if (!g_usercmd_app_started) return (unsigned int)sbrk(0);
     if (usercmd_ensure_app_heap(1) != 0) return (unsigned int)-1;
     unsigned int base = (unsigned int)g_user_process.heap_arena;
-    if (requested >= base && requested - base <= g_user_process.heap_capacity)
-        g_user_process.heap_break = requested - base;
+    if (requested >= base && requested - base <= g_user_process.heap_capacity) {
+        unsigned int new_break = requested - base;
+        if (g_user_process.vm_space && new_break > g_user_process.heap_mapped) {
+            unsigned int new_mapped = (new_break + 4095u) & ~4095u;
+            if (new_mapped > g_user_process.heap_capacity)
+                new_mapped = g_user_process.heap_capacity;
+            if (paging_alloc_user_range(g_user_process.vm_space,
+                    (unsigned int)g_user_process.heap_arena + g_user_process.heap_mapped,
+                    new_mapped - g_user_process.heap_mapped) != 0) {
+                return base + g_user_process.heap_break;
+            }
+            g_user_process.heap_mapped = new_mapped;
+        }
+        g_user_process.heap_break = new_break;
+    }
     return base + g_user_process.heap_break;
 }
 

@@ -19,6 +19,10 @@
 
 #define BUFSIZ 512
 
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
 typedef struct FILE {
     int   fd;
     int   flags;
@@ -30,6 +34,7 @@ typedef struct FILE {
     int   buf_pos;
     int   buf_len;
     int   mode; /* 0 = read, 1 = write */
+    int   ungetc_char; /* -1 if empty */
 } FILE;
 
 extern FILE* stdin;
@@ -37,6 +42,7 @@ extern FILE* stdout;
 extern FILE* stderr;
 
 FILE* fopen(const char* pathname, const char* mode);
+FILE* fdopen(int fd, const char* mode);
 FILE* freopen(const char* pathname, const char* mode, FILE* stream);
 int   fclose(FILE* stream);
 int   fflush(FILE* stream);
@@ -44,14 +50,24 @@ size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream);
 size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream);
 int   fseek(FILE* stream, long offset, int whence);
 long  ftell(FILE* stream);
+void  rewind(FILE* stream);
 int   feof(FILE* stream);
 int   ferror(FILE* stream);
+void  clearerr(FILE* stream);
+void  perror(const char* s);
+int   setvbuf(FILE* stream, char* buf, int mode, size_t size);
+void  setbuf(FILE* stream, char* buf);
 int   fileno(FILE* stream);
 int   remove(const char* pathname);
 int   rename(const char* old_path, const char* new_path);
+FILE* tmpfile(void);
+char* tmpnam(char* s);
+FILE* popen(const char* command, const char* type);
+int   pclose(FILE* stream);
 
 int   fgetc(FILE* stream);
 int   getc(FILE* stream);
+int   ungetc(int c, FILE* stream);
 char* fgets(char* s, int size, FILE* stream);
 int   fputc(int c, FILE* stream);
 int   fputs(const char* s, FILE* stream);

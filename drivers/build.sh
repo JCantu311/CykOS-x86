@@ -32,7 +32,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
     echo "Building relocatable driver: $source -> $output"
     "$CC" -m32 -DMODULE_LOAD_ADDRESS=0 -c "$source" -o "$object" \
-        -ffreestanding -O0 -nostdlib -fPIC -fno-asynchronous-unwind-tables \
+        -ffreestanding -O2 -nostdlib -fPIC -fno-asynchronous-unwind-tables \
         -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers
     "$LD" -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections -e 0 \
         "$object" -o "$output"

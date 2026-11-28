@@ -58,7 +58,8 @@ def format_disk(image_path, files_to_add=None, directories_to_add=None):
     if directories_to_add is None:
         directories_to_add = []
 
-    TOTAL_SIZE_MB = 80
+    default_mb = 256 if os.path.isdir("toolchain/root") else 80
+    TOTAL_SIZE_MB = int(os.environ.get("CYKOS_IMAGE_SIZE_MB", str(default_mb)))
     TOTAL_SECTORS = TOTAL_SIZE_MB * 1024 * 1024 // 512
 
     PARTITION_START_LBA = 2048  # 1 MB offset
@@ -476,11 +477,13 @@ if __name__ == "__main__":
                     if target_name in ["OS_IMAGE.BIN", "CYKOS_BIN.BIN", "KERNEL.BIN", "KERNEL.MAP", "KERNEL_SYMS.LD", "KERNEL.ELF", "STAGE2.BIN", "MBR.BIN"]:
                         continue
                     ext = os.path.splitext(fname)[1].upper()
-                    if ext in [".BIN", ".COM", ".DRV", ".WAD"]:
+                    if ext in [".BIN", ".COM", ".DRV", ".WAD", ".SO"]:
                         if ext == ".WAD":
                             destination = f"USR/SHARE/GAMES/DOOM/{target_name}"
                         elif ext == ".DRV":
                             destination = f"BOOT/DRIVERS/{target_name}"
+                        elif ext == ".SO":
+                            destination = f"USR/LIB/{target_name}"
                         elif target_name == "SHELL.BIN":
                             destination = f"BIN/{target_name}"
                         elif target_name in test_binaries:
@@ -506,8 +509,8 @@ if __name__ == "__main__":
                             if len(content) == 0:
                                 print(f"[makeext2] Warning: Skipping 0-byte file: {fname}")
                                 continue
-                            if ext in [".BIN", ".COM"] and len(content) > 524288:
-                                print(f"[makeext2] Warning: Skipping application larger than 512 KiB: {fname} ({len(content)} bytes)")
+                            if ext in [".BIN", ".COM"] and len(content) > 33554432:
+                                print(f"[makeext2] Warning: Skipping application larger than 32 MiB: {fname} ({len(content)} bytes)")
                                 continue
                             sample_files[destination] = content
                             if ext == ".WAD":
@@ -515,6 +518,51 @@ if __name__ == "__main__":
                             else:
                                 print(f"[makeext2] Bundled Level 4 application: {target_name} ({len(content)} bytes)")
 
-    directories = ["BIN", "BOOT/DRIVERS", "ETC", "HOME/USER", "MNT", "TMP", "USR/BIN", "USR/BIN/TESTS", "USR/SHARE/DOC", "USR/SHARE/GAMES/DOOM", "VAR/LOG"]
+    directories = ["BIN", "BOOT/DRIVERS", "ETC", "HOME/USER", "MNT", "TMP", "USR/BIN", "USR/BIN/TESTS", "USR/LIB", "USR/SHARE/DOC", "USR/SHARE/GAMES/DOOM", "VAR/LOG", "usr", "usr/bin", "usr/include", "usr/lib", "usr/libexec", "tmp"]
+    dir_set = set(directories)
+
+    def ensure_parent_dirs(rel_path):
+        parts = rel_path.split("/")[:-1]
+        cur = ""
+        for p in parts:
+            cur = f"{cur}/{p}" if cur else p
+            if cur not in dir_set:
+                dir_set.add(cur)
+                directories.append(cur)
+
+    # Bundle CykOS C headers & runtime libraries into /usr/include and /usr/lib
+    if os.path.isdir("libc/include"):
+        for root_dir, _, files in os.walk("libc/include"):
+            for fname in files:
+                fpath = os.path.join(root_dir, fname)
+                rel = os.path.relpath(fpath, "libc/include").replace("\\", "/")
+                dest = f"usr/include/{rel}"
+                ensure_parent_dirs(dest)
+                with open(fpath, "rb") as hf:
+                    sample_files[dest] = hf.read()
+
+    for src_path, dest_path in [
+        ("bin/libc.a", "usr/lib/libc.a"),
+        ("bin/libc_objs/crt0.o", "usr/lib/crt0.o"),
+        ("toolchain/cykos-high.ld", "usr/lib/cykos-high.ld"),
+    ]:
+        if os.path.isfile(src_path):
+            ensure_parent_dirs(dest_path)
+            with open(src_path, "rb") as lf:
+                sample_files[dest_path] = lf.read()
+
+    # Bundle cross-compiled native toolchain (Binutils + GCC) if present
+    if os.path.isdir("toolchain/root"):
+        tc_count = 0
+        for root_dir, _, files in os.walk("toolchain/root"):
+            for fname in files:
+                fpath = os.path.join(root_dir, fname)
+                rel = os.path.relpath(fpath, "toolchain/root").replace("\\", "/")
+                ensure_parent_dirs(rel)
+                with open(fpath, "rb") as tf:
+                    sample_files[rel] = tf.read()
+                tc_count += 1
+        print(f"[makeext2] Bundled {tc_count} toolchain file(s) from toolchain/root.")
+
     format_disk(target_img, sample_files, directories)
 

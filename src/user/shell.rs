@@ -58,6 +58,7 @@ extern "C" {
     fn accounts_delete(name: *const u8) -> i32;
     fn accounts_set_flags(name: *const u8, flags: u32) -> i32;
     fn accounts_set_password(name: *const u8, password: *const u8) -> i32;
+    fn accounts_has_password(name: *const u8) -> i32;
     fn accounts_authenticate(name: *const u8, password: *const u8) -> i32;
 
     // External user command support (usercmd.c)
@@ -69,6 +70,35 @@ extern "C" {
     fn syscall_pipe_end() -> u32;
     fn syscall_pipe_write(data: *const u8, length: u32) -> u32;
     fn syscall_pipe_read(data: *mut u8, length: u32) -> i32;
+    fn sched_list_tasks(out: *mut SchedTaskInfo, max_tasks: i32) -> i32;
+    fn net_get_info(out: *mut NetInfo) -> i32;
+    fn net_set_config(ip: u32, netmask: u32, gateway: u32) -> i32;
+    fn net_dhcp() -> i32;
+    fn net_ping(dst_ip: u32, seq: u16, timeout_ms: u32, rtt_ms_out: *mut u32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NetInfo {
+    available: i32,
+    link_up: i32,
+    mac: [u8; 6],
+    ip: u32,
+    netmask: u32,
+    gateway: u32,
+    dns: u32,
+    rx_packets: u32,
+    tx_packets: u32,
+    hw_name: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SchedTaskInfo {
+    pid: u32,
+    state: u32,
+    name: [u8; 24],
+    total_ticks: u32,
 }
 
 // Panic Handler for freestanding environment
@@ -1636,6 +1666,111 @@ fn cmd_login(args: &[u8]) {
     }
 }
 
+fn cd_user_home(target_name: &[u8; 24]) {
+    let mut home = [0u8; 64];
+    home[..6].copy_from_slice(b"/HOME/");
+    let name_len = target_name.iter().position(|&b| b == 0).unwrap_or(24);
+    if name_len + 6 < 63 {
+        for i in 0..name_len {
+            let c = target_name[i];
+            home[6 + i] = if c >= b'a' && c <= b'z' { c - 32 } else { c };
+        }
+        home[6 + name_len] = 0;
+        unsafe {
+            let mut probe = core::mem::MaybeUninit::<VfsFile>::uninit();
+            if vfs_find_file(home.as_ptr(), probe.as_mut_ptr()) == 0 {
+                vfs_chdir(home.as_ptr());
+                return;
+            }
+        }
+    }
+    unsafe { vfs_chdir(b"/\0".as_ptr()); }
+}
+
+fn run_login_manager() {
+    puts(b"========================================\n");
+    puts_color(b" CykOS Login Manager\n", 0x0B);
+    puts(b"========================================\n");
+
+    loop {
+        puts(b"cykos login: ");
+        let mut target_name = [0u8; 24];
+        let mut len = 0usize;
+        loop {
+            let key = unsafe { get_char() };
+            if key == 0x03 {
+                puts(b"^C\n");
+                len = 0;
+                break;
+            }
+            if key == b'\r' || key == b'\n' {
+                print_char(b'\n');
+                break;
+            }
+            if key == 8 || key == 127 {
+                if len > 0 {
+                    len -= 1;
+                    target_name[len] = 0;
+                    puts(b"\x08 \x08");
+                }
+                continue;
+            }
+            if key >= 0x20 && key < 0x7f && len < 23 {
+                target_name[len] = key;
+                len += 1;
+                print_char(key);
+            }
+        }
+        if len == 0 { continue; }
+
+        let mut uid = 0;
+        let mut gid = 0;
+        let mut flags = 0;
+        if unsafe { accounts_lookup(target_name.as_ptr(), &mut uid, &mut gid, &mut flags) } != 0 {
+            let (_pw, _) = read_secret(b"Password: ");
+            puts_color(b"Login incorrect\n\n", 0x0C);
+            continue;
+        }
+
+        let has_pw = unsafe { accounts_has_password(target_name.as_ptr()) };
+        if has_pw == 1 {
+            let (mut password, pw_len) = read_secret(b"Password: ");
+            password[pw_len] = 0;
+            if unsafe { accounts_authenticate(target_name.as_ptr(), password.as_ptr()) } != 0 {
+                puts_color(b"Login incorrect\n\n", 0x0C);
+                continue;
+            }
+        } else {
+            puts_color(b"No password configured for this account.\n", 0x0E);
+            let (mut password, pw_len) = read_secret(b"Set password (Enter to skip): ");
+            password[pw_len] = 0;
+            if pw_len > 0 {
+                unsafe {
+                    permissions_set_identity(0, 0);
+                    if accounts_set_password(target_name.as_ptr(), password.as_ptr()) == 0 {
+                        puts_color(b"Password updated.\n", 0x0A);
+                    }
+                }
+            }
+        }
+
+        unsafe { permissions_set_identity(uid, gid); }
+        cd_user_home(&target_name);
+        puts_color(b"Welcome, ", 0x0A);
+        puts_color(&target_name[..len], 0x0A);
+        puts(b"!\n\n");
+        break;
+    }
+}
+
+fn cmd_logout(_args: &[u8]) {
+    unsafe {
+        permissions_set_identity(0, 0);
+        console_clear();
+    }
+    run_login_manager();
+}
+
 fn cmd_who(_args: &[u8]) {
     let uid = unsafe { permissions_uid() };
     let mut name = [0u8; 24];
@@ -1660,6 +1795,230 @@ fn cmd_groups(_args: &[u8]) {
     print_u32(gid);
     if uid == 0 { puts(b" root wheel"); }
     print_char(b'\n');
+}
+
+fn cmd_ps(_args: &[u8]) {
+    let mut tasks = [SchedTaskInfo { pid: 0, state: 0, name: [0u8; 24], total_ticks: 0 }; 16];
+    let count = unsafe { sched_list_tasks(tasks.as_mut_ptr(), 16) };
+    puts(b"PID   STATE     TICKS     NAME\n");
+    for i in 0..(count.max(0) as usize) {
+        let t = &tasks[i];
+        print_u32(t.pid);
+        puts(b"     ");
+        let state_str: &[u8] = match t.state {
+            1 => b"READY     ",
+            2 => b"RUNNING   ",
+            3 => b"BLOCKED   ",
+            4 => b"ZOMBIE    ",
+            _ => b"UNKNOWN   ",
+        };
+        puts(state_str);
+        print_u32(t.total_ticks);
+        puts(b"         ");
+        let name_len = t.name.iter().position(|&b| b == 0).unwrap_or(24);
+        puts(&t.name[..name_len]);
+        print_char(b'\n');
+    }
+}
+
+fn print_ipv4(ip: u32) {
+    print_u32((ip >> 24) & 0xFF);
+    unsafe { print_char(b'.'); }
+    print_u32((ip >> 16) & 0xFF);
+    unsafe { print_char(b'.'); }
+    print_u32((ip >> 8) & 0xFF);
+    unsafe { print_char(b'.'); }
+    print_u32(ip & 0xFF);
+}
+
+fn parse_ipv4(s: &[u8]) -> Option<u32> {
+    if s.is_empty() { return None; }
+    let mut parts = [0u32; 4];
+    let mut part_idx = 0usize;
+    let mut cur = 0u32;
+    let mut has_digit = false;
+    for &b in s {
+        if b == b'.' {
+            if !has_digit || part_idx >= 3 || cur > 255 { return None; }
+            parts[part_idx] = cur;
+            part_idx += 1;
+            cur = 0;
+            has_digit = false;
+        } else if b >= b'0' && b <= b'9' {
+            cur = cur * 10 + (b - b'0') as u32;
+            if cur > 255 { return None; }
+            has_digit = true;
+        } else {
+            return None;
+        }
+    }
+    if !has_digit || part_idx != 3 || cur > 255 { return None; }
+    parts[3] = cur;
+    Some((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
+}
+
+fn split_first_word(s: &[u8]) -> (&[u8], &[u8]) {
+    let t = trim_slice(s);
+    let pos = t.iter().position(|&b| b == b' ' || b == b'\t').unwrap_or(t.len());
+    (&t[..pos], trim_slice(&t[pos..]))
+}
+
+fn cmd_ifconfig(args: &[u8]) {
+    let trimmed = trim_slice(args);
+    let mut info = NetInfo {
+        available: 0, link_up: 0, mac: [0; 6],
+        ip: 0, netmask: 0, gateway: 0, dns: 0,
+        rx_packets: 0, tx_packets: 0, hw_name: [0; 32],
+    };
+    if unsafe { net_get_info(&mut info as *mut NetInfo) } != 0 || info.available == 0 {
+        puts(b"ifconfig: no network interface available\n");
+        return;
+    }
+
+    if !trimmed.is_empty() {
+        let (ip_tok, rest1) = split_first_word(trimmed);
+        let (mask_tok, rest2) = split_first_word(rest1);
+        let (gw_tok, _) = split_first_word(rest2);
+
+        let ip = match parse_ipv4(ip_tok) {
+            Some(v) => v,
+            None => {
+                puts(b"Usage: ifconfig [<ip> [netmask] [gateway]]\n");
+                return;
+            }
+        };
+        let mask = if mask_tok.is_empty() {
+            0xFFFFFF00u32
+        } else {
+            match parse_ipv4(mask_tok) {
+                Some(v) => v,
+                None => { puts(b"ifconfig: invalid netmask\n"); return; }
+            }
+        };
+        let gw = if gw_tok.is_empty() {
+            0u32
+        } else {
+            match parse_ipv4(gw_tok) {
+                Some(v) => v,
+                None => { puts(b"ifconfig: invalid gateway\n"); return; }
+            }
+        };
+        if unsafe { net_set_config(ip, mask, gw) } == 0 {
+            puts(b"Interface configured: ");
+            print_ipv4(ip);
+            puts(b"\n");
+        } else {
+            puts(b"ifconfig: failed to configure interface\n");
+        }
+        return;
+    }
+
+    let hw_len = info.hw_name.iter().position(|&b| b == 0).unwrap_or(32);
+    puts(b"eth0: ");
+    puts(&info.hw_name[..hw_len]);
+    if info.link_up != 0 {
+        puts(b" [LINK UP]\n");
+    } else {
+        puts(b" [LINK DOWN]\n");
+    }
+    puts(b"  MAC:     ");
+    for i in 0..6 {
+        print_hex_byte(info.mac[i]);
+        if i < 5 { unsafe { print_char(b':'); } }
+    }
+    puts(b"\n  IPv4:    ");
+    print_ipv4(info.ip);
+    puts(b"\n  Netmask: ");
+    print_ipv4(info.netmask);
+    puts(b"\n  Gateway: ");
+    print_ipv4(info.gateway);
+    puts(b"\n  DNS:     ");
+    print_ipv4(info.dns);
+    puts(b"\n  RX pkts: ");
+    print_u32(info.rx_packets);
+    puts(b"  TX pkts: ");
+    print_u32(info.tx_packets);
+    unsafe { print_char(b'\n'); }
+}
+
+fn cmd_dhcp(_args: &[u8]) {
+    puts(b"Sending DHCP discovery...\n");
+    if unsafe { net_dhcp() } == 0 {
+        let mut info = NetInfo {
+            available: 0, link_up: 0, mac: [0; 6],
+            ip: 0, netmask: 0, gateway: 0, dns: 0,
+            rx_packets: 0, tx_packets: 0, hw_name: [0; 32],
+        };
+        unsafe { net_get_info(&mut info as *mut NetInfo); }
+        puts(b"DHCP lease acquired: ");
+        print_ipv4(info.ip);
+        puts(b" (gw ");
+        print_ipv4(info.gateway);
+        puts(b")\n");
+    } else {
+        puts(b"dhcp: failed or timed out\n");
+    }
+}
+
+fn cmd_ping(args: &[u8]) {
+    let (ip_tok, rest) = split_first_word(args);
+    if ip_tok.is_empty() {
+        puts(b"Usage: ping <a.b.c.d> [count]\n");
+        return;
+    }
+    let dst_ip = match parse_ipv4(ip_tok) {
+        Some(v) => v,
+        None => {
+            puts(b"ping: invalid IPv4 address\n");
+            return;
+        }
+    };
+    let mut count = 4u32;
+    let (cnt_tok, _) = split_first_word(rest);
+    if !cnt_tok.is_empty() {
+        let mut parsed = 0u32;
+        let mut ok = true;
+        for &b in cnt_tok {
+            if b >= b'0' && b <= b'9' {
+                parsed = parsed * 10 + (b - b'0') as u32;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok && parsed >= 1 && parsed <= 16 {
+            count = parsed;
+        }
+    }
+
+    puts(b"PING ");
+    print_ipv4(dst_ip);
+    puts(b": 64 data bytes\n");
+
+    let mut received = 0u32;
+    for seq in 1..=count {
+        let mut rtt_ms = 0u32;
+        let res = unsafe { net_ping(dst_ip, seq as u16, 1500, &mut rtt_ms as *mut u32) };
+        if res == 0 {
+            received += 1;
+            puts(b"64 bytes from ");
+            print_ipv4(dst_ip);
+            puts(b": icmp_seq=");
+            print_u32(seq);
+            puts(b" ttl=64 time=");
+            print_u32(rtt_ms);
+            puts(b" ms\n");
+        } else {
+            puts(b"Request timed out for icmp_seq ");
+            print_u32(seq);
+            unsafe { print_char(b'\n'); }
+        }
+    }
+    puts(b"--- ping statistics ---\n");
+    print_u32(count);
+    puts(b" packets transmitted, ");
+    print_u32(received);
+    puts(b" received\n");
 }
 
 fn cmd_filter(args: &[u8], mode: u8) {
@@ -2009,10 +2368,20 @@ pub static COMMANDS: &[Command] = &[
     Command { name: b"SUDO", description: b"", handler: cmd_sudo },
     Command { name: b"login", description: b"Log in as a local account", handler: cmd_login },
     Command { name: b"LOGIN", description: b"", handler: cmd_login },
+    Command { name: b"logout", description: b"Log out and return to the login manager", handler: cmd_logout },
+    Command { name: b"LOGOUT", description: b"", handler: cmd_logout },
     Command { name: b"who", description: b"Show the currently logged-in user", handler: cmd_who },
     Command { name: b"WHO", description: b"", handler: cmd_who },
     Command { name: b"groups", description: b"Show group memberships for the current user", handler: cmd_groups },
     Command { name: b"GROUPS", description: b"", handler: cmd_groups },
+    Command { name: b"ps", description: b"List scheduled kernel/user tasks", handler: cmd_ps },
+    Command { name: b"PS", description: b"", handler: cmd_ps },
+    Command { name: b"ifconfig", description: b"Show or configure network interface", handler: cmd_ifconfig },
+    Command { name: b"IFCONFIG", description: b"", handler: cmd_ifconfig },
+    Command { name: b"dhcp", description: b"Acquire IPv4 configuration via DHCP", handler: cmd_dhcp },
+    Command { name: b"DHCP", description: b"", handler: cmd_dhcp },
+    Command { name: b"ping", description: b"Send ICMP echo requests to an IPv4 host", handler: cmd_ping },
+    Command { name: b"PING", description: b"", handler: cmd_ping },
     Command { name: b"grep", description: b"Print lines containing text (grep text [file])", handler: cmd_grep },
     Command { name: b"GREP", description: b"", handler: cmd_grep },
     Command { name: b"head", description: b"Print the first 10 lines (head [file])", handler: cmd_head },
@@ -2564,6 +2933,7 @@ pub extern "C" fn shell_main() -> ! {
     puts(b"========================================\n\n");
 
     run_startup_script();
+    run_login_manager();
 
     loop {
         print_shell_prompt();

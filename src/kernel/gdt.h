@@ -8,5 +8,7 @@
 #define GDT_TSS         0x28
 
 void gdt_init(void);
+void gdt_set_kernel_stack(unsigned int esp0);
+unsigned int gdt_get_kernel_stack(void);
 
 #endif

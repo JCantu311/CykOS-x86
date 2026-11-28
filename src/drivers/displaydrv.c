@@ -288,6 +288,7 @@ static unsigned char blend_channel(unsigned char source, unsigned char destinati
 static int bitmap_bytes_per_pixel(unsigned int format) {
     switch (format) {
         case CYK_BITMAP_INDEX8:
+        case CYK_BITMAP_INDEX8_OPAQUE:
         case CYK_BITMAP_RGB332: return 1;
         case CYK_BITMAP_RGB24: return 3;
         case CYK_BITMAP_RGBA32: return 4;
@@ -324,6 +325,28 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
         bitmap->stride < bitmap->width * (unsigned int)bytes_per_pixel ||
         bitmap->height > 0xFFFFFFFFu / bitmap->stride) return -1;
 
+    if (g_current_mode == 2 && bitmap->format == CYK_BITMAP_INDEX8_OPAQUE) {
+        if (x == 0 && y == 0 && bitmap->width == MODE_320_WIDTH &&
+            bitmap->height == MODE_320_HEIGHT && bitmap->stride == MODE_320_WIDTH) {
+            memcpy((void*)VGA_GFX_ADDR, bitmap->pixels, MODE_320_BYTES);
+            return 0;
+        }
+        int src_x = x < 0 ? -x : 0;
+        int dst_x = x < 0 ? 0 : x;
+        int copy_w = (int)bitmap->width - src_x;
+        if (dst_x + copy_w > MODE_320_WIDTH) copy_w = MODE_320_WIDTH - dst_x;
+        if (copy_w > 0) {
+            for (unsigned int row = 0; row < bitmap->height; row++) {
+                int dst_y = y + (int)row;
+                if (dst_y < 0 || dst_y >= MODE_320_HEIGHT) continue;
+                memcpy((void*)&VGA_GFX_ADDR[dst_y * MODE_320_WIDTH + dst_x],
+                       bitmap->pixels + row * bitmap->stride + src_x,
+                       (unsigned int)copy_w);
+            }
+        }
+        return 0;
+    }
+
     for (unsigned int row = 0; row < bitmap->height; row++) {
         int dst_y = y + (int)row;
         int target_width = g_current_mode == 1 ? MODE_640_WIDTH : MODE_320_WIDTH;
@@ -334,8 +357,9 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
             int dst_x = x + (int)col;
             unsigned char color;
             if (dst_x < 0 || dst_x >= target_width) continue;
-            if (bitmap->format == CYK_BITMAP_INDEX8) {
-                if (src[col] == 0xFF) continue;
+            if (bitmap->format == CYK_BITMAP_INDEX8 ||
+                bitmap->format == CYK_BITMAP_INDEX8_OPAQUE) {
+                if (bitmap->format == CYK_BITMAP_INDEX8 && src[col] == 0xFF) continue;
                 color = src[col];
             } else {
                 unsigned char r, g, b;
@@ -368,8 +392,10 @@ static int gfx_draw_bitmap_ex(int x, int y, const cyk_bitmap_t* bitmap) {
             else VGA_GFX_ADDR[dst_y * MODE_320_WIDTH + dst_x] = color;
         }
     }
-    outb(VGA_GC_INDEX, 0x08);
-    outb(VGA_GC_DATA, 0xFF);
+    if (g_current_mode == 1) {
+        outb(VGA_GC_INDEX, 0x08);
+        outb(VGA_GC_DATA, 0xFF);
+    }
     return 0;
 }
 

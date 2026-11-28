@@ -52,6 +52,14 @@ static void gdt_set_entry(unsigned int index, unsigned int base,
     g_gdt[index].access = access;
 }
 
+void gdt_set_kernel_stack(unsigned int esp0) {
+    g_tss.esp0 = esp0;
+}
+
+unsigned int gdt_get_kernel_stack(void) {
+    return g_tss.esp0;
+}
+
 void gdt_init(void) {
     gdt_set_entry(0, 0, 0, 0, 0);
     gdt_set_entry(1, 0, 0xFFFFFFFFu, 0x9A, 0xCF); /* Ring 0 code */

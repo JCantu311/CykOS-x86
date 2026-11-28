@@ -19,7 +19,7 @@ typedef struct {
     unsigned int gid;
 } permission_entry_t;
 
-static permission_entry_t g_entries[PERMISSION_ENTRIES];
+static permission_entry_t* g_entries;
 static unsigned int g_count;
 static unsigned int g_uid;
 static unsigned int g_gid;
@@ -125,8 +125,10 @@ static int ensure_entry(const char* canonical_path, int is_dir) {
 }
 
 static int persist(void) {
-    if (!g_ready) return 0;
-    unsigned char data[sizeof(permission_header_t) + sizeof(permission_entry_t) * PERMISSION_ENTRIES];
+    if (!g_ready || !g_entries) return 0;
+    unsigned int cap = sizeof(permission_header_t) + sizeof(permission_entry_t) * PERMISSION_ENTRIES;
+    unsigned char* data = (unsigned char*)malloc(cap);
+    if (!data) return -1;
     permission_header_t header = { PERMISSION_MAGIC, g_count };
     unsigned int bytes = sizeof(header) + g_count * sizeof(permission_entry_t);
     memcpy(data, &header, sizeof(header));
@@ -134,12 +136,15 @@ static int persist(void) {
     g_persisting = 1;
     int result = vfs_write_file(PERMISSION_DB, data, bytes);
     g_persisting = 0;
+    free(data);
     return result;
 }
 
 void permissions_init(void) {
     permission_header_t header;
-    unsigned char data[sizeof(permission_header_t) + sizeof(permission_entry_t) * PERMISSION_ENTRIES];
+    unsigned int cap = sizeof(permission_header_t) + sizeof(permission_entry_t) * PERMISSION_ENTRIES;
+    unsigned char* data = (unsigned char*)malloc(cap);
+    if (!data) return;
     g_uid = 0;
     g_gid = 0;
     g_umask = 0022;
@@ -147,10 +152,15 @@ void permissions_init(void) {
     g_ready = 0;
     g_persisting = 0;
     g_metadata_degraded = 0;
-    memset(g_entries, 0, sizeof(g_entries));
+    if (!g_entries) {
+        g_entries = (permission_entry_t*)calloc(PERMISSION_ENTRIES, sizeof(permission_entry_t));
+        if (!g_entries) { free(data); return; }
+    } else {
+        memset(g_entries, 0, PERMISSION_ENTRIES * sizeof(permission_entry_t));
+    }
     (void)vfs_mkdir("/ETC");
 
-    int bytes = vfs_read_file_by_name(PERMISSION_DB, data, sizeof(data));
+    int bytes = vfs_read_file_by_name(PERMISSION_DB, data, cap);
     if (bytes >= (int)sizeof(header)) {
         memcpy(&header, data, sizeof(header));
         if (header.magic == PERMISSION_MAGIC && header.count <= PERMISSION_ENTRIES &&
@@ -172,6 +182,7 @@ void permissions_init(void) {
             }
         }
     }
+    free(data);
     g_ready = 1;
 }
 

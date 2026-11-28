@@ -24,6 +24,9 @@ int modload_select_sound_driver(int index);
 // Retrieve registered Level 2 display driver (returns NULL if not loaded)
 cyk_display_driver_t* modload_get_display_driver(void);
 
+// Retrieve registered Level 2 network driver (returns NULL if not loaded)
+cyk_net_driver_t* modload_get_net_driver(void);
+
 // Retrieve a loaded module by its registered name
 cyk_module_header_t* modload_find_module(const char* name);
 

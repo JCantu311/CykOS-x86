@@ -1,6 +1,7 @@
 #include "idt.h"
 #include "cykastd.h"
 #include "usercmd.h"
+#include "sched.h"
 
 #define IDT_ENTRIES 256
 
@@ -87,6 +88,7 @@ static void pit_irq_handler(registers_t* regs) {
     (void)regs;
     g_pit_ticks++;
     outb(0x20, 0x20);
+    sched_tick_from_irq();
 }
 
 static void pic_init(void) {

@@ -18,7 +18,10 @@ char*  strstr(const char* haystack, const char* needle);
 char*  strpbrk(const char* s, const char* accept);
 size_t strspn(const char* s, const char* accept);
 char*  strdup(const char* s);
+char*  strndup(const char* s, size_t n);
 char*  strtok(char* str, const char* delim);
+char*  strtok_r(char* str, const char* delim, char** saveptr);
+size_t strcspn(const char* s, const char* reject);
 
 void*  memset(void* s, int c, size_t n);
 void*  memcpy(void* dest, const void* src, size_t n);

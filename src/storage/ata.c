@@ -68,6 +68,26 @@ static int ata_wait_drq(unsigned short base, unsigned short control) {
 
 static unsigned char g_selected_drive;
 static unsigned int g_drive_sector_count[4];
+static int g_ata_defer_flush;
+
+void ata_set_defer_flush(int defer) {
+    g_ata_defer_flush = defer ? 1 : 0;
+}
+
+int ata_flush_cache(void) {
+    if (g_selected_drive >= USB_STORAGE_DRIVE_BASE) return 0;
+    if (g_selected_drive == 0) {
+        if (ahci_probe(&g_drive_sector_count[0]) || nvme_probe(&g_drive_sector_count[0])) {
+            return 0;
+        }
+    }
+    unsigned short base = ata_base_for_drive(g_selected_drive);
+    unsigned short control = ata_control_for_drive(g_selected_drive);
+    if (ata_wait_ready(base, control) != 0) return -1;
+    outb(base + 7, ATA_CMD_CACHE_FLUSH);
+    if (ata_wait_ready(base, control) != 0) return -1;
+    return 0;
+}
 
 int ata_select_drive(unsigned char drive) {
     if (drive >= 4u + USB_STORAGE_MAX_DEVICES) return -1;
@@ -226,9 +246,12 @@ int ata_read_sectors(unsigned int lba, unsigned char count, unsigned short* targ
             return -1;
         }
 
-        for (int j = 0; j < 256; j++) {
-            target_buf[(i * 256) + j] = inw(base);
-        }
+        unsigned short* sector_dst = &target_buf[i * 256];
+        unsigned int words = 256;
+        asm volatile("cld; rep insw"
+                     : "+D"(sector_dst), "+c"(words)
+                     : "d"(base)
+                     : "memory");
     }
     return 0;
 }
@@ -276,9 +299,12 @@ int ata_write_sectors(unsigned int lba, unsigned char count, const unsigned shor
             return -1;
         }
 
-        for (int j = 0; j < 256; j++) {
-            outw(base, source_buf[(i * 256) + j]);
-        }
+        const unsigned short* sector_src = &source_buf[i * 256];
+        unsigned int words = 256;
+        asm volatile("cld; rep outsw"
+                     : "+S"(sector_src), "+c"(words)
+                     : "d"(base)
+                     : "memory");
     }
 
     // The device remains busy while it commits the PIO data. Do not issue
@@ -287,8 +313,10 @@ int ata_write_sectors(unsigned int lba, unsigned char count, const unsigned shor
     if (ata_wait_ready(base, control) != 0) return -1;
 
     // 5. Commit data to disk and wait until controller is ready
-    outb(base + 7, ATA_CMD_CACHE_FLUSH);
-    if (ata_wait_ready(base, control) != 0) return -1;
+    if (!g_ata_defer_flush) {
+        outb(base + 7, ATA_CMD_CACHE_FLUSH);
+        if (ata_wait_ready(base, control) != 0) return -1;
+    }
 
     return 0;
 }

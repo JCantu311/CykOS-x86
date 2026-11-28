@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/wait.h>
 #include "syscall.h"
 
 #define HEAP_MAGIC 0x504F5358 // "POSX"
@@ -99,7 +100,20 @@ void* realloc(void* ptr, size_t size) {
     return new_ptr;
 }
 
+#define ATEXIT_MAX 32
+static void (*g_atexit_funcs[ATEXIT_MAX])(void);
+static int g_atexit_count = 0;
+
+int atexit(void (*func)(void)) {
+    if (!func || g_atexit_count >= ATEXIT_MAX) return -1;
+    g_atexit_funcs[g_atexit_count++] = func;
+    return 0;
+}
+
 void exit(int status) {
+    while (g_atexit_count > 0) {
+        g_atexit_funcs[--g_atexit_count]();
+    }
     // Restore text mode only when the application actually changed modes.
     // Setting mode 0 clears the screen, so doing it unconditionally erases
     // ordinary console output from short-lived commands (for example `lua -v`).
@@ -231,12 +245,22 @@ int abs(int j) {
     return j < 0 ? -j : j;
 }
 
-// Process creation is not implemented by CykOS yet. POSIX callers receive
-// failure, allowing optional host utilities (such as Doom's Zenity probe) to
-// be skipped cleanly.
 int system(const char* command) {
-    (void)command;
-    return -1;
+    if (!command) return 1;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char* argv[4];
+        argv[0] = "/USR/BIN/SH.BIN";
+        argv[1] = "-c";
+        argv[2] = (char*)command;
+        argv[3] = NULL;
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    return status;
 }
 
 void qsort(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*)) {

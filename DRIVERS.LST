@@ -4,3 +4,4 @@ src/drivers/pcsounddrv.c bin/cysound.drv
 src/drivers/diskdrv.c    bin/cykdisk.drv
 src/drivers/displaydrv.c bin/cydisplay.drv
 src/drivers/usbdrv.c     bin/cykusb.drv
+src/drivers/netdrv.c     bin/cyknet.drv

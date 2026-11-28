@@ -107,7 +107,7 @@ void DG_DrawFrame(void)
         uint32_t format;
         const unsigned char *pixels;
     } frame = {
-        DOOMGENERIC_RESX, DOOMGENERIC_RESY, DOOMGENERIC_RESX, 1,
+        DOOMGENERIC_RESX, DOOMGENERIC_RESY, DOOMGENERIC_RESX, 5,
         (const unsigned char *)DG_ScreenBuffer
     };
     (void)cykos_syscall3(SYS_GFX_BITMAP, 0, (uint32_t)&frame, 0);

@@ -56,7 +56,7 @@ nasm -f elf32 src/boot/uefi_entry.asm -o bin/uefi_entry.o
 nasm -f bin src/boot/mbr.asm -o bin/mbr.bin
 nasm -f bin src/boot/stage2.asm -o bin/stage2.bin
 
-COMMON_CFLAGS="-m32 -ffreestanding -O0 -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers"
+COMMON_CFLAGS="-m32 -ffreestanding -O2 -nostdlib -fno-pic -fno-pie -fno-delete-null-pointer-checks --param=min-pagesize=0 -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-builtin -fno-stack-protector -Wall -Wextra -Isrc/kernel -Isrc/storage -Isrc/drivers"
 
 # 4. Compile Level 1 Kernel components
 echo "Compiling Level 1 Kernel components..."
@@ -95,7 +95,7 @@ fi
 # Drivers are compiled and linked after kernel_syms.ld is generated below.
 
 # 7. Link Level 1 Kernel and Level 3 CykShell
-$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
+$LD -m elf_i386 -T config/linker.ld --gc-sections --no-dynamic-linker -no-pie -Map bin/kernel.map bin/boot.o bin/cykastd.o bin/ata.o bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/sched.o bin/net.o bin/kernel.o $SHELL_LIB -o bin/KERNEL.BIN
 
 # Build an ELF32 Multiboot2 entry for GRUB's x86_64 UEFI loader. The BIOS
 # image remains the flat binary above; both entry paths share the kernel C code.
@@ -103,7 +103,7 @@ $LD -m elf_i386 -T config/uefi-linker.ld --gc-sections --no-dynamic-linker -no-p
     -Map bin/kernel-uefi.map bin/uefi_entry.o bin/boot.o bin/cykastd.o bin/ata.o \
     bin/ahci.o bin/nvme.o bin/fat16.o bin/fat32.o bin/ext2.o bin/vfs.o bin/modload.o \
     bin/usercmd.o bin/idt.o bin/syscall.o bin/permissions.o bin/accounts.o bin/heap.o \
-    bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/kernel.o $SHELL_LIB \
+    bin/paging.o bin/gdt.o bin/exports.o bin/pci.o bin/sched.o bin/net.o bin/kernel.o $SHELL_LIB \
     -o bin/KERNEL.ELF
 if command -v grub-file &> /dev/null; then
     grub-file --is-x86-multiboot2 bin/KERNEL.ELF
@@ -322,6 +322,21 @@ fi
 $AR rcs bin/libc.a bin/libc_objs/*.o
 echo "  -> Created: bin/libc.a"
 
+# Build shared libraries in libs/*.c
+SO_BINS=""
+if [ -d libs ]; then
+    for so_src in libs/*.c; do
+        [ -e "$so_src" ] || continue
+        so_stem=$(basename "$so_src" .c | tr '[:lower:]' '[:upper:]')
+        so_out="bin/LIB${so_stem}.SO"
+        echo "  Building shared library: $so_src -> $so_out"
+        "$CC" $LIBC_CFLAGS -c "$so_src" -o "${so_out}.o"
+        $LD -m elf_i386 -shared --hash-style=sysv -soname "LIB${so_stem}.SO" "${so_out}.o" -o "$so_out"
+        rm -f "${so_out}.o"
+        SO_BINS="$SO_BINS $so_out"
+    done
+fi
+
 # Compile any C userland applications in apps/*.c
 if [ -d apps ]; then
     for c_app in apps/*.c; do
@@ -335,7 +350,10 @@ if [ -d apps ]; then
         "$CC" $LIBC_CFLAGS -c "$c_app" -o "bin/${app_name}.o"
         if [ "$app_mode" = "dynamic" ]; then
             $LD -m elf_i386 -shared -Bsymbolic --hash-style=sysv --gc-sections \
-                -e _start -u _start "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
+                -e _start -u _start "bin/${app_name}.o" bin/libc.a $SO_BINS -o "bin/${app_upper}.BIN"
+        elif [ "$app_mode" = "high" ]; then
+            $LD -m elf_i386 -T toolchain/cykos-high.ld -e _start --gc-sections -u _start \
+                "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"
         else
             $LD -m elf_i386 -T src/user/static_elf.ld -e _start --gc-sections -u _start \
                 "bin/${app_name}.o" bin/libc.a -o "bin/${app_upper}.BIN"

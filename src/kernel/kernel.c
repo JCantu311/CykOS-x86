@@ -13,6 +13,8 @@
 #include "gdt.h"
 #include "exports.h"
 #include "ext2.h"
+#include "sched.h"
+#include "net.h"
 
 // Level 3 CykShell Entry Point (implemented in shell.rs)
 extern void shell_main(void);
@@ -92,6 +94,7 @@ void kernel_main(void) {
 
     // 1. Initialize CPU Interrupt Descriptor Table (Catches exceptions, prevents Triple Faults)
     idt_init();
+    sched_init();
 
     char msg_init[] = "CykOS Kernel Init (GDT + Paging + IDT + Syscalls [OK])\n";
     char msg_pass[] = "PASS\n";
@@ -161,6 +164,8 @@ void kernel_main(void) {
     } else {
         print_color_string("[Level 2] Warning: No Level 2 modules loaded.\n", VGA_RED);
     }
+
+    net_init();
 
     /* USB host discovery runs from the USB Level 2 module init hook. */
     /* The USB mass-storage backend now participates in FAT volume discovery. */

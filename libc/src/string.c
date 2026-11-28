@@ -159,6 +159,40 @@ char* strdup(const char* s) {
     return copy;
 }
 
+char* strndup(const char* s, size_t n) {
+    size_t len = strlen(s);
+    if (len > n) len = n;
+    char* copy = (char*)malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, s, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+size_t strcspn(const char* s, const char* reject) {
+    size_t count = 0;
+    for (; *s; s++) {
+        if (strchr(reject, *s)) break;
+        count++;
+    }
+    return count;
+}
+
+char* strtok_r(char* str, const char* delim, char** saveptr) {
+    if (str != NULL) *saveptr = str;
+    if (*saveptr == NULL) return NULL;
+
+    char* pos = *saveptr;
+    while (*pos && strchr(delim, *pos)) pos++;
+    if (*pos == '\0') { *saveptr = NULL; return NULL; }
+
+    char* start = pos;
+    while (*pos && !strchr(delim, *pos)) pos++;
+    if (*pos) { *pos = '\0'; *saveptr = pos + 1; }
+    else { *saveptr = NULL; }
+    return start;
+}
+
 static char* strtok_pos = NULL;
 
 char* strtok(char* str, const char* delim) {

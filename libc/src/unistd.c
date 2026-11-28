@@ -144,6 +144,10 @@ int fstat(int fd, struct stat* buf) {
     return 0;
 }
 
+int lstat(const char* path, struct stat* buf) {
+    return stat(path, buf);
+}
+
 uid_t getuid(void) { return (uid_t)__syscall0(SYS_GETUID); }
 uid_t geteuid(void) { return getuid(); }
 gid_t getgid(void) { return (gid_t)__syscall0(SYS_GETGID); }
@@ -202,10 +206,92 @@ unsigned int sleep(unsigned int seconds) {
     return 0;
 }
 
+int usleep(unsigned int usec) {
+    unsigned int sec = (usec + 999999u) / 1000000u;
+    if (usec > 0 && sec > 0) {
+        __syscall1(SYS_SLEEP, (int)sec);
+    }
+    return 0;
+}
+
+ssize_t readlink(const char* pathname, char* buf, size_t bufsiz) {
+    (void)pathname; (void)buf; (void)bufsiz;
+    errno = EINVAL;
+    return -1;
+}
+
+int symlink(const char* target, const char* linkpath) {
+    (void)target; (void)linkpath;
+    errno = ENOSYS;
+    return -1;
+}
+
+int link(const char* oldpath, const char* newpath) {
+    (void)oldpath; (void)newpath;
+    errno = ENOSYS;
+    return -1;
+}
+
 int isatty(int fd) {
     return (fd >= 0 && fd <= 2) ? 1 : 0;
 }
 
+#define SYS_FORK   2
+#define SYS_EXECVE 11
+#define SYS_DUP    41
+#define SYS_PIPE   42
+#define SYS_DUP2   63
+#define SYS_WAITPID 114
+
 pid_t getpid(void) {
     return (pid_t)__syscall0(SYS_GETPID);
+}
+
+void _exit(int status) {
+    __syscall1(SYS_EXIT, status);
+    for (;;) asm volatile("hlt");
+}
+
+pid_t fork(void) {
+    int ret = __syscall0(SYS_FORK);
+    if (ret < 0) { errno = EAGAIN; return -1; }
+    return (pid_t)ret;
+}
+
+int execve(const char* pathname, char* const argv[], char* const envp[]) {
+    int ret = __syscall3(SYS_EXECVE, (int)pathname, (int)argv, (int)envp);
+    if (ret < 0) { errno = ENOENT; return -1; }
+    return ret;
+}
+
+int execv(const char* pathname, char* const argv[]) {
+    return execve(pathname, argv, (void*)0);
+}
+
+int pipe(int pipefd[2]) {
+    int ret = __syscall1(SYS_PIPE, (int)pipefd);
+    if (ret < 0) { errno = EMFILE; return -1; }
+    return 0;
+}
+
+int dup(int oldfd) {
+    int ret = __syscall1(SYS_DUP, oldfd);
+    if (ret < 0) { errno = EBADF; return -1; }
+    return ret;
+}
+
+int dup2(int oldfd, int newfd) {
+    int ret = __syscall2(SYS_DUP2, oldfd, newfd);
+    if (ret < 0) { errno = EBADF; return -1; }
+    return ret;
+}
+
+pid_t waitpid(pid_t pid, int* status, int options) {
+    int ret = __syscall3(SYS_WAITPID, (int)pid, (int)status, options);
+    if (ret < 0) { errno = ECHILD; return -1; }
+    return (pid_t)ret;
+}
+
+pid_t wait(int* status) {
+    return waitpid(-1, status, 0);
 }

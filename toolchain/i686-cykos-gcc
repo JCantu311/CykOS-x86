@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Compiler wrapper for building native CykOS high-address binaries (Binutils, GCC, etc.)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYSROOT="${CYKOS_SYSROOT:-${SCRIPT_DIR}/sysroot}"
+
+if command -v i686-elf-gcc &>/dev/null; then
+    HOST_CC="i686-elf-gcc"
+elif command -v x86_64-linux-gnu-gcc &>/dev/null; then
+    HOST_CC="x86_64-linux-gnu-gcc"
+elif command -v x86_64-elf-gcc &>/dev/null; then
+    HOST_CC="x86_64-elf-gcc"
+elif command -v gcc &>/dev/null; then
+    HOST_ARCH="$(uname -m)"
+    if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "armv7l" ]]; then
+        echo "Error: Native 'gcc' on ${HOST_ARCH} outputs ARM code! Install gcc-x86-64-linux-gnu or i686-elf-gcc." >&2
+        exit 1
+    fi
+    HOST_CC="gcc"
+else
+    echo "Error: No x86 C cross-compiler found" >&2
+    exit 1
+fi
+
+ARGS=()
+COMPILE_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        -c|-S|-E|-M|-MM) COMPILE_ONLY=1 ;;
+    esac
+    ARGS+=("$arg")
+done
+
+COMMON_FLAGS=(
+    -m32
+    -ffreestanding
+    -fno-stack-protector
+    -fno-asynchronous-unwind-tables
+    -isystem "${SYSROOT}/usr/include"
+    -D__cykos__
+)
+
+if [[ "$COMPILE_ONLY" -eq 1 ]]; then
+    exec "$HOST_CC" "${COMMON_FLAGS[@]}" "${ARGS[@]}"
+else
+    exec "$HOST_CC" "${COMMON_FLAGS[@]}" \
+        -nostdlib \
+        -Wl,-m,elf_i386 \
+        -Wl,-T,"${SYSROOT}/usr/lib/cykos-high.ld" \
+        -Wl,-e,_start -Wl,-u,_start \
+        "${SYSROOT}/usr/lib/crt0.o" \
+        "${ARGS[@]}" \
+        "${SYSROOT}/usr/lib/libc.a" -lgcc
+fi

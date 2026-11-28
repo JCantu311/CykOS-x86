@@ -15,6 +15,7 @@ int accounts_create(const char* name, unsigned int uid, unsigned int gid, unsign
 int accounts_delete(const char* name);
 int accounts_set_flags(const char* name, unsigned int flags);
 int accounts_set_password(const char* name, const char* password);
+int accounts_has_password(const char* name);
 int accounts_authenticate(const char* name, const char* password);
 
 #endif

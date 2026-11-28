@@ -6,3 +6,5 @@ GFXDEMO static
 SYSDEMO static
 SOUNDTEST static
 LUA static
+DLTEST dynamic
+HIGHTEST high

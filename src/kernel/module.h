@@ -11,6 +11,7 @@
 #define MODULE_TYPE_MOUSE     0x03
 #define MODULE_TYPE_SOUND     0x04
 #define MODULE_TYPE_USB       0x05
+#define MODULE_TYPE_NET       0x06
 
 #ifndef MODULE_LOAD_ADDRESS
 #define MODULE_LOAD_ADDRESS   0
@@ -96,6 +97,7 @@ typedef struct {
 #define CYK_BITMAP_RGB332      2
 #define CYK_BITMAP_RGB24       3
 #define CYK_BITMAP_RGBA32      4
+#define CYK_BITMAP_INDEX8_OPAQUE 5
 
 typedef struct {
     unsigned int width;
@@ -128,5 +130,15 @@ typedef struct {
     int (*draw_bitmap_ex)(int x, int y, const cyk_bitmap_t* bitmap);
     int (*set_palette)(unsigned int first, unsigned int count, const unsigned char* rgb8);
 } cyk_display_driver_t;
+
+/* Level 2 Network Interface Controller (NIC) Driver Interface Table */
+typedef struct {
+    cyk_module_header_t header;
+    int (*send_frame)(const unsigned char* data, unsigned int len);
+    int (*receive_frame)(unsigned char* out_buf, unsigned int max_len);
+    void (*get_mac)(unsigned char out_mac[6]);
+    int (*link_up)(void);
+    char hardware_name[32];
+} cyk_net_driver_t;
 
 #endif // MODULE_H

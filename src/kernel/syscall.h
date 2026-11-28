@@ -5,16 +5,23 @@
 
 // CykOS System Call Numbers (Linux-compatible where applicable)
 #define SYS_EXIT          1   // Terminate current process / return to shell
+#define SYS_FORK          2   // POSIX fork()
 #define SYS_WAIT          7   // Reap the most recently exited foreground process
 #define SYS_READ          3   // Read from file descriptor or stdin (keyboard)
 #define SYS_WRITE         4   // Write to file descriptor or stdout (console)
 #define SYS_OPEN          5   // Open file on FAT16
 #define SYS_CLOSE         6   // Close file descriptor
 #define SYS_UNLINK        10  // POSIX unlink(path)
+#define SYS_EXECVE        11  // POSIX execve(path, argv, envp)
 #define SYS_CHDIR         12  // POSIX chdir(path)
 #define SYS_LSEEK         19  // POSIX lseek(fd, offset, whence)
 #define SYS_GETPID        20  // POSIX getpid()
+#define SYS_DUP           41  // POSIX dup(oldfd)
+#define SYS_PIPE          42  // POSIX pipe(pipefd[2])
 #define SYS_UMASK         60  // POSIX umask(mask)
+#define SYS_DUP2          63  // POSIX dup2(oldfd, newfd)
+#define SYS_FCNTL         55  // POSIX fcntl(fd, cmd, arg)
+#define SYS_WAITPID       114 // POSIX waitpid(pid, status, options)
 #define SYS_MKDIR         39  // POSIX mkdir(path, mode)
 #define SYS_RMDIR         40  // POSIX rmdir(path)
 #define SYS_BRK           45  // Dynamic memory expansion (heap management)
@@ -58,6 +65,12 @@
 #define SYS_VFS_READ_FILE 205 // Read a file by path into an application buffer
 #define SYS_VFS_WRITE_FILE 206 // Write a file by path from an application buffer
 #define SYS_TEXT_WRITE_CELL 207 // Write one text cell at (col,row), packed args
+#define SYS_DLOPEN        208 // Load ELF shared library into current process
+#define SYS_DLSYM         209 // Resolve symbol in loaded shared library
+#define SYS_DLCLOSE       210 // Close shared library handle
+#define SYS_MMAP          211 // Anonymous virtual memory mapping
+#define SYS_MUNMAP        212 // Unmap virtual memory range
+#define SYS_LISTDIR       213 // List directory entries into user buffer
 #define SYS_CHMOD         15
 #define SYS_CHOWN         182
 #define SYS_ACCESS        33
@@ -65,6 +78,7 @@
 #define SYS_GETGID        47
 #define SYS_SETUID        23
 #define SYS_SETGID        46
+#define SYS_YIELD         158 // POSIX sched_yield()
 
 // File descriptor constants
 #define FD_STDIN          0

@@ -2,6 +2,7 @@
 #include "ata.h"
 #include "cykastd.h"
 #include "paging.h"
+#include "heap.h"
 
 #define EXT2_MAGIC 0xEF53u
 #define EXT2_BLOCK_SIZE 1024u
@@ -63,6 +64,11 @@ static unsigned short g_ext2_indirect2[EXT2_BLOCK_SIZE / 2] __attribute__((align
 static unsigned short g_ext2_dir_block[EXT2_BLOCK_SIZE / 2];
 static unsigned short g_ext2_bitmap[EXT2_BLOCK_SIZE / 2];
 static unsigned short g_ext2_cd_block[2048 / 2] __attribute__((aligned(4)));
+
+#define EXT2_CACHE_SLOTS 64u
+static unsigned char* g_ext2_cache_data;
+static unsigned int g_ext2_cache_tag[EXT2_CACHE_SLOTS];
+static unsigned char g_ext2_cache_valid[EXT2_CACHE_SLOTS];
 
 int ext2_live_status(void) {
     if (!g_ext2.live_cd) return 0;
@@ -186,9 +192,19 @@ static int ext2_read_block(unsigned int block, void* out) {
         if (g_ext2.mounted) g_ext2.write_protected = 1;
         return -1;
     }
+    unsigned int slot = block & (EXT2_CACHE_SLOTS - 1u);
+    if (g_ext2_cache_data && g_ext2_cache_valid[slot] && g_ext2_cache_tag[slot] == block) {
+        memcpy(out, g_ext2_cache_data + slot * EXT2_BLOCK_SIZE, EXT2_BLOCK_SIZE);
+        return 0;
+    }
     if (ext2_read_sectors(block * 2u, 2, out) != 0) {
         if (g_ext2.mounted) g_ext2.write_protected = 1;
         return -1;
+    }
+    if (g_ext2_cache_data) {
+        memcpy(g_ext2_cache_data + slot * EXT2_BLOCK_SIZE, out, EXT2_BLOCK_SIZE);
+        g_ext2_cache_tag[slot] = block;
+        g_ext2_cache_valid[slot] = 1;
     }
     return 0;
 }
@@ -199,6 +215,7 @@ static int ext2_write_block(unsigned int block, const void* data) {
         g_ext2.write_protected = 1;
         return -1;
     }
+    unsigned int slot = block & (EXT2_CACHE_SLOTS - 1u);
     if (g_ext2.ramdisk) {
         if (block > (0xFFFFFFFFu - g_ext2.partition_lba) / 2u) {
             g_ext2.write_protected = 1;
@@ -217,6 +234,11 @@ static int ext2_write_block(unsigned int block, const void* data) {
             return -1;
         }
         memcpy((void*)(g_ext2.ramdisk_base + image_offset), data, EXT2_BLOCK_SIZE);
+        if (g_ext2_cache_data) {
+            memcpy(g_ext2_cache_data + slot * EXT2_BLOCK_SIZE, data, EXT2_BLOCK_SIZE);
+            g_ext2_cache_tag[slot] = block;
+            g_ext2_cache_valid[slot] = 1;
+        }
         return 0;
     }
     unsigned int lba = block * 2u;
@@ -227,7 +249,13 @@ static int ext2_write_block(unsigned int block, const void* data) {
     }
     if (ata_select_drive(0) != 0 || ata_write_sectors(g_ext2.partition_lba + lba, 2, (const unsigned short*)data) != 0) {
         g_ext2.write_protected = 1;
+        g_ext2_cache_valid[slot] = 0;
         return -1;
+    }
+    if (g_ext2_cache_data) {
+        memcpy(g_ext2_cache_data + slot * EXT2_BLOCK_SIZE, data, EXT2_BLOCK_SIZE);
+        g_ext2_cache_tag[slot] = block;
+        g_ext2_cache_valid[slot] = 1;
     }
     return 0;
 }
@@ -291,7 +319,7 @@ static int ext2_update_group_counts(unsigned int group, int block_delta, int ino
     return 0;
 }
 
-static int ext2_alloc_block(void) {
+static int ext2_alloc_block_raw(int zero_block) {
     for (unsigned int group = 0; group < g_ext2.groups_count; group++) {
         unsigned int first = g_ext2.first_data_block + group * g_ext2.blocks_per_group;
         unsigned int count = g_ext2.blocks_per_group;
@@ -306,13 +334,19 @@ static int ext2_alloc_block(void) {
                 if (ext2_write_block(g_ext2.block_bitmap[group], g_ext2_bitmap) != 0 ||
                     ext2_update_group_counts(group, -1, 0, 0) != 0 ||
                     ext2_update_super_counts(-1, 0) != 0) return -1;
-                memset(g_ext2_block, 0, EXT2_BLOCK_SIZE);
-                if (ext2_write_block(block, g_ext2_block) != 0) return -1;
+                if (zero_block) {
+                    memset(g_ext2_block, 0, EXT2_BLOCK_SIZE);
+                    if (ext2_write_block(block, g_ext2_block) != 0) return -1;
+                }
                 return (int)block;
             }
         }
     }
     return -1;
+}
+
+static int ext2_alloc_block(void) {
+    return ext2_alloc_block_raw(1);
 }
 
 static int ext2_alloc_inode(int is_dir) {
@@ -463,7 +497,7 @@ static int ext2_free_inode_blocks(const ext2_inode_t* inode) {
 static int ext2_ensure_data_block(ext2_inode_t* inode, unsigned int logical, unsigned int* physical) {
     if (logical < 12) {
         if (!inode->block[logical]) {
-            int allocated = ext2_alloc_block();
+            int allocated = ext2_alloc_block_raw(0);
             if (allocated < 0) return -1;
             inode->block[logical] = (unsigned int)allocated;
             inode->blocks += 2;
@@ -482,7 +516,7 @@ static int ext2_ensure_data_block(ext2_inode_t* inode, unsigned int logical, uns
         } else if (ext2_read_block(inode->block[12], g_ext2_indirect) != 0) return -1;
         unsigned int* table = (unsigned int*)g_ext2_indirect;
         if (!table[logical]) {
-            int allocated = ext2_alloc_block();
+            int allocated = ext2_alloc_block_raw(0);
             if (allocated < 0) return -1;
             table[logical] = (unsigned int)allocated;
             inode->blocks += 2;
@@ -515,7 +549,7 @@ static int ext2_ensure_data_block(ext2_inode_t* inode, unsigned int logical, uns
     unsigned int* bottom = (unsigned int*)g_ext2_indirect2;
     unsigned int bottom_index = logical % (EXT2_BLOCK_SIZE / 4);
     if (!bottom[bottom_index]) {
-        int allocated = ext2_alloc_block();
+        int allocated = ext2_alloc_block_raw(0);
         if (allocated < 0) return -1;
         bottom[bottom_index] = (unsigned int)allocated;
         inode->blocks += 2;
@@ -559,11 +593,27 @@ static int ext2_read_inode_at(const ext2_inode_t* inode, unsigned int offset, vo
         if (!physical) {
             /* ext2 sparse-file holes are valid logical blocks and read as zeroes. */
             memset(dst + done, 0, amount);
+            done += amount;
+        } else if (!g_ext2.ramdisk && !g_ext2.live_cd && in_block == 0 &&
+                   length - done >= EXT2_BLOCK_SIZE &&
+                   physical < g_ext2.blocks_count) {
+            unsigned int max_blocks = (length - done) / EXT2_BLOCK_SIZE;
+            if (max_blocks > 16u) max_blocks = 16u;
+            unsigned int run = 1u;
+            while (run < max_blocks &&
+                   physical + run < g_ext2.blocks_count &&
+                   ext2_data_block(inode, logical + run) == physical + run) {
+                run++;
+            }
+            if (ext2_read_sectors(physical * 2u, (unsigned char)(run * 2u), dst + done) != 0) {
+                return done ? (int)done : -1;
+            }
+            done += run * EXT2_BLOCK_SIZE;
         } else {
             if (ext2_read_block(physical, g_ext2_block) != 0) return done ? (int)done : -1;
             memcpy(dst + done, (unsigned char*)g_ext2_block + in_block, amount);
+            done += amount;
         }
-        done += amount;
     }
     return (int)done;
 }
@@ -808,7 +858,7 @@ static int ext2_rmdir(const char* path) {
     return ext2_store_inode(parent, &parent_inode);
 }
 
-static int ext2_write_file(const char* path, const void* data, unsigned int length) {
+static int ext2_write_file_inner(const char* path, const void* data, unsigned int length) {
     if (!g_ext2.mounted || g_ext2.write_protected || (!data && length)) return -1;
     unsigned int parent, number;
     unsigned short mode;
@@ -872,6 +922,19 @@ static int ext2_write_file(const char* path, const void* data, unsigned int leng
     return 0;
 }
 
+static int ext2_write_file(const char* path, const void* data, unsigned int length) {
+    if (!g_ext2.ramdisk && !g_ext2.live_cd) ata_set_defer_flush(1);
+    int res = ext2_write_file_inner(path, data, length);
+    if (!g_ext2.ramdisk && !g_ext2.live_cd) {
+        ata_set_defer_flush(0);
+        if (ata_flush_cache() != 0) {
+            g_ext2.write_protected = 1;
+            return -1;
+        }
+    }
+    return res;
+}
+
 static int ext2_walk(const char* path, unsigned int* inode_out, unsigned short* mode_out) {
     if (!g_ext2.mounted || !path || !inode_out) return -1;
     char full[256];
@@ -918,6 +981,10 @@ static int ext2_mount_at(unsigned int partition_lba, unsigned int partition_sect
     unsigned int ramdisk_base = g_ext2.ramdisk_base;
     unsigned int ramdisk_bytes = g_ext2.ramdisk_bytes;
     memset(&g_ext2, 0, sizeof(g_ext2));
+    memset(g_ext2_cache_valid, 0, sizeof(g_ext2_cache_valid));
+    if (!g_ext2_cache_data) {
+        g_ext2_cache_data = (unsigned char*)malloc(EXT2_CACHE_SLOTS * EXT2_BLOCK_SIZE);
+    }
     g_ext2.live_cd = live_cd;
     g_ext2.ramdisk = ramdisk;
     g_ext2.cd_drive = cd_drive;
