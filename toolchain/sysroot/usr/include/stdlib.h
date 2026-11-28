@@ -38,9 +38,14 @@ int   setenv(const char* name, const char* value, int overwrite);
 int   unsetenv(const char* name);
 int   putenv(char* string);
 int   mkstemp(char* tmpl);
+char* mktemp(char* tmpl);
 char* realpath(const char* path, char* resolved_path);
 
 void  qsort(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*));
 void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*));
+
+#define MB_CUR_MAX 1
+size_t mbstowcs(wchar_t* pwcs, const char* s, size_t n);
+size_t wcstombs(char* s, const wchar_t* pwcs, size_t n);
 
 #endif

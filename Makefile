@@ -142,11 +142,14 @@ ALL_IMAGE_DEPS := \
 	bin/SHELL.BIN $(DRIVER_BINS) $(SO_BINS) bin/MODULES.CFG \
 	$(RUST_APP_BINS) $(C_APP_BINS) bin/LUA.BIN bin/DOOM.BIN bin/DOOM1.WAD
 
-.PHONY: all clean rebuild
+.PHONY: all clean rebuild toolchain
 
 all: bin/images/cykos.img $(VDI_TARGET) $(VMDK_TARGET) $(VHD_TARGET) $(ISO_TARGET)
 	@echo "----------------------------------------"
 	@echo "Build successful! Disk images and, when available, cykos-installer.iso are in bin/images."
+
+toolchain: bin/libc.a bin/libc_objs/crt0.o
+	bash toolchain/build-binutils-gcc.sh
 
 clean:
 	@echo "Cleaning stale build artifacts..."
@@ -379,6 +382,10 @@ bin/DOOM1.WAD: third_party/universal-doom/DOOM1.WAD | bin/.dirs-ready
 
 # Disk image packaging
 bin/images/os_image.bin: $(ALL_IMAGE_DEPS) makeext2.py install_bios.py
+	@if [ ! -x toolchain/root/usr/bin/gcc ] || [ "$${CYKOS_BUILD_TOOLCHAIN:-0}" = "1" ]; then \
+		echo "Building native Binutils & GCC toolchain for CykOS..."; \
+		bash toolchain/build-binutils-gcc.sh; \
+	fi
 	python3 makeext2.py $@
 	python3 install_bios.py $@
 

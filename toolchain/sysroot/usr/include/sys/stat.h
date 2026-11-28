@@ -20,18 +20,24 @@ struct stat {
 };
 
 #define S_IFMT   00170000
+#define S_IFSOCK 0140000
 #define S_IFLNK  0120000
 #define S_IFREG  0100000
+#define S_IFBLK  0060000
 #define S_IFDIR  0040000
 #define S_IFCHR  0020000
+#define S_IFIFO  0010000
 #define S_ISUID  0004000
 #define S_ISGID  0002000
 #define S_ISVTX  0001000
 
-#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
-#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
-#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
-#define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
+#define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
+#define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
+#define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
+#define S_ISBLK(m)  (((m) & S_IFMT) == S_IFBLK)
+#define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
+#define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
+#define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
 
 #define S_IRWXU 00700
 #define S_IRUSR 00400
@@ -53,7 +59,10 @@ int lstat(const char* path, struct stat* buf);
 int fstat(int fd, struct stat* buf);
 int mkdir(const char* pathname, mode_t mode);
 int chmod(const char* path, mode_t mode);
+int fchmod(int fd, mode_t mode);
 int chown(const char* path, uid_t owner, gid_t group);
+int fchown(int fd, uid_t owner, gid_t group);
+mode_t umask(mode_t mask);
 int access(const char* path, int mode);
 
 #define F_OK 0

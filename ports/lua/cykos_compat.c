@@ -89,21 +89,6 @@ double strtod(const char* text, char** endptr) {
     return value;
 }
 
-int strcoll(const char* left, const char* right) {
-    return strcmp(left, right);
-}
-
-struct lconv* localeconv(void) {
-    static struct lconv locale = { .decimal_point = "." };
-    return &locale;
-}
-
-char* setlocale(int category, const char* locale) {
-    (void)category;
-    (void)locale;
-    return (char*)"C";
-}
-
 unsigned int cykos_lua_makeseed(void) {
     static unsigned int state = 0x9E3779B9u;
     state ^= (unsigned int)&state;

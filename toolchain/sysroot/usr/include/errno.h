@@ -24,9 +24,15 @@ extern int errno;
 #define EINVAL      22  /* Invalid argument */
 #define ENFILE      23  /* File table overflow */
 #define EMFILE      24  /* Too many open files */
+#define ENOTTY      25  /* Not a typewriter */
+#define ETXTBSY     26  /* Text file busy */
+#define EFBIG       27  /* File too large */
 #define ENOSPC      28  /* No space left on device */
 #define ESPIPE      29  /* Illegal seek */
 #define EROFS       30  /* Read-only file system */
+#define EMLINK      31  /* Too many links */
+#define EBUSY       16  /* Device or resource busy */
+#define EXDEV       18  /* Cross-device link */
 #define EDOM        33  /* Math argument out of domain of func */
 #define ERANGE      34  /* Math result not representable */
 #define ENOSYS      38  /* Function not implemented */

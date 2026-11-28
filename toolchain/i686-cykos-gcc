@@ -3,7 +3,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SYSROOT="${CYKOS_SYSROOT:-${SCRIPT_DIR}/sysroot}"
+if [[ -n "${CYKOS_SYSROOT:-}" ]]; then
+    SYSROOT="${CYKOS_SYSROOT}"
+elif [[ -d "${SCRIPT_DIR}/sysroot" ]]; then
+    SYSROOT="${SCRIPT_DIR}/sysroot"
+else
+    SYSROOT="$(cd "${SCRIPT_DIR}/.." && pwd)/sysroot"
+fi
 
 if command -v i686-elf-gcc &>/dev/null; then
     HOST_CC="i686-elf-gcc"
@@ -47,6 +53,7 @@ else
     exec "$HOST_CC" "${COMMON_FLAGS[@]}" \
         -nostdlib \
         -Wl,-m,elf_i386 \
+        -Wl,--allow-multiple-definition \
         -Wl,-T,"${SYSROOT}/usr/lib/cykos-high.ld" \
         -Wl,-e,_start -Wl,-u,_start \
         "${SYSROOT}/usr/lib/crt0.o" \

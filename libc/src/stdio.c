@@ -326,6 +326,10 @@ int fputc(int c, FILE* stream) {
     return EOF;
 }
 
+int putc(int c, FILE* stream) {
+    return fputc(c, stream);
+}
+
 int fputs(const char* s, FILE* stream) {
     size_t len = strlen(s);
     if (fwrite(s, 1, len, stream) == len) {

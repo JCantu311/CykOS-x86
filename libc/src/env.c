@@ -208,6 +208,22 @@ int mkstemp(char* tmpl) {
     return -1;
 }
 
+char* mktemp(char* tmpl) {
+    if (!tmpl) return (void*)0;
+    size_t len = strlen(tmpl);
+    if (len < 6 || strcmp(tmpl + len - 6, "XXXXXX") != 0) {
+        errno = EINVAL;
+        if (len > 0) tmpl[0] = '\0';
+        return tmpl;
+    }
+    unsigned int n = g_mkstemp_seq++;
+    for (int i = 5; i >= 0; i--) {
+        tmpl[len - 6 + (size_t)i] = (char)('0' + (n % 10u));
+        n /= 10u;
+    }
+    return tmpl;
+}
+
 char* realpath(const char* path, char* resolved_path) {
     if (!path || !path[0]) { errno = EINVAL; return (void*)0; }
     char* out = resolved_path ? resolved_path : (char*)malloc(256);

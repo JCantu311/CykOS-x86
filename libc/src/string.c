@@ -72,6 +72,10 @@ int strcmp(const char* s1, const char* s2) {
     return (unsigned char)*s1 - (unsigned char)*s2;
 }
 
+int strcoll(const char* s1, const char* s2) {
+    return strcmp(s1, s2);
+}
+
 char* strerror(int error_number) {
     switch (error_number) {
         case 0: return (char*)"Success";

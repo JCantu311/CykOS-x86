@@ -27,6 +27,7 @@
 #define SYS_SETGID    46
 #define SYS_CHMOD     15
 #define SYS_ACCESS    33
+#define SYS_UMASK     60
 #define SYS_CHOWN     182
 
 ssize_t read(int fd, void* buf, size_t count) {
@@ -171,6 +172,22 @@ int chmod(const char* path, mode_t mode) {
     return 0;
 }
 
+int fchmod(int fd, mode_t mode) {
+    (void)mode;
+    if (fd < 0) { errno = EBADF; return -1; }
+    return 0;
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+    (void)owner; (void)group;
+    if (fd < 0) { errno = EBADF; return -1; }
+    return 0;
+}
+
+mode_t umask(mode_t mask) {
+    return (mode_t)__syscall1(SYS_UMASK, (int)mask);
+}
+
 int chown(const char* path, uid_t owner, gid_t group) {
     int ret = __syscall3(SYS_CHOWN, (int)path, (int)owner, (int)group);
     if (ret < 0) { errno = EPERM; return -1; }
@@ -212,6 +229,15 @@ int usleep(unsigned int usec) {
         __syscall1(SYS_SLEEP, (int)sec);
     }
     return 0;
+}
+
+unsigned int alarm(unsigned int seconds) {
+    (void)seconds;
+    return 0;
+}
+
+int getpagesize(void) {
+    return 4096;
 }
 
 ssize_t readlink(const char* pathname, char* buf, size_t bufsiz) {
@@ -265,7 +291,82 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 }
 
 int execv(const char* pathname, char* const argv[]) {
-    return execve(pathname, argv, (void*)0);
+    return execve(pathname, argv, environ);
+}
+
+int execvp(const char* file, char* const argv[]) {
+    if (!file || !file[0]) { errno = ENOENT; return -1; }
+    if (strchr(file, '/')) {
+        return execve(file, argv, environ);
+    }
+    const char* path_env = getenv("PATH");
+    if (!path_env) path_env = "/USR/BIN:/BIN:/usr/bin:/bin";
+    char candidate[256];
+    const char* p = path_env;
+    while (*p) {
+        const char* colon = strchr(p, ':');
+        size_t dir_len = colon ? (size_t)(colon - p) : strlen(p);
+        size_t file_len = strlen(file);
+        if (dir_len > 0 && dir_len + 1 + file_len < sizeof(candidate)) {
+            memcpy(candidate, p, dir_len);
+            candidate[dir_len] = '/';
+            memcpy(candidate + dir_len + 1, file, file_len + 1);
+            execve(candidate, argv, environ);
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+int execl(const char* pathname, const char* arg, ...) {
+    char* argv[64];
+    va_list ap;
+    va_start(ap, arg);
+    int i = 0;
+    argv[i++] = (char*)arg;
+    while (i < 63 && (argv[i] = va_arg(ap, char*)) != NULL) i++;
+    argv[i] = NULL;
+    va_end(ap);
+    return execve(pathname, argv, environ);
+}
+
+int execlp(const char* file, const char* arg, ...) {
+    char* argv[64];
+    va_list ap;
+    va_start(ap, arg);
+    int i = 0;
+    argv[i++] = (char*)arg;
+    while (i < 63 && (argv[i] = va_arg(ap, char*)) != NULL) i++;
+    argv[i] = NULL;
+    va_end(ap);
+    return execvp(file, argv);
+}
+
+long pathconf(const char* path, int name) {
+    (void)path;
+    switch (name) {
+        case _PC_PATH_MAX: return 256;
+        case _PC_NAME_MAX: return 127;
+        case _PC_PIPE_BUF: return 4096;
+        default: return 256;
+    }
+}
+
+long fpathconf(int fd, int name) {
+    (void)fd;
+    return pathconf("/", name);
+}
+
+long sysconf(int name) {
+    switch (name) {
+        case _SC_PAGESIZE: return 4096;
+        case _SC_OPEN_MAX: return 32;
+        case _SC_CLK_TCK:  return 100;
+        case _SC_ARG_MAX:  return 16384;
+        default: return -1;
+    }
 }
 
 int pipe(int pipefd[2]) {

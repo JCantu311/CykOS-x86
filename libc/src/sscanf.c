@@ -3,12 +3,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-int sscanf(const char* input, const char* format, ...)
+int vsscanf(const char* input, const char* format, va_list ap)
 {
+    if (!input || !format) return EOF;
     const char* in = input;
     int assigned = 0;
     va_list args;
-    va_start(args, format);
+    va_copy(args, ap);
 
     while (*format) {
         if (isspace((unsigned char)*format)) {
@@ -91,4 +92,39 @@ int sscanf(const char* input, const char* format, ...)
 
     va_end(args);
     return assigned;
+}
+
+int sscanf(const char* input, const char* format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    int r = vsscanf(input, format, ap);
+    va_end(ap);
+    return r;
+}
+
+int vfscanf(FILE* stream, const char* format, va_list ap)
+{
+    if (!stream || !format) return EOF;
+    char line[512];
+    if (!fgets(line, sizeof(line), stream)) return EOF;
+    return vsscanf(line, format, ap);
+}
+
+int fscanf(FILE* stream, const char* format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    int r = vfscanf(stream, format, ap);
+    va_end(ap);
+    return r;
+}
+
+int scanf(const char* format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    int r = vfscanf(stdin, format, ap);
+    va_end(ap);
+    return r;
 }

@@ -447,6 +447,12 @@ if [ -d bin/DRIVERS ]; then
     done < bin/MODULES.CFG
 fi
 
+# 9b. Ensure native Binutils & GCC toolchain is built and staged for bundling
+if [ ! -x toolchain/root/usr/bin/gcc ] || [ "${CYKOS_BUILD_TOOLCHAIN:-0}" = "1" ]; then
+    echo "Building native Binutils & GCC toolchain for CykOS..."
+    bash toolchain/build-binutils-gcc.sh
+fi
+
 # 10. Build FAT16 BIOS boot + ext2 root partitions and package the OS tree
 mkdir -p bin/images
 if command -v python3 &> /dev/null; then

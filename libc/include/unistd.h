@@ -34,6 +34,8 @@ void* sbrk(intptr_t increment);
 int brk(void* addr);
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
+unsigned int alarm(unsigned int seconds);
+int getpagesize(void);
 int isatty(int fd);
 ssize_t readlink(const char* pathname, char* buf, size_t bufsiz);
 int symlink(const char* target, const char* linkpath);
@@ -43,6 +45,25 @@ void _exit(int status) __attribute__((noreturn));
 pid_t fork(void);
 int execve(const char* pathname, char* const argv[], char* const envp[]);
 int execv(const char* pathname, char* const argv[]);
+int execvp(const char* file, char* const argv[]);
+int execl(const char* pathname, const char* arg, ...);
+int execlp(const char* file, const char* arg, ...);
+long pathconf(const char* path, int name);
+long fpathconf(int fd, int name);
+long sysconf(int name);
+
+#define _PC_LINK_MAX           0
+#define _PC_MAX_CANON          1
+#define _PC_MAX_INPUT          2
+#define _PC_NAME_MAX           3
+#define _PC_PATH_MAX           4
+#define _PC_PIPE_BUF           5
+#define _SC_ARG_MAX            0
+#define _SC_CHILD_MAX          1
+#define _SC_CLK_TCK            2
+#define _SC_OPEN_MAX           4
+#define _SC_PAGESIZE           30
+#define _SC_PAGE_SIZE          _SC_PAGESIZE
 int pipe(int pipefd[2]);
 int dup(int oldfd);
 int dup2(int oldfd, int newfd);

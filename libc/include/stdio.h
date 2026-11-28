@@ -70,11 +70,20 @@ int   getc(FILE* stream);
 int   ungetc(int c, FILE* stream);
 char* fgets(char* s, int size, FILE* stream);
 int   fputc(int c, FILE* stream);
+int   putc(int c, FILE* stream);
 int   fputs(const char* s, FILE* stream);
 int   getchar(void);
 int   putchar(int c);
 int   puts(const char* s);
+#define getc_unlocked(s)    getc(s)
+#define putc_unlocked(c, s) putc(c, s)
+#define getchar_unlocked()  getchar()
+#define putchar_unlocked(c) putchar(c)
 int   sscanf(const char* input, const char* format, ...);
+int   vsscanf(const char* input, const char* format, va_list ap);
+int   fscanf(FILE* stream, const char* format, ...);
+int   vfscanf(FILE* stream, const char* format, va_list ap);
+int   scanf(const char* format, ...);
 
 int   printf(const char* format, ...);
 int   fprintf(FILE* stream, const char* format, ...);

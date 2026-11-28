@@ -8,3 +8,14 @@ tetris   /USR/BIN/CYKIS.BIN
 doom     /USR/BIN/DOOM.BIN
 lua      /USR/BIN/LUA.BIN
 hightest /USR/BIN/HIGHTEST.BIN
+gcc      /usr/bin/gcc
+cc       /usr/bin/gcc
+as       /usr/bin/as
+ld       /usr/bin/ld
+ar       /usr/bin/ar
+nm       /usr/bin/nm
+objdump  /usr/bin/objdump
+readelf  /usr/bin/readelf
+strip    /usr/bin/strip
+size     /usr/bin/size
+ranlib   /usr/bin/ranlib

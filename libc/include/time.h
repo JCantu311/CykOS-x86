@@ -30,6 +30,11 @@ time_t time(time_t* tloc);
 double difftime(time_t time1, time_t time0);
 struct tm* gmtime(const time_t* timep);
 struct tm* localtime(const time_t* timep);
+struct tm* gmtime_r(const time_t* timep, struct tm* result);
+struct tm* localtime_r(const time_t* timep, struct tm* result);
+char* asctime(const struct tm* tm);
+char* ctime(const time_t* timep);
 time_t mktime(struct tm* tm);
+size_t strftime(char* s, size_t max, const char* format, const struct tm* tm);
 
 #endif /* _TIME_H */
